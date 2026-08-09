@@ -96,26 +96,87 @@ func TestEvaluateAccountSchedulingThreshold_AnthropicIgnoresExpiredFiveHourWindo
 	require.True(t, wantUntil.Equal(*decision.Until))
 }
 
-func TestEvaluateAccountSchedulingThreshold_FractionalPlatformsKeepFractionSemantics(t *testing.T) {
+func TestEvaluateAccountSchedulingThreshold_OpenAIUsesDirectPercentSemantics(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-	openAIUntil := now.Add(24 * time.Hour)
-	openAIAccount := &Account{
-		Platform: PlatformOpenAI,
-		Extra: map[string]any{
-			"codex_5h_used_percent": 0.91,
-			"codex_5h_reset_at":     openAIUntil.Format(time.RFC3339),
+	now := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		window      string
+		usedPercent float64
+		threshold   int
+		shouldPause bool
+	}{
+		{
+			name:        "one_percent_is_not_full_usage",
+			window:      "7d",
+			usedPercent: 1.0,
+			threshold:   95,
+			shouldPause: false,
+		},
+		{
+			name:        "fractional_percent_stays_fractional",
+			window:      "5h",
+			usedPercent: 0.91,
+			threshold:   90,
+			shouldPause: false,
+		},
+		{
+			name:        "below_threshold",
+			window:      "7d",
+			usedPercent: 94.9,
+			threshold:   95,
+			shouldPause: false,
+		},
+		{
+			name:        "at_threshold",
+			window:      "5h",
+			usedPercent: 95.0,
+			threshold:   95,
+			shouldPause: true,
 		},
 	}
 
-	openAIDecision := EvaluateAccountSchedulingThreshold(openAIAccount, map[string]int{
-		PlatformOpenAI: 90,
-	}, now)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.True(t, openAIDecision.ShouldPause)
-	require.Equal(t, 91.0, openAIDecision.UsedPercent)
+			usedPercentKey := "codex_5h_used_percent"
+			resetAtKey := "codex_5h_reset_at"
+			if tc.window == "7d" {
+				usedPercentKey = "codex_7d_used_percent"
+				resetAtKey = "codex_7d_reset_at"
+			}
 
+			extra := map[string]any{
+				usedPercentKey: tc.usedPercent,
+				resetAtKey:     now.Add(24 * time.Hour).Format(time.RFC3339),
+			}
+			candidate := openAIThresholdCandidate(extra, tc.window)
+			require.NotNil(t, candidate)
+			require.Equal(t, tc.usedPercent, candidate.usedPercent)
+
+			decision := EvaluateAccountSchedulingThreshold(&Account{
+				Platform: PlatformOpenAI,
+				Extra:    extra,
+			}, map[string]int{
+				PlatformOpenAI: tc.threshold,
+			}, now)
+
+			require.Equal(t, tc.shouldPause, decision.ShouldPause)
+			if tc.shouldPause {
+				require.Equal(t, tc.usedPercent, decision.UsedPercent)
+				require.Equal(t, tc.window, decision.Window)
+			}
+		})
+	}
+}
+
+func TestEvaluateAccountSchedulingThreshold_AnthropicFractionalUtilizationKeepsFractionSemantics(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 	anthropicUntil := now.Add(5 * time.Hour)
 	anthropicAccount := &Account{
 		Platform:         PlatformAnthropic,
