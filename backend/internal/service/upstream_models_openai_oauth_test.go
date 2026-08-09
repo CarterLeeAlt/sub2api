@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestExtractOpenAICodexManifestModelIDs(t *testing.T) {
@@ -22,14 +23,63 @@ func TestExtractOpenAICodexManifestModelIDs(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSelectOpenAICodexImageMainModel(t *testing.T) {
+	t.Parallel()
+
+	supported := true
+	unsupported := false
+	priority1 := 1
+	priority2 := 2
+	priority9 := 9
+
+	t.Run("keeps legacy preference when available", func(t *testing.T) {
+		models := []openAICodexManifestModel{
+			{Slug: "gpt-5.6-sol", SupportedInAPI: &supported, Priority: &priority1, InputModalities: []string{"text", "image"}},
+			{Slug: openAIImagesResponsesMainModel, SupportedInAPI: &supported, Priority: &priority9, InputModalities: []string{"text", "image"}},
+		}
+		require.Equal(t, openAIImagesResponsesMainModel, selectOpenAICodexImageMainModel(models))
+	})
+
+	t.Run("falls back to highest priority image capable model", func(t *testing.T) {
+		models := []openAICodexManifestModel{
+			{Slug: "gpt-5.5", SupportedInAPI: &supported, Priority: &priority2, InputModalities: []string{"text", "image"}},
+			{Slug: "gpt-5.6-sol", SupportedInAPI: &supported, Priority: &priority1, InputModalities: []string{"text", "image"}},
+			{Slug: "gpt-5.6-text-only", SupportedInAPI: &supported, Priority: &priority1, InputModalities: []string{"text"}},
+			{Slug: "gpt-hidden", SupportedInAPI: &unsupported, Priority: &priority1, InputModalities: []string{"text", "image"}},
+		}
+		require.Equal(t, "gpt-5.6-sol", selectOpenAICodexImageMainModel(models))
+	})
+
+	t.Run("omitted modalities use Codex legacy image capable default", func(t *testing.T) {
+		models := []openAICodexManifestModel{{
+			Slug:           "gpt-legacy",
+			SupportedInAPI: &supported,
+			Priority:       &priority1,
+		}}
+		require.Equal(t, "gpt-legacy", selectOpenAICodexImageMainModel(models))
+	})
+
+	t.Run("image tool models are not selected as Responses orchestrators", func(t *testing.T) {
+		models := []openAICodexManifestModel{{
+			Slug:            "gpt-image-2",
+			SupportedInAPI:  &supported,
+			Priority:        &priority1,
+			InputModalities: []string{"text", "image"},
+		}}
+		require.Empty(t, selectOpenAICodexImageMainModel(models))
+	})
+}
+
 func TestOpenAICodexImageGenerationEligible(t *testing.T) {
 	t.Parallel()
 
 	supported := true
 	unsupported := false
-	imageCapableMainModel := openAICodexManifestModel{
-		Slug:            openAIImagesResponsesMainModel,
+	priority1 := 1
+	imageCapableModel := openAICodexManifestModel{
+		Slug:            "gpt-5.6-sol",
 		SupportedInAPI:  &supported,
+		Priority:        &priority1,
 		InputModalities: []string{"text", "image"},
 	}
 
@@ -40,49 +90,41 @@ func TestOpenAICodexImageGenerationEligible(t *testing.T) {
 		want   bool
 	}{
 		{
-			name:   "paid account with image capable main model",
+			name:   "paid account with any image capable Codex model",
 			plan:   "plus",
-			models: []openAICodexManifestModel{imageCapableMainModel},
+			models: []openAICodexManifestModel{imageCapableModel},
 			want:   true,
 		},
 		{
 			name:   "free account is not eligible",
 			plan:   "free",
-			models: []openAICodexManifestModel{imageCapableMainModel},
+			models: []openAICodexManifestModel{imageCapableModel},
 			want:   false,
 		},
 		{
 			name:   "unknown plan is conservative",
 			plan:   "",
-			models: []openAICodexManifestModel{imageCapableMainModel},
+			models: []openAICodexManifestModel{imageCapableModel},
 			want:   false,
 		},
 		{
-			name: "main model without image input is not eligible",
+			name: "text only catalog is not eligible",
 			plan: "pro",
 			models: []openAICodexManifestModel{{
-				Slug:            openAIImagesResponsesMainModel,
+				Slug:            "gpt-5.6-sol",
 				SupportedInAPI:  &supported,
+				Priority:        &priority1,
 				InputModalities: []string{"text"},
 			}},
 			want: false,
 		},
 		{
-			name: "unsupported main model is not eligible",
+			name: "unsupported image capable model is not eligible",
 			plan: "business",
 			models: []openAICodexManifestModel{{
-				Slug:            openAIImagesResponsesMainModel,
-				SupportedInAPI:  &unsupported,
-				InputModalities: []string{"text", "image"},
-			}},
-			want: false,
-		},
-		{
-			name: "another image capable model does not replace bridge main model",
-			plan: "team",
-			models: []openAICodexManifestModel{{
 				Slug:            "gpt-5.6-sol",
-				SupportedInAPI:  &supported,
+				SupportedInAPI:  &unsupported,
+				Priority:        &priority1,
 				InputModalities: []string{"text", "image"},
 			}},
 			want: false,
@@ -101,6 +143,20 @@ func TestOpenAICodexImageGenerationEligible(t *testing.T) {
 			require.Equal(t, tt.want, openAICodexImageGenerationEligible(account, tt.models))
 		})
 	}
+}
+
+func TestBuildOpenAIImagesResponsesRequestForMainModel(t *testing.T) {
+	t.Parallel()
+
+	body, err := buildOpenAIImagesResponsesRequestForMainModel(&OpenAIImagesRequest{
+		Endpoint: openAIImagesGenerationsEndpoint,
+		Prompt:   "draw a cat",
+		N:        1,
+	}, "gpt-5.6-sol", "gpt-image-2")
+	require.NoError(t, err)
+	require.Equal(t, "gpt-5.6-sol", gjson.GetBytes(body, "model").String())
+	require.Equal(t, "image_generation", gjson.GetBytes(body, "tools.0.type").String())
+	require.Equal(t, "gpt-image-2", gjson.GetBytes(body, "tools.0.model").String())
 }
 
 func TestFetchUpstreamSupportedModelsSupportsOpenAIOAuth(t *testing.T) {
@@ -144,10 +200,10 @@ func TestFetchUpstreamSupportedModelsSupportsOpenAIOAuth(t *testing.T) {
 	require.Equal(t, codexCLIVersion, gotClientVersion)
 }
 
-func TestFetchUpstreamSupportedModelsOpenAIOAuthAddsImageModelWhenEligible(t *testing.T) {
+func TestFetchUpstreamSupportedModelsOpenAIOAuthAddsImageModelWithoutLegacyMainModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.5","supported_in_api":true,"input_modalities":["text","image"]},{"slug":"gpt-5.4-mini","supported_in_api":true,"input_modalities":["text","image"]},{"slug":"gpt-image-2"},{"slug":"gpt-image-2"}]}`))
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.6-sol","supported_in_api":true,"priority":1,"input_modalities":["text","image"]},{"slug":"gpt-5.5","supported_in_api":true,"priority":2,"input_modalities":["text"]},{"slug":"gpt-image-2"},{"slug":"gpt-image-2"}]}`))
 	}))
 	defer server.Close()
 
@@ -167,13 +223,13 @@ func TestFetchUpstreamSupportedModelsOpenAIOAuthAddsImageModelWhenEligible(t *te
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"gpt-5.4-mini", "gpt-5.5", "gpt-image-2"}, models)
+	require.Equal(t, []string{"gpt-5.5", "gpt-5.6-sol", "gpt-image-2"}, models)
 }
 
 func TestFetchUpstreamSupportedModelsOpenAIOAuthDoesNotAddImageModelForFreePlan(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4-mini","supported_in_api":true,"input_modalities":["text","image"]},{"slug":"gpt-5.5","supported_in_api":true}]}`))
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.6-sol","supported_in_api":true,"priority":1,"input_modalities":["text","image"]},{"slug":"gpt-5.5","supported_in_api":true}]}`))
 	}))
 	defer server.Close()
 
@@ -193,7 +249,32 @@ func TestFetchUpstreamSupportedModelsOpenAIOAuthDoesNotAddImageModelForFreePlan(
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"gpt-5.4-mini", "gpt-5.5"}, models)
+	require.Equal(t, []string{"gpt-5.5", "gpt-5.6-sol"}, models)
+}
+
+func TestResolveOpenAIImagesResponsesMainModelUsesManifestPriority(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.5","supported_in_api":true,"priority":2,"input_modalities":["text","image"]},{"slug":"gpt-5.6-sol","supported_in_api":true,"priority":1,"input_modalities":["text","image"]}]}`))
+	}))
+	defer server.Close()
+
+	originalURL := chatgptCodexModelsURL
+	chatgptCodexModelsURL = server.URL
+	defer func() { chatgptCodexModelsURL = originalURL }()
+
+	svc := &OpenAIGatewayService{}
+	model, err := svc.resolveOpenAIImagesResponsesMainModel(context.Background(), &Account{
+		ID:       117,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":       "oauth-access-token",
+			"chatgpt_account_id": "acc-117",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "gpt-5.6-sol", model)
 }
 
 func TestFetchUpstreamSupportedModelsOpenAIOAuthRequiresAccessToken(t *testing.T) {
