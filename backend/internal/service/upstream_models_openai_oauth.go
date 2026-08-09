@@ -5,7 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
+
+const openAICodexImageGenerationModel = "gpt-image-2"
+
+type openAICodexManifestModel struct {
+	Slug            string   `json:"slug"`
+	SupportedInAPI  *bool    `json:"supported_in_api"`
+	InputModalities []string `json:"input_modalities"`
+}
 
 // fetchOpenAIOAuthUpstreamModels reuses the Codex models-manifest path used by
 // OpenAI OAuth traffic. OAuth accounts do not expose the public /v1/models
@@ -36,9 +46,14 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
 
-	models, err := extractOpenAICodexManifestModelIDs(manifest.Body)
+	manifestModels, err := parseOpenAICodexManifestModels(manifest.Body)
 	if err != nil {
 		return nil, newUpstreamModelSyncUpstreamError("OpenAI Codex model list response was not valid JSON", err)
+	}
+	models := openAICodexManifestModelIDs(manifestModels)
+	if openAICodexImageGenerationEligible(credentialAccount, manifestModels) {
+		models = append(models, openAICodexImageGenerationModel)
+		models = dedupeAndSortModelIDs(models)
 	}
 	if len(models) == 0 {
 		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
@@ -46,19 +61,93 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 	return models, nil
 }
 
-func extractOpenAICodexManifestModelIDs(body []byte) ([]string, error) {
+func parseOpenAICodexManifestModels(body []byte) ([]openAICodexManifestModel, error) {
 	var manifest struct {
-		Models []struct {
-			Slug string `json:"slug"`
-		} `json:"models"`
+		Models []openAICodexManifestModel `json:"models"`
 	}
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return nil, fmt.Errorf("parse OpenAI Codex model manifest: %w", err)
 	}
+	return manifest.Models, nil
+}
 
-	models := make([]string, 0, len(manifest.Models))
-	for _, model := range manifest.Models {
+func extractOpenAICodexManifestModelIDs(body []byte) ([]string, error) {
+	models, err := parseOpenAICodexManifestModels(body)
+	if err != nil {
+		return nil, err
+	}
+	return openAICodexManifestModelIDs(models), nil
+}
+
+func openAICodexManifestModelIDs(manifestModels []openAICodexManifestModel) []string {
+	models := make([]string, 0, len(manifestModels))
+	for _, model := range manifestModels {
+		if model.SupportedInAPI != nil && !*model.SupportedInAPI {
+			continue
+		}
 		models = append(models, model.Slug)
 	}
-	return dedupeAndSortModelIDs(models), nil
+	return dedupeAndSortModelIDs(models)
+}
+
+// openAICodexImageGenerationEligible mirrors the account/model gates used by
+// the official Codex client for exposing image generation, while remaining
+// conservative when the account plan cannot be determined. The provider/auth
+// gates are already established by a successful authenticated Codex manifest
+// request on an OpenAI OAuth account.
+func openAICodexImageGenerationEligible(account *Account, manifestModels []openAICodexManifestModel) bool {
+	if account == nil || !account.IsOpenAIOAuth() {
+		return false
+	}
+
+	planType := openAICodexPlanType(account)
+	if planType == "" || strings.EqualFold(planType, "free") {
+		return false
+	}
+
+	for _, model := range manifestModels {
+		if !strings.EqualFold(strings.TrimSpace(model.Slug), openAIImagesResponsesMainModel) {
+			continue
+		}
+		if model.SupportedInAPI != nil && !*model.SupportedInAPI {
+			return false
+		}
+		for _, modality := range model.InputModalities {
+			if strings.EqualFold(strings.TrimSpace(modality), "image") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func openAICodexPlanType(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	if planType := strings.TrimSpace(account.GetCredential("plan_type")); planType != "" {
+		return strings.ToLower(planType)
+	}
+
+	// Older/imported accounts may have the canonical plan claim in a JWT but no
+	// persisted plan_type field. Decode only as a best-effort metadata fallback;
+	// this is not used to authenticate the request.
+	for _, token := range []string{
+		account.GetCredential("id_token"),
+		account.GetCredential("access_token"),
+	} {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		claims, err := openai.DecodeIDToken(token)
+		if err != nil || claims.OpenAIAuth == nil {
+			continue
+		}
+		if planType := strings.TrimSpace(claims.OpenAIAuth.ChatGPTPlanType); planType != "" {
+			return strings.ToLower(planType)
+		}
+	}
+	return ""
 }
