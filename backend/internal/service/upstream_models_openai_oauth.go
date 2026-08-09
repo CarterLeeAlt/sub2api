@@ -14,6 +14,7 @@ const openAICodexImageGenerationModel = "gpt-image-2"
 type openAICodexManifestModel struct {
 	Slug            string   `json:"slug"`
 	SupportedInAPI  *bool    `json:"supported_in_api"`
+	Priority        *int     `json:"priority"`
 	InputModalities []string `json:"input_modalities"`
 }
 
@@ -90,6 +91,74 @@ func openAICodexManifestModelIDs(manifestModels []openAICodexManifestModel) []st
 	return dedupeAndSortModelIDs(models)
 }
 
+func openAICodexManifestModelSupportsImage(model openAICodexManifestModel) bool {
+	if model.SupportedInAPI != nil && !*model.SupportedInAPI {
+		return false
+	}
+	slug := strings.TrimSpace(model.Slug)
+	if slug == "" {
+		return false
+	}
+	lowerSlug := strings.ToLower(slug)
+	if strings.HasPrefix(lowerSlug, "gpt-image-") || lowerSlug == "chatgpt-image-latest" {
+		return false
+	}
+
+	// Codex treats an omitted input_modalities field as the legacy default of
+	// text + image. Mirror that behavior so older manifests are not falsely
+	// classified as text-only.
+	if len(model.InputModalities) == 0 {
+		return true
+	}
+	for _, modality := range model.InputModalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			return true
+		}
+	}
+	return false
+}
+
+// selectOpenAICodexImageMainModel chooses the Responses model that orchestrates
+// the image_generation tool. Keep the historical gpt-5.4-mini preference while
+// it is actually available, but do not make image capability depend on that
+// specific slug. Otherwise follow the Codex catalog priority order.
+func selectOpenAICodexImageMainModel(manifestModels []openAICodexManifestModel) string {
+	preferred := strings.TrimSpace(openAIImagesResponsesMainModel)
+	var (
+		selected            string
+		selectedPriority    int
+		selectedHasPriority bool
+	)
+
+	for _, model := range manifestModels {
+		if !openAICodexManifestModelSupportsImage(model) {
+			continue
+		}
+		slug := strings.TrimSpace(model.Slug)
+		if preferred != "" && strings.EqualFold(slug, preferred) {
+			return slug
+		}
+		if selected == "" {
+			selected = slug
+			if model.Priority != nil {
+				selectedPriority = *model.Priority
+				selectedHasPriority = true
+			}
+			continue
+		}
+		if model.Priority == nil {
+			continue
+		}
+		if !selectedHasPriority || *model.Priority < selectedPriority ||
+			(*model.Priority == selectedPriority && strings.ToLower(slug) < strings.ToLower(selected)) {
+			selected = slug
+			selectedPriority = *model.Priority
+			selectedHasPriority = true
+		}
+	}
+	return selected
+}
+
 // openAICodexImageGenerationEligible mirrors the account/model gates used by
 // the official Codex client for exposing image generation, while remaining
 // conservative when the account plan cannot be determined. The provider/auth
@@ -104,22 +173,7 @@ func openAICodexImageGenerationEligible(account *Account, manifestModels []openA
 	if planType == "" || strings.EqualFold(planType, "free") {
 		return false
 	}
-
-	for _, model := range manifestModels {
-		if !strings.EqualFold(strings.TrimSpace(model.Slug), openAIImagesResponsesMainModel) {
-			continue
-		}
-		if model.SupportedInAPI != nil && !*model.SupportedInAPI {
-			return false
-		}
-		for _, modality := range model.InputModalities {
-			if strings.EqualFold(strings.TrimSpace(modality), "image") {
-				return true
-			}
-		}
-		return false
-	}
-	return false
+	return selectOpenAICodexImageMainModel(manifestModels) != ""
 }
 
 func openAICodexPlanType(account *Account) string {
