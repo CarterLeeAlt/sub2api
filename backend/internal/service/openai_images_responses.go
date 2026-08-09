@@ -1695,7 +1695,11 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		return nil, err
 	}
 
-	responsesBody, err := buildOpenAIImagesResponsesRequest(parsed, requestModel)
+	responsesMainModel, err := s.resolveOpenAIImagesResponsesMainModel(upstreamCtx, account)
+	if err != nil {
+		return nil, err
+	}
+	responsesBody, err := buildOpenAIImagesResponsesRequestForMainModel(parsed, responsesMainModel, requestModel)
 	if err != nil {
 		return nil, err
 	}
