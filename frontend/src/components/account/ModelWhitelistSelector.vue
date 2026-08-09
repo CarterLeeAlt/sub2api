@@ -282,6 +282,32 @@ const fillRelated = () => {
   emit('update:modelValue', newModels)
 }
 
+const shouldReplaceWithOpenAIOAuthModels = async (): Promise<boolean> => {
+  if (props.syncCredentials) {
+    const platform = props.syncCredentials.platform.trim().toLowerCase()
+    const accountType = props.syncCredentials.type.trim().toLowerCase()
+    return platform === 'openai' && (accountType === 'oauth' || accountType === 'setup-token')
+  }
+
+  if (!props.accountId) return false
+  if (!normalizedPlatforms.value.some(platform => platform.toLowerCase() === 'openai')) return false
+
+  try {
+    const account = await accountsAPI.getById(props.accountId)
+    const platform = account.platform?.trim().toLowerCase()
+    const accountType = account.type?.trim().toLowerCase()
+    return platform === 'openai' && (accountType === 'oauth' || accountType === 'setup-token')
+  } catch {
+    // The upstream sync itself may still be usable; if account metadata cannot be
+    // refreshed, fall back to the historical non-destructive merge behavior.
+    return false
+  }
+}
+
+const normalizeSyncedModels = (models: string[]) => {
+  return Array.from(new Set(models.map(model => model.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b))
+}
+
 const syncUpstreamModels = async () => {
   if (isSyncingUpstream.value) return
   if (!props.accountId && !props.syncCredentials) return
@@ -297,9 +323,26 @@ const syncUpstreamModels = async () => {
       return
     }
 
-    const upstreamModels = result.models.map(model => model.trim()).filter(Boolean)
+    const upstreamModels = normalizeSyncedModels(result.models)
     if (upstreamModels.length === 0) {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
+      return
+    }
+
+    if (await shouldReplaceWithOpenAIOAuthModels()) {
+      const currentModels = normalizeSyncedModels(props.modelValue)
+      const currentSet = new Set(currentModels)
+      const addedCount = upstreamModels.filter(model => !currentSet.has(model)).length
+      const changed =
+        currentModels.length !== upstreamModels.length ||
+        currentModels.some((model, index) => model !== upstreamModels[index])
+
+      emit('update:modelValue', upstreamModels)
+      if (changed) {
+        appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
+      } else {
+        appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges', { count: upstreamModels.length }))
+      }
       return
     }
 
