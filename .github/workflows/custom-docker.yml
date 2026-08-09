@@ -15,7 +15,7 @@ env:
   IMAGE_NAME: carterleealt/sub2api
 
 jobs:
-  test-openai-scheduling-threshold:
+  test-custom-openai-regressions:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,12 +27,15 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: Run OpenAI scheduling threshold tests
+      - name: Run custom OpenAI regression tests
         working-directory: backend
-        run: go test -tags=unit ./internal/service -run 'TestEvaluateAccountSchedulingThreshold' -count=1
+        run: >-
+          go test -tags=unit ./internal/service
+          -run 'Test(EvaluateAccountSchedulingThreshold|ExtractOpenAICodexManifestModelIDs|SelectOpenAICodexImageMainModel|OpenAICodexImageGenerationEligible|BuildOpenAIImagesResponsesRequestForMainModel|FetchUpstreamSupportedModelsOpenAIOAuth.*|ResolveOpenAIImagesResponsesMainModelUsesManifestPriority)'
+          -count=1
 
   build-and-push:
-    needs: test-openai-scheduling-threshold
+    needs: test-custom-openai-regressions
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
