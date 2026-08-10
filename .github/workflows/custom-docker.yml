@@ -13,6 +13,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: carterleealt/sub2api
+  DOCKER_METADATA_SHORT_SHA_LENGTH: '7'
 
 jobs:
   test-custom-openai-regressions:
@@ -72,5 +73,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

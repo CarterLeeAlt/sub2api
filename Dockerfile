@@ -22,6 +22,7 @@ ARG NPM_CONFIG_REGISTRY=
 # it on the native host arch instead of under QEMU emulation for the target.
 FROM --platform=${BUILDPLATFORM} ${NODE_IMAGE} AS frontend-builder
 ARG NPM_CONFIG_REGISTRY
+ARG COMMIT=unknown
 
 WORKDIR /app/frontend
 
@@ -41,7 +42,7 @@ RUN --mount=type=cache,id=sub2api-pnpm-store,target=/root/.local/share/pnpm/stor
 # Copy only that subtree to keep the build dependency minimal.
 COPY frontend/ ./
 COPY docs/legal/ /app/docs/legal/
-RUN pnpm run build
+RUN VITE_BUILD_COMMIT="${COMMIT}" pnpm run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder
