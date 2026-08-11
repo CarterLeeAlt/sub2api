@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`10a4c6e3`](https://github.com/Wei-Shaw/sub2api/commit/10a4c6e3ad319587e817109c071259269855ec30) |
-| 上游合并提交 | [`57a1f29f`](https://github.com/CarterLeeAlt/sub2api/commit/57a1f29fc6c71168d6a3a092b4a4611c4e3c58ad) |
+| 当前已同步上游节点 | [`1e618dbc`](https://github.com/Wei-Shaw/sub2api/commit/1e618dbc299fc0a82e9a690bcf2d5843be817113) |
+| 最近一次上游合并提交 | [`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -95,6 +95,16 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 
 相关提交：[`3e72a088`](https://github.com/CarterLeeAlt/sub2api/commit/3e72a088264568f3d744a60e45be246a82a4e9dc)。
 
+### CUSTOM-005：内容审核缓存测试稳定化（`active`，仅测试）
+
+`TestContentModerationRuntimeSnapshotRefreshFailureKeepsStaleConfig` 不再使用 `1ns` TTL 假设两次相邻的 Windows 时钟读取必然不同。测试改为显式把运行时快照设为过期，保持“异步刷新失败时继续使用旧配置”的原始验证目标，同时消除与 Windows 时钟粒度相关的不稳定失败。
+
+主要文件：
+
+- `backend/internal/service/content_moderation_runtime_cache_test.go`
+
+相关提交：[`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf)。
+
 ## 已被上游吸收
 
 ### OpenAI 调度阈值百分比语义（`upstreamed`）
@@ -116,6 +126,20 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-08-11：同步至上游 `1e618dbc`
+
+合并提交：[`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf)。
+
+唯一的文本冲突仍位于 `backend/internal/service/account_scheduling_threshold_eval_test.go`。处理结果是：
+
+- 保留本地覆盖两个窗口和边界值的 OpenAI 表驱动百分比测试；
+- 保留本地 Anthropic 百分比语义测试，删除上游语义重复的两个简单测试；
+- 保留上游新增的 4 个陈旧、已重置和新鲜 Codex 快照测试；
+- 将本地测试调用适配到上游新增的 `now` 参数；
+- `backend/internal/service/openai_images_responses.go` 自动合并，确认本地动态主模型选择与上游流读取错误故障转移同时保留；
+- 稳定化内容审核缓存测试，消除 Windows `1ns` TTL 时序假设；
+- 定向 Go 测试、完整 `internal/service` 单元测试、39 项受影响前端测试、类型检查和生产构建均通过。
 
 ### 2026-08-10：同步至上游 `10a4c6e3`
 
@@ -151,11 +175,12 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 14 | [`99717aa1`](https://github.com/CarterLeeAlt/sub2api/commit/99717aa1d100cb94da8945589dc86e2be50a2a47) | CI | 镜像构建前增加 fork 定向回归门禁。 |
 | 15 | [`57a1f29f`](https://github.com/CarterLeeAlt/sub2api/commit/57a1f29fc6c71168d6a3a092b4a4611c4e3c58ad) | 上游同步 | 合并上游 `10a4c6e3`，按上述策略解决测试冲突。 |
 | 16 | [`3e72a088`](https://github.com/CarterLeeAlt/sub2api/commit/3e72a088264568f3d744a60e45be246a82a4e9dc) | 功能 | 镜像和主界面显示一致的 Git SHA 标识。 |
+| 17 | [`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf) | 上游同步 | 合并上游 `1e618dbc`，保留本地测试和动态生图逻辑，并稳定化 Windows 缓存测试。 |
 
 ## 下次同步检查清单
 
 1. 获取 `upstream/main`，先比较当前共同祖先和上游新增提交，不直接覆盖本地分支。
-2. 检查 `CUSTOM-001` 至 `CUSTOM-004` 的主要文件是否被上游修改。
+2. 检查 `CUSTOM-001` 至 `CUSTOM-005` 的主要文件是否被上游修改。
 3. 如果上游已经提供等价功能，比较行为和测试后将对应条目标记为 `upstreamed`；不要长期维护重复生产代码。
 4. 对测试冲突按覆盖行为判断，不按来源机械选择；保留覆盖更完整且与当前实现一致的测试。
 5. 不恢复 `retired` 的一次性工作流。
@@ -172,6 +197,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 - `backend/internal/service/openai_images_oauth_model_selection.go`
 - `backend/internal/service/openai_images_responses.go`
 - `backend/internal/service/account_scheduling_threshold_eval_test.go`
+- `backend/internal/service/content_moderation_runtime_cache_test.go`
 - `frontend/src/components/account/ModelWhitelistSelector.vue`
 - `.github/workflows/custom-docker.yml`
 - `Dockerfile`
