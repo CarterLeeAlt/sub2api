@@ -31,6 +31,7 @@ export default {
     refresh: 'Refresh',
     sourceMode: 'Source Build',
     sourceModeHint: 'Source build, use git pull to update',
+    manualUpdateHint: 'Pull and recreate your own Docker image manually on the host.',
     updateNow: 'Update Now',
     updating: 'Updating...',
     updateComplete: 'Update Complete',

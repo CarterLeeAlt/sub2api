@@ -85,6 +85,8 @@ type systemUpdateErrorEnvelope struct {
 
 func newSystemHandlerTestRouter(t *testing.T, updateSvc *systemHandlerUpdateServiceStub, repo *memoryIdempotencyRepoStub) *gin.Engine {
 	t.Helper()
+	automaticSystemUpdatesEnabled = true
+	t.Cleanup(func() { automaticSystemUpdatesEnabled = false })
 	gin.SetMode(gin.TestMode)
 	service.SetDefaultIdempotencyCoordinator(nil)
 	t.Cleanup(func() {
@@ -115,6 +117,34 @@ func requireSystemLockStatus(t *testing.T, repo *memoryIdempotencyRepoStub, want
 		}
 	}
 	t.Fatalf("system lock status %q not found in records: %#v", wantStatus, repo.data)
+}
+
+func TestSystemHandlerAutomaticUpdateAndRollbackAreDisabled(t *testing.T) {
+	automaticSystemUpdatesEnabled = false
+	updateSvc := &systemHandlerUpdateServiceStub{}
+	repo := newMemoryIdempotencyRepoStub()
+	router := newSystemHandlerTestRouter(t, updateSvc, repo)
+	automaticSystemUpdatesEnabled = false
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/admin/system/update"},
+		{http.MethodPost, "/api/v1/admin/system/rollback"},
+		{http.MethodGet, "/api/v1/admin/system/rollback-versions"},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Idempotency-Key", "disabled-"+tc.path)
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusForbidden, rec.Code, tc.path)
+	}
+
+	require.Zero(t, updateSvc.performCall)
+	require.Zero(t, updateSvc.rollbackCall)
+	require.Zero(t, updateSvc.rollbackToCall)
+	require.Zero(t, updateSvc.rollbackVersionsCall)
 }
 
 func TestSystemHandlerPerformUpdateAlreadyUpToDateReturnsOK(t *testing.T) {
