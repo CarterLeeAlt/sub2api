@@ -46,7 +46,7 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 	}
 
 	if shouldRefreshOpenAICodexSnapshot(&Account{}, usage, now) {
-		t.Fatal("expected complete non-rate-limited usage to skip codex snapshot refresh")
+		t.Fatal("non-OpenAI account should not refresh Codex usage")
 	}
 
 	if !shouldRefreshOpenAICodexSnapshot(&Account{}, &UsageInfo{FiveHour: nil, SevenDay: &UsageProgress{}}, now) {
@@ -58,11 +58,10 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra: map[string]any{
-			"openai_oauth_responses_websockets_v2_enabled": true,
-			"codex_usage_updated_at":                       staleAt,
+			codexWhamUsageUpdatedAtKey: staleAt,
 		},
 	}, usage, now) {
-		t.Fatal("expected stale ws snapshot to trigger refresh")
+		t.Fatal("expected stale wham snapshot to trigger refresh")
 	}
 }
 
@@ -80,13 +79,13 @@ func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {
 	freshAt := now.Add(-time.Minute).Format(time.RFC3339)
 	parentID := int64(7001)
 
-	// 影子无 WSv2,但首刷后窗口已存在;过期 codex_usage_updated_at 必须触发再刷新。
+	// 影子无 WSv2,但首刷后窗口已存在;过期 wham 时间戳必须触发再刷新。
 	shadowStale := &Account{
 		Platform:        PlatformOpenAI,
 		Type:            AccountTypeOAuth,
 		ParentAccountID: &parentID,
 		QuotaDimension:  QuotaDimensionSpark,
-		Extra:           map[string]any{"codex_usage_updated_at": staleAt},
+		Extra:           map[string]any{codexWhamUsageUpdatedAtKey: staleAt},
 	}
 	if !shouldRefreshOpenAICodexSnapshot(shadowStale, usage, now) {
 		t.Fatal("expected stale spark shadow (no WSv2) to trigger refresh")
@@ -98,20 +97,43 @@ func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {
 		Type:            AccountTypeOAuth,
 		ParentAccountID: &parentID,
 		QuotaDimension:  QuotaDimensionSpark,
-		Extra:           map[string]any{"codex_usage_updated_at": freshAt},
+		Extra:           map[string]any{codexWhamUsageUpdatedAtKey: freshAt},
 	}
 	if shouldRefreshOpenAICodexSnapshot(shadowFresh, usage, now) {
 		t.Fatal("expected fresh spark shadow to skip refresh (TTL not elapsed)")
 	}
 
-	// 反向对照:普通账号无 WSv2 + 过期时间戳→仍不刷(WSv2 门控普通账号的 probe 刷新)。
+	// 反向对照:普通账号也由 /wham/usage 判定窗口，不再受 WSv2 开关门控。
 	normalNoWS := &Account{
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
-		Extra:    map[string]any{"codex_usage_updated_at": staleAt},
+		Extra:    map[string]any{codexWhamUsageUpdatedAtKey: staleAt},
 	}
-	if shouldRefreshOpenAICodexSnapshot(normalNoWS, usage, now) {
-		t.Fatal("expected non-WSv2 normal account to skip codex probe refresh")
+	if !shouldRefreshOpenAICodexSnapshot(normalNoWS, usage, now) {
+		t.Fatal("expected stale non-WSv2 account to refresh authoritative wham usage")
+	}
+}
+
+func TestApplyExtraToUsageHidesAuthoritativelyAbsentWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 13, 4, 0, 0, 0, time.UTC)
+	usage := &UsageInfo{
+		FiveHour: &UsageProgress{Utilization: 99},
+		SevenDay: &UsageProgress{Utilization: 99},
+	}
+	extra := map[string]any{
+		codexWham5hWindowPresentKey: false,
+		codexWham7dWindowPresentKey: true,
+		"codex_5h_used_percent":     42.0, // stale pre-wham snapshot
+		"codex_7d_used_percent":     92.0,
+	}
+
+	applyExtraToUsage(usage, extra, now)
+	if usage.FiveHour != nil {
+		t.Fatalf("authoritatively absent 5h window remained visible: %#v", usage.FiveHour)
+	}
+	if usage.SevenDay == nil || usage.SevenDay.Utilization != 92 {
+		t.Fatalf("present 7d window was not rebuilt: %#v", usage.SevenDay)
 	}
 }
 

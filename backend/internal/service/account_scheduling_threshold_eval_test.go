@@ -38,6 +38,27 @@ func TestEvaluateAccountSchedulingThreshold_OpenAIChoosesLatestResetWindow(t *te
 	require.True(t, wantUntil.Equal(*decision.Until))
 }
 
+func TestEvaluateAccountSchedulingThreshold_OpenAIIgnoresAuthoritativelyAbsent5h(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra: map[string]any{
+			codexWham5hWindowPresentKey: false,
+			codexWham7dWindowPresentKey: true,
+			"codex_5h_used_percent":     100.0,
+			"codex_5h_reset_at":         now.Add(time.Hour).Format(time.RFC3339),
+			"codex_7d_used_percent":     10.0,
+			"codex_7d_reset_at":         now.Add(6 * 24 * time.Hour).Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey:  now.Format(time.RFC3339),
+		},
+	}
+
+	decision := EvaluateAccountSchedulingThreshold(account, map[string]int{PlatformOpenAI: 95}, now)
+	require.False(t, decision.ShouldPause, "stale 5h snapshot must not pause an account after /wham/usage says 5h is absent")
+}
+
 func TestEvaluateAccountSchedulingThreshold_OpenAIIgnoresMismatchedCodexSnapshotIdentity(t *testing.T) {
 	t.Parallel()
 

@@ -143,6 +143,17 @@ func NewOpenAIQuotaService(
 // OAuth account. Returns infraerrors so the handler layer can map them to
 // stable error codes / HTTP statuses.
 func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
+	return s.queryUsage(ctx, accountID, true)
+}
+
+// QueryUsageWindows fetches the authoritative Codex usage windows without the
+// additional reset-credit request. Account usage refreshes call this lighter
+// variant because they only need window presence and utilization.
+func (s *OpenAIQuotaService) QueryUsageWindows(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
+	return s.queryUsage(ctx, accountID, false)
+}
+
+func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, includeResetCreditDetails bool) (*OpenAIQuotaUsage, error) {
 	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -188,6 +199,9 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 	}
 
 	payload.FetchedAt = time.Now().Unix()
+	if !includeResetCreditDetails {
+		return &payload, nil
+	}
 	details := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
 	if details != nil {
 		hasDetailCount := details.AvailableCount != nil
@@ -566,13 +580,43 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 		}
 	}
 	if spark == nil {
+		// A successful /wham/usage response without codex_bengalfox is
+		// authoritative absence for a Spark shadow.
+		return buildCodexWhamRateLimitExtraUpdates(nil, now)
+	}
+	return buildCodexWhamRateLimitExtraUpdates(spark, now)
+}
+
+// buildCodexWhamWindowExtraUpdates maps a successful /wham/usage response to
+// canonical 5h/7d fields and explicit presence markers. A successful response
+// with a null window is authoritative absence; request failures never call this
+// helper and therefore preserve the previous state.
+func buildCodexWhamWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time, spark bool) map[string]any {
+	if usage == nil {
 		return nil
+	}
+	if spark {
+		return buildCodexSparkWindowExtraUpdates(usage, now)
+	}
+	return buildCodexWhamRateLimitExtraUpdates(usage.RateLimit, now)
+}
+
+func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Time) map[string]any {
+	updates := map[string]any{
+		codexWham5hWindowPresentKey: false,
+		codexWham7dWindowPresentKey: false,
+		codexWhamUsageUpdatedAtKey:  now.Format(time.RFC3339),
+	}
+	if rateLimit == nil {
+		clearAbsentCodexWindowExtra(updates, "5h")
+		clearAbsentCodexWindowExtra(updates, "7d")
+		return updates
 	}
 
 	// Reuse OpenAICodexUsageSnapshot / Normalize to map primary/secondary windows
 	// to canonical 5h/7d buckets (same logic as probeOpenAICodexSnapshot).
 	snap := &OpenAICodexUsageSnapshot{}
-	if w := spark.PrimaryWindow; w != nil {
+	if w := rateLimit.PrimaryWindow; w != nil {
 		p := w.UsedPercent
 		snap.PrimaryUsedPercent = &p
 		ra := int(w.ResetAfterSeconds)
@@ -580,7 +624,7 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 		wm := int(w.LimitWindowSeconds / 60)
 		snap.PrimaryWindowMinutes = &wm
 	}
-	if w := spark.SecondaryWindow; w != nil {
+	if w := rateLimit.SecondaryWindow; w != nil {
 		p := w.UsedPercent
 		snap.SecondaryUsedPercent = &p
 		ra := int(w.ResetAfterSeconds)
@@ -591,11 +635,13 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 
 	normalized := snap.Normalize()
 	if normalized == nil {
-		return nil
+		clearAbsentCodexWindowExtra(updates, "5h")
+		clearAbsentCodexWindowExtra(updates, "7d")
+		return updates
 	}
 
-	updates := make(map[string]any)
 	if normalized.Used5hPercent != nil {
+		updates[codexWham5hWindowPresentKey] = true
 		updates["codex_5h_used_percent"] = *normalized.Used5hPercent
 	}
 	if normalized.Reset5hSeconds != nil {
@@ -605,6 +651,7 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 		updates["codex_5h_window_minutes"] = *normalized.Window5hMinutes
 	}
 	if normalized.Used7dPercent != nil {
+		updates[codexWham7dWindowPresentKey] = true
 		updates["codex_7d_used_percent"] = *normalized.Used7dPercent
 	}
 	if normalized.Reset7dSeconds != nil {
@@ -619,11 +666,21 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 	if r := codexResetAtRFC3339(now, normalized.Reset7dSeconds); r != nil {
 		updates["codex_7d_reset_at"] = *r
 	}
-	if len(updates) == 0 {
-		return nil
+	if present, _ := updates[codexWham5hWindowPresentKey].(bool); !present {
+		clearAbsentCodexWindowExtra(updates, "5h")
+	}
+	if present, _ := updates[codexWham7dWindowPresentKey].(bool); !present {
+		clearAbsentCodexWindowExtra(updates, "7d")
 	}
 	updates["codex_usage_updated_at"] = now.Format(time.RFC3339)
 	return updates
+}
+
+func clearAbsentCodexWindowExtra(updates map[string]any, window string) {
+	prefix := "codex_" + window + "_"
+	for _, suffix := range []string{"used_percent", "reset_after_seconds", "window_minutes", "reset_at"} {
+		updates[prefix+suffix] = nil
+	}
 }
 
 // mapUpstreamStatus collapses upstream HTTP statuses into a stable set we
