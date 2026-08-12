@@ -49,20 +49,20 @@ export default {
         }
       },
       fontFamily: {
-        sans: [
-          'system-ui',
-          '-apple-system',
-          'BlinkMacSystemFont',
-          'Segoe UI',
-          'Roboto',
-          'Helvetica Neue',
-          'Arial',
-          'PingFang SC',
-          'Hiragino Sans GB',
-          'Microsoft YaHei',
-          'sans-serif'
-        ],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace']
+        sans: ['Inter', 'Noto Sans SC', 'sans-serif'],
+        mono: ['Inter', 'Noto Sans SC', 'sans-serif']
+      },
+      // Keep the existing semantic utility names while emitting only the two bundled weights.
+      fontWeight: {
+        thin: '400',
+        extralight: '400',
+        light: '400',
+        normal: '400',
+        medium: '600',
+        semibold: '600',
+        bold: '600',
+        extrabold: '600',
+        black: '600'
       },
       boxShadow: {
         glass: '0 8px 32px rgba(0, 0, 0, 0.08)',
