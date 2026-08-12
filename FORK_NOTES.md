@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`1e618dbc`](https://github.com/Wei-Shaw/sub2api/commit/1e618dbc299fc0a82e9a690bcf2d5843be817113) |
-| 最近一次上游合并提交 | [`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf) |
+| 当前已同步上游节点 | [`5935e674`](https://github.com/Wei-Shaw/sub2api/commit/5935e674a84341c3536e27e6a968384f67d9062b) |
+| 最近一次上游合并提交 | [`810eef47`](https://github.com/CarterLeeAlt/sub2api/commit/810eef477fee4303645b8d04eda21785dd919ed5) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -127,6 +127,19 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已知上游合并处理
 
+### 2026-08-12：同步至上游 `5935e674`
+
+合并提交：[`810eef47`](https://github.com/CarterLeeAlt/sub2api/commit/810eef477fee4303645b8d04eda21785dd919ed5)。
+
+本次上游改动与 fork 定制路径没有文本冲突，直接合并后按语义复核：
+
+- 接受上游 Codex 指纹收敛功能，并保持未设置或非法配置时默认使用 `session`；只有显式配置 `off` 才关闭；
+- 保留 `CUSTOM-001` 的 OAuth manifest 模型同步及 `CUSTOM-002` 的动态生图主模型选择，现有 fork 测试未被上游重复测试替换；
+- 确认常规 Codex 转发会共享同一组指纹 ID 改写请求体和请求头；manifest 获取与自定义 `/v1/images` 路径继续使用各自原有流程；
+- 同时合入 Responses HTTP/WS v2 可见 TTFT 修复、HTML 403 免惩罚故障转移、嵌套 usage 解析、`service_tier` 计费和版本 `v0.1.175`；
+- 修正指纹代码中把 `off` 描述为默认行为的过时注释，使其与实际默认 `session` 一致；
+- Codex/OpenAI 定向 Go 测试、完整 `internal/service` 单元测试、8 个受影响前端测试文件共 114 项测试、类型检查和生产构建均通过。
+
 ### 2026-08-11：同步至上游 `1e618dbc`
 
 合并提交：[`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf)。
@@ -176,6 +189,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 15 | [`57a1f29f`](https://github.com/CarterLeeAlt/sub2api/commit/57a1f29fc6c71168d6a3a092b4a4611c4e3c58ad) | 上游同步 | 合并上游 `10a4c6e3`，按上述策略解决测试冲突。 |
 | 16 | [`3e72a088`](https://github.com/CarterLeeAlt/sub2api/commit/3e72a088264568f3d744a60e45be246a82a4e9dc) | 功能 | 镜像和主界面显示一致的 Git SHA 标识。 |
 | 17 | [`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf) | 上游同步 | 合并上游 `1e618dbc`，保留本地测试和动态生图逻辑，并稳定化 Windows 缓存测试。 |
+| 18 | [`810eef47`](https://github.com/CarterLeeAlt/sub2api/commit/810eef477fee4303645b8d04eda21785dd919ed5) | 上游同步 | 合并上游 `5935e674`，接受 Codex 指纹默认 `session`，保留 fork 的 OAuth 模型同步、动态生图逻辑与测试。 |
 
 ## 下次同步检查清单
 
