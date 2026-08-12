@@ -1104,9 +1104,9 @@ function handleToolbarRefresh() {
           </div>
 
           <!-- 2) Realtime Traffic -->
-          <div class="flex h-full flex-col justify-center py-2">
-            <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <div class="flex items-center gap-2">
+          <div class="flex h-full flex-col justify-center">
+            <div class="mb-4 flex flex-col items-center gap-2">
+              <div class="flex items-center justify-center gap-2">
                 <div class="relative flex h-3 w-3 shrink-0">
                   <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75"></span>
                   <span class="relative inline-flex h-3 w-3 rounded-full bg-blue-500"></span>
@@ -1116,7 +1116,7 @@ function handleToolbarRefresh() {
               </div>
 
               <!-- Time Window Selector -->
-              <div class="flex flex-wrap gap-1">
+              <div class="flex flex-wrap justify-center gap-1">
                 <button
                   v-for="window in availableRealtimeWindows"
                   :key="window"
@@ -1181,28 +1181,6 @@ function handleToolbarRefresh() {
                 </div>
               </div>
 
-              <!-- Animated Pulse Line (Heart Beat Animation) -->
-              <div class="h-8 w-full overflow-hidden opacity-50">
-                <svg class="h-full w-full" viewBox="0 0 280 32" preserveAspectRatio="none">
-                  <path
-                    d="M0 16 Q 20 16, 40 16 T 80 16 T 120 10 T 160 22 T 200 16 T 240 16 T 280 16"
-                    fill="none"
-                    stroke="#3b82f6"
-                    stroke-width="2"
-                    vector-effect="non-scaling-stroke"
-                  >
-                    <animate
-                      attributeName="d"
-                      dur="2s"
-                      repeatCount="indefinite"
-                      values="M0 16 Q 20 16, 40 16 T 80 16 T 120 10 T 160 22 T 200 16 T 240 16 T 280 16;
-                              M0 16 Q 20 16, 40 16 T 80 16 T 120 16 T 160 16 T 200 10 T 240 22 T 280 16;
-                              M0 16 Q 20 16, 40 16 T 80 16 T 120 16 T 160 16 T 200 16 T 240 16 T 280 16"
-                      keyTimes="0;0.5;1"
-                    />
-                  </path>
-                </svg>
-              </div>
             </div>
           </div>
         </div>
