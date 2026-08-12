@@ -238,6 +238,12 @@ func openAIThresholdCandidate(extra map[string]any, window string, now time.Time
 	default:
 		return nil
 	}
+	// A successful /wham/usage snapshot can explicitly establish that a
+	// window does not exist. Do not let a stale legacy codex_* percentage keep
+	// driving scheduling decisions after that authoritative observation.
+	if present, known := codexWhamWindowPresence(extra, window); known && !present {
+		return nil
+	}
 
 	usedPercent, ok := extra[usedPercentKey]
 	if !ok {

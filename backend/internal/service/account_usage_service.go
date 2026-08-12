@@ -116,6 +116,12 @@ const (
 	openAICodexProbeVersion = codexCLIVersion // 与网关出站身份同源，避免两处硬编码版本各自漂移
 )
 
+const (
+	codexWham5hWindowPresentKey = "codex_wham_5h_window_present"
+	codexWham7dWindowPresentKey = "codex_wham_7d_window_present"
+	codexWhamUsageUpdatedAtKey  = "codex_wham_usage_updated_at"
+)
+
 // UsageCache 封装账户使用量相关的缓存
 type UsageCache struct {
 	apiCache          sync.Map           // accountID -> *apiUsageCache
@@ -712,32 +718,36 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 
 	applyExtraToUsage(usage, account.Extra, now)
 
-	if (force || shouldRefreshOpenAICodexSnapshot(account, usage, now)) && s.shouldProbeOpenAICodexSnapshot(account.ID, now, force) {
-		if account.IsShadow() {
-			// Spark shadow accounts fetch usage from /wham/usage (bengalfox channel)
-			// via the shared OpenAIQuotaService, which resolves credentials from the
-			// parent account.  The result is written to the shadow row's own codex_*
-			// Extra keys and immediately reflected in the returned UsageInfo.
-			if s.openAIQuotaService != nil {
-				if quotaUsage, err := s.openAIQuotaService.QueryUsage(ctx, account.ID); err == nil {
-					if updates := buildCodexSparkWindowExtraUpdates(quotaUsage, now); len(updates) > 0 {
-						mergeAccountExtra(account, updates)
-						s.persistOpenAICodexProbeSnapshot(account.ID, updates)
-						if usage.UpdatedAt == nil {
-							usage.UpdatedAt = &now
-						}
-						applyExtraToUsage(usage, account.Extra, now)
-					}
-				}
+	shouldRefreshSnapshot := force || shouldRefreshOpenAICodexSnapshot(account, usage, now)
+	// Older lightweight deployments may not wire OpenAIQuotaService. Preserve
+	// their existing WS-header behavior instead of attempting an unauthenticated
+	// /responses probe for every account; production wiring uses /wham/usage.
+	if s.openAIQuotaService == nil && !account.IsShadow() && !account.IsOpenAIResponsesWebSocketV2Enabled() && !force {
+		shouldRefreshSnapshot = false
+	}
+	if shouldRefreshSnapshot && s.shouldProbeOpenAICodexSnapshot(account.ID, now, force) {
+		var updates map[string]any
+		if s.openAIQuotaService != nil {
+			if quotaUsage, err := s.openAIQuotaService.QueryUsageWindows(ctx, account.ID); err == nil {
+				updates = buildCodexWhamWindowExtraUpdates(quotaUsage, now, account.IsShadow())
 			}
-		} else {
-			if updates, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil && len(updates) > 0 {
-				mergeAccountExtra(account, updates)
-				if usage.UpdatedAt == nil {
-					usage.UpdatedAt = &now
-				}
-				applyExtraToUsage(usage, account.Extra, now)
+		}
+
+		// /wham/usage is authoritative for window presence. Fall back to the
+		// /responses headers only when the authoritative request failed; sparse
+		// response headers may prove a window exists, but never prove absence.
+		if len(updates) == 0 && !account.IsShadow() {
+			if probed, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil {
+				updates = probed
 			}
+		}
+		if len(updates) > 0 {
+			mergeAccountExtra(account, updates)
+			s.persistOpenAICodexProbeSnapshot(account.ID, updates)
+			if usage.UpdatedAt == nil {
+				usage.UpdatedAt = &now
+			}
+			applyExtraToUsage(usage, account.Extra, now)
 		}
 	}
 
@@ -745,18 +755,16 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		return usage, nil
 	}
 
-	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
-		if usage.FiveHour == nil {
-			usage.FiveHour = &UsageProgress{Utilization: 0}
+	if usage.FiveHour != nil {
+		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
+			usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 		}
-		usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
-	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
-		if usage.SevenDay == nil {
-			usage.SevenDay = &UsageProgress{Utilization: 0}
+	if usage.SevenDay != nil {
+		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
+			usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 		}
-		usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
 	return usage, nil
@@ -782,17 +790,10 @@ func isOpenAICodexSnapshotStale(account *Account, now time.Time) bool {
 	if account == nil || !account.IsOpenAIOAuth() {
 		return false
 	}
-	// 普通账号的 codex 刷新走 probe(/responses 头),要求 WSv2;但 spark 影子走 QueryUsage
-	// (/wham/usage body 的 codex_bengalfox),与 WSv2 无关——不能用 WSv2 门控其 staleness,否则首刷后
-	// codex_5h/7d 已存在→staleness 恒 false→spark 窗口永久冻结(外审第9轮 P1)。影子改按
-	// codex_usage_updated_at TTL 判定;实际查询频率仍由 shouldProbeOpenAICodexSnapshot 的缓存 TTL 节流。
-	if !account.IsShadow() && !account.IsOpenAIResponsesWebSocketV2Enabled() {
-		return false
-	}
 	if account.Extra == nil {
 		return true
 	}
-	raw, ok := account.Extra["codex_usage_updated_at"]
+	raw, ok := account.Extra[codexWhamUsageUpdatedAtKey]
 	if !ok {
 		return true
 	}
@@ -950,12 +951,28 @@ func applyExtraToUsage(usage *UsageInfo, extra map[string]any, now time.Time) {
 	if usage == nil {
 		return
 	}
-	if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil {
+	if present, known := codexWhamWindowPresence(extra, "5h"); known && !present {
+		usage.FiveHour = nil
+	} else if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil {
 		usage.FiveHour = progress
 	}
-	if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil {
+	if present, known := codexWhamWindowPresence(extra, "7d"); known && !present {
+		usage.SevenDay = nil
+	} else if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil {
 		usage.SevenDay = progress
 	}
+}
+
+func codexWhamWindowPresence(extra map[string]any, window string) (bool, bool) {
+	if len(extra) == 0 {
+		return false, false
+	}
+	key := codexWham5hWindowPresentKey
+	if window == "7d" {
+		key = codexWham7dWindowPresentKey
+	}
+	present, ok := extra[key].(bool)
+	return present, ok
 }
 
 func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Account) (*UsageInfo, error) {

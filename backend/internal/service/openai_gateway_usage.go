@@ -929,6 +929,12 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 
 	// 归一化到 5h/7d 规范字段
 	if normalized := snapshot.Normalize(); normalized != nil {
+		if normalized.Used5hPercent != nil || normalized.Window5hMinutes != nil {
+			updates[codexWham5hWindowPresentKey] = true
+		}
+		if normalized.Used7dPercent != nil || normalized.Window7dMinutes != nil {
+			updates[codexWham7dWindowPresentKey] = true
+		}
 		if normalized.Used5hPercent != nil {
 			updates["codex_5h_used_percent"] = *normalized.Used5hPercent
 		}

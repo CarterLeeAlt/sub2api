@@ -157,7 +157,53 @@ func TestBuildCodexSparkWindowExtraUpdates_NoBengalfox(t *testing.T) {
 			{MeteredFeature: "other_feature", RateLimit: &OpenAIRateLimit{}},
 		},
 	}
-	require.Nil(t, buildCodexSparkWindowExtraUpdates(usage, time.Now()))
+	updates := buildCodexSparkWindowExtraUpdates(usage, time.Now())
+	require.Equal(t, false, updates[codexWham5hWindowPresentKey])
+	require.Equal(t, false, updates[codexWham7dWindowPresentKey])
+}
+
+func TestBuildCodexWhamWindowExtraUpdates_SevenDayOnly(t *testing.T) {
+	now := time.Date(2026, 8, 13, 4, 0, 0, 0, time.UTC)
+	usage := &OpenAIQuotaUsage{
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent:        92,
+				LimitWindowSeconds: 7 * 24 * 60 * 60,
+				ResetAfterSeconds:  471514,
+			},
+			SecondaryWindow: nil,
+		},
+	}
+
+	updates := buildCodexWhamWindowExtraUpdates(usage, now, false)
+	require.Equal(t, false, updates[codexWham5hWindowPresentKey])
+	require.Equal(t, true, updates[codexWham7dWindowPresentKey])
+	require.Nil(t, updates["codex_5h_used_percent"])
+	require.Equal(t, 92.0, updates["codex_7d_used_percent"])
+	require.Equal(t, 10080, updates["codex_7d_window_minutes"])
+	require.Equal(t, now.Format(time.RFC3339), updates[codexWhamUsageUpdatedAtKey])
+}
+
+func TestBuildCodexWhamWindowExtraUpdates_BothWindows(t *testing.T) {
+	now := time.Date(2026, 8, 13, 4, 0, 0, 0, time.UTC)
+	usage := &OpenAIQuotaUsage{
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent:        80,
+				LimitWindowSeconds: 7 * 24 * 60 * 60,
+			},
+			SecondaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent:        25,
+				LimitWindowSeconds: 5 * 60 * 60,
+			},
+		},
+	}
+
+	updates := buildCodexWhamWindowExtraUpdates(usage, now, false)
+	require.Equal(t, true, updates[codexWham5hWindowPresentKey])
+	require.Equal(t, true, updates[codexWham7dWindowPresentKey])
+	require.Equal(t, 25.0, updates["codex_5h_used_percent"])
+	require.Equal(t, 80.0, updates["codex_7d_used_percent"])
 }
 
 // ── Part C: ResetCredit 影子拒绝 ───────────────────────────────────────────
