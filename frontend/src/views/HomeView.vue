@@ -611,7 +611,7 @@ onMounted(() => {
   flex: 1;
   text-align: center;
   font-size: 12px;
-  font-family: ui-monospace, monospace;
+  font-family: 'Inter', 'Noto Sans SC', sans-serif;
   color: #64748b;
   margin-right: 52px;
 }
@@ -619,7 +619,7 @@ onMounted(() => {
 /* Terminal Body */
 .terminal-body {
   padding: 20px 24px;
-  font-family: ui-monospace, 'Fira Code', monospace;
+  font-family: 'Inter', 'Noto Sans SC', sans-serif;
   font-size: 14px;
   line-height: 2;
 }
@@ -659,7 +659,7 @@ onMounted(() => {
 
 .code-prompt {
   color: #22c55e;
-  font-weight: bold;
+  font-weight: 600;
 }
 .code-cmd {
   color: #38bdf8;

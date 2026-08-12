@@ -9,11 +9,19 @@
 
   html {
     @apply scroll-smooth antialiased;
+    font-family: 'Inter', 'Noto Sans SC', sans-serif;
+    font-weight: 400;
+    font-synthesis: none;
   }
 
   body {
     @apply bg-gray-50 text-gray-900 dark:bg-dark-950 dark:text-gray-100;
     @apply min-h-screen;
+  }
+
+  b,
+  strong {
+    font-weight: 600;
   }
 
   /* 自定义滚动条 - 仅针对 Firefox，避免 Chrome 取消 webkit 的全局定制 */

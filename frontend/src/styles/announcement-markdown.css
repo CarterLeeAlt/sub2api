@@ -55,7 +55,7 @@
 
 .markdown-body blockquote::before {
   content: '"';
-  @apply absolute -left-1 top-0 font-serif text-5xl text-blue-500/20 dark:text-blue-400/20;
+  @apply absolute -left-1 top-0 font-sans text-5xl text-blue-500/20 dark:text-blue-400/20;
 }
 
 .markdown-body code {

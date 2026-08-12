@@ -14,9 +14,9 @@
         <text
           x="12"
           y="17"
-          font-family="sans-serif"
+          font-family="Inter, Noto Sans SC, sans-serif"
           font-size="13"
-          font-weight="bold"
+          font-weight="600"
           fill="white"
           text-anchor="middle"
         >D</text>
