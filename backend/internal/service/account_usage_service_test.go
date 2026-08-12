@@ -55,15 +55,18 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 
 	if !shouldRefreshOpenAICodexSnapshot(&Account{Extra: map[string]any{
 		"codex_usage_updated_at": now.Format(time.RFC3339),
+		"codex_5h_used_percent":  0.0,
+		"codex_7d_used_percent":  56.0,
 	}}, &UsageInfo{FiveHour: &UsageProgress{}, SevenDay: &UsageProgress{}}, now) {
 		t.Fatal("expected legacy unmarked windows to require migration probe")
 	}
 
-	if shouldRefreshOpenAICodexSnapshot(&Account{Extra: map[string]any{
+	if !shouldRefreshOpenAICodexSnapshot(&Account{Extra: map[string]any{
 		codex5hWindowPresentKey: false,
+		codex5hMissingCountKey:  codexWindowMissingConfirmationThreshold,
 		codex7dWindowPresentKey: true,
 	}}, &UsageInfo{}, now) {
-		t.Fatal("expected explicitly absent 5h snapshot to skip refresh")
+		t.Fatal("expected confirmed-absent 5h snapshot to keep checking for upstream recovery")
 	}
 
 	staleAt := now.Add(-(openAIProbeCacheTTL + time.Minute)).Format(time.RFC3339)
@@ -76,6 +79,59 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 		},
 	}, usage, now) {
 		t.Fatal("expected stale ws snapshot to trigger refresh")
+	}
+}
+
+func TestOpenAICodexSnapshotProbeSupportsOAuthAndPAT(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		account *Account
+		want    bool
+	}{
+		{
+			name: "regular oauth",
+			account: &Account{
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeOAuth,
+				Credentials: map[string]any{
+					"access_token":  "oauth-access-token",
+					"refresh_token": "oauth-refresh-token",
+				},
+			},
+			want: true,
+		},
+		{
+			name: "codex at pat",
+			account: &Account{
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeOAuth,
+				Credentials: map[string]any{
+					"access_token":              "at-test-personal-access-token",
+					openAIAuthModeCredentialKey: OpenAIAuthModePersonalAccessToken,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "static api key",
+			account: &Account{
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Credentials: map[string]any{"api_key": "sk-test"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := supportsOpenAICodexSnapshotProbe(tt.account); got != tt.want {
+				t.Fatalf("supportsOpenAICodexSnapshotProbe() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

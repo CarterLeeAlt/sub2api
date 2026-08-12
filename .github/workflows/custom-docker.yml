@@ -30,10 +30,7 @@ jobs:
 
       - name: Run custom OpenAI regression tests
         working-directory: backend
-        run: >-
-          go test -tags=unit ./internal/service
-          -run 'Test(EvaluateAccountSchedulingThreshold|ExtractOpenAICodexManifestModelIDs|SelectOpenAICodexImageMainModel|OpenAICodexImageGenerationEligible|BuildOpenAIImagesResponsesRequestForMainModel|FetchUpstreamSupportedModelsOpenAIOAuth.*|ResolveOpenAIImagesResponsesMainModelUsesManifestPriority)'
-          -count=1
+        run: go test -tags=unit ./internal/service -count=1
 
   build-and-push:
     needs: test-custom-openai-regressions

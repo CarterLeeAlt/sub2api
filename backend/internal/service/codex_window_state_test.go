@@ -25,6 +25,35 @@ func TestCodexWindowPresenceUpdatesRequiresThreeObservationsForCleanup(t *testin
 	}
 }
 
+func TestCodexWindowAbsenceRequiresThreeObservations(t *testing.T) {
+	for count := 1; count <= codexWindowMissingConfirmationThreshold; count++ {
+		extra := map[string]any{
+			codex5hWindowPresentKey: false,
+			codex5hMissingCountKey:  count,
+		}
+		wantConfirmed := count == codexWindowMissingConfirmationThreshold
+		if got := codexWindowKnownAbsent(extra, "5h"); got != wantConfirmed {
+			t.Fatalf("count %d: codexWindowKnownAbsent() = %v, want %v", count, got, wantConfirmed)
+		}
+		if got := codexWindowPresenceKnown(extra, "5h"); got != wantConfirmed {
+			t.Fatalf("count %d: codexWindowPresenceKnown() = %v, want %v", count, got, wantConfirmed)
+		}
+	}
+}
+
+func TestCodexWindowPresenceIsKnownImmediately(t *testing.T) {
+	extra := map[string]any{
+		codex5hWindowPresentKey: true,
+		codex5hMissingCountKey:  0,
+	}
+	if !codexWindowPresenceKnown(extra, "5h") {
+		t.Fatal("present 5h window should be known immediately")
+	}
+	if codexWindowKnownAbsent(extra, "5h") {
+		t.Fatal("present 5h window should not be absent")
+	}
+}
+
 func TestCodexWindowPresenceUpdatesRecoveryClearsMissingCount(t *testing.T) {
 	updates := codexWindowPresenceUpdates(map[string]any{
 		codex5hMissingCountKey: float64(2),
@@ -42,11 +71,15 @@ func TestCodexWindowPresenceUpdatesRecoveryClearsMissingCount(t *testing.T) {
 }
 
 func TestApplyExtraToUsageDoesNotResurrectKnownAbsentWindow(t *testing.T) {
-	usage := &UsageInfo{}
+	usage := &UsageInfo{
+		FiveHour: &UsageProgress{Utilization: 99},
+		SevenDay: &UsageProgress{Utilization: 99},
+	}
 	extra := map[string]any{
-		"codex_5h_used_percent":    42.0,
+		"codex_5h_used_percent":   42.0,
 		"codex_5h_window_present": false,
-		"codex_7d_used_percent":    17.0,
+		codex5hMissingCountKey:    codexWindowMissingConfirmationThreshold,
+		"codex_7d_used_percent":   17.0,
 		"codex_7d_window_present": true,
 	}
 	applyExtraToUsage(usage, extra, testCodexNow())
@@ -55,6 +88,25 @@ func TestApplyExtraToUsageDoesNotResurrectKnownAbsentWindow(t *testing.T) {
 	}
 	if usage.SevenDay == nil {
 		t.Fatal("present 7d window was not reconstructed")
+	}
+	if usage.SevenDay.Utilization != 17 {
+		t.Fatalf("7d utilization = %v, want 17", usage.SevenDay.Utilization)
+	}
+}
+
+func TestApplyExtraToUsageKeepsWindowBeforeThirdAbsence(t *testing.T) {
+	usage := &UsageInfo{}
+	extra := map[string]any{
+		"codex_5h_used_percent": 42.0,
+		codex5hWindowPresentKey: false,
+		codex5hMissingCountKey:  codexWindowMissingConfirmationThreshold - 1,
+		"codex_7d_used_percent": 17.0,
+		codex7dWindowPresentKey: true,
+		codex7dMissingCountKey:  0,
+	}
+	applyExtraToUsage(usage, extra, testCodexNow())
+	if usage.FiveHour == nil {
+		t.Fatal("5h window was hidden before the third absence confirmation")
 	}
 }
 
