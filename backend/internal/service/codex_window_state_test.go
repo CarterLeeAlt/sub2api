@@ -44,9 +44,9 @@ func TestCodexWindowPresenceUpdatesRecoveryClearsMissingCount(t *testing.T) {
 func TestApplyExtraToUsageDoesNotResurrectKnownAbsentWindow(t *testing.T) {
 	usage := &UsageInfo{}
 	extra := map[string]any{
-		"codex_5h_used_percent": 42.0,
+		"codex_5h_used_percent":    42.0,
 		"codex_5h_window_present": false,
-		"codex_7d_used_percent": 17.0,
+		"codex_7d_used_percent":    17.0,
 		"codex_7d_window_present": true,
 	}
 	applyExtraToUsage(usage, extra, testCodexNow())
