@@ -44,7 +44,7 @@ export interface SwipeSelectVirtualContext {
  * list is small enough to be rendered in full (virtualization disabled). Rows are
  * vertically ordered, so this binary-searches — mirroring findRowIndexAtY — and
  * returns each row's `data-index` (its absolute index in the sorted data), or -1
- * when no rows are rendered. Exported for unit testing.
+ * when no row occupies the coordinate. Exported for unit testing.
  */
 export function findRowIndexByDomPosition(scrollEl: Element, clientY: number): number {
   const domRows = Array.from(scrollEl.querySelectorAll('tbody tr[data-index]')) as HTMLElement[]
@@ -52,9 +52,10 @@ export function findRowIndexByDomPosition(scrollEl: Element, clientY: number): n
   if (len === 0) return -1
   const idxOf = (el: HTMLElement) => Number(el.getAttribute('data-index'))
 
-  // Boundary checks
+  // Coordinates outside the actual rows are empty space. Do not clamp them
+  // to the nearest row (especially the last row below the table body).
   if (clientY < domRows[0].getBoundingClientRect().top) return idxOf(domRows[0])
-  if (clientY > domRows[len - 1].getBoundingClientRect().bottom) return idxOf(domRows[len - 1])
+  if (clientY > domRows[len - 1].getBoundingClientRect().bottom) return -1
 
   // Binary search — rows are vertically ordered
   let lo = 0, hi = len - 1
@@ -123,7 +124,7 @@ export function useSwipeSelect(
     const firstRect = cachedRows[0].getBoundingClientRect()
     if (clientY < firstRect.top) return 0
     const lastRect = cachedRows[len - 1].getBoundingClientRect()
-    if (clientY > lastRect.bottom) return len - 1
+    if (clientY > lastRect.bottom) return -1
 
     // Binary search — rows are vertically ordered
     let lo = 0, hi = len - 1
@@ -167,9 +168,16 @@ export function useSwipeSelect(
       if (domIdx >= 0) return domIdx
     }
 
-    // Outside visible range: estimate
+    // Outside the virtualized content is empty space, not a row. In
+    // particular, the bottom padding after the final data row must not map to
+    // that final row.
     const totalCount = virtualContext!.getSortedData().length
     if (totalCount === 0) return -1
+    if (contentY < 0 || contentY >= virt.getTotalSize()) return -1
+    const lastItem = items[items.length - 1]
+    if (lastItem?.index === totalCount - 1 && contentY >= lastItem.end) return -1
+
+    // Outside visible range: estimate
     const est = virt.options.estimateSize(0)
     const guess = Math.floor(contentY / est)
     return Math.max(0, Math.min(totalCount - 1, guess))
