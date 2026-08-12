@@ -117,6 +117,21 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已退役机制
 
+### Codex 5h/7d 动态窗口显隐（`retired`）
+
+提交 `2e6b9378` 引入了根据上游 Codex 窗口存在性自动显示或隐藏 5h/7d 用量行的机制，后续由 `d972d6ea`、`a5a8e72a` 和 `c8d37d22` 补充迁移、三次缺失确认及 OAuth/PAT 探测。由于上游响应不能稳定、权威地表示窗口缺失，该机制已整体回退到引入前的固定窗口行为。
+
+回退后：
+
+- 不再写入或读取 `codex_5h_window_present`、`codex_7d_window_present` 及缺失计数；
+- 不再因连续缺失自动删除旧的 5h/7d 快照，也不再为窗口恢复定期探测；
+- 恢复原有的 5h/7d 固定显示与本地用量汇总逻辑，不改变计费窗口的时间起点、重置时间或费用统计语义；
+- 数据库中已有的 presence/missing-count 字段保留为无效兼容数据，无需迁移或清理。
+
+后续上游合并不得恢复该动态显隐机制，除非有单一、稳定且权威的上游配额窗口来源，并重新经过独立评估。
+
+相关提交：[`2e6b9378`](https://github.com/CarterLeeAlt/sub2api/commit/2e6b937801e84358b63808c74eae41f05d493b6a)、[`d972d6ea`](https://github.com/CarterLeeAlt/sub2api/commit/d972d6ea8129ecddb0dd251a83a567dba5e2d71c)、[`a5a8e72a`](https://github.com/CarterLeeAlt/sub2api/commit/a5a8e72a0cd21954a95fa51f814fc2cde6861301)、[`c8d37d22`](https://github.com/CarterLeeAlt/sub2api/commit/c8d37d2227920072ff2cecde9fd61dca0fcd81ea)。
+
 ### 一次性生图主模型迁移工作流（`retired`）
 
 提交 `c3031d0e` 曾加入一次性 GitHub Actions 工作流，用于把动态生图主模型改动应用到源码；随后由 `abd725ec` 落地实际源码变更，并在 `5791cb14` 删除该工作流。
