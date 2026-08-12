@@ -721,7 +721,6 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			if s.openAIQuotaService != nil {
 				if quotaUsage, err := s.openAIQuotaService.QueryUsage(ctx, account.ID); err == nil {
 					if updates := buildCodexSparkWindowExtraUpdates(quotaUsage, now); len(updates) > 0 {
-						mergeCodexPresenceCounts(account.Extra, updates)
 						mergeAccountExtra(account, updates)
 						s.persistOpenAICodexProbeSnapshot(account.ID, updates)
 						if usage.UpdatedAt == nil {
@@ -733,7 +732,6 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			}
 		} else {
 			if updates, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil && len(updates) > 0 {
-				mergeCodexPresenceCounts(account.Extra, updates)
 				mergeAccountExtra(account, updates)
 				if usage.UpdatedAt == nil {
 					usage.UpdatedAt = &now
@@ -747,16 +745,18 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		return usage, nil
 	}
 
-	if usage.FiveHour != nil {
-		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
-			usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
+	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
+		if usage.FiveHour == nil {
+			usage.FiveHour = &UsageProgress{Utilization: 0}
 		}
+		usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
-	if usage.SevenDay != nil {
-		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
-			usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
+	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
+		if usage.SevenDay == nil {
+			usage.SevenDay = &UsageProgress{Utilization: 0}
 		}
+		usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
 	return usage, nil
@@ -769,25 +769,7 @@ func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now ti
 	if usage == nil {
 		return true
 	}
-	// Migrate legacy snapshots that predate explicit window-presence markers.
-	// Without this one-time probe, a stale 5h/7d field could remain visible
-	// indefinitely even after upstream stopped returning that window.
-	if codexWindowHasLegacySnapshot(account.Extra, "5h") && !codexWindowPresenceKnown(account.Extra, "5h") {
-		return true
-	}
-	if codexWindowHasLegacySnapshot(account.Extra, "7d") && !codexWindowPresenceKnown(account.Extra, "7d") {
-		return true
-	}
-	if usage.FiveHour == nil && !codexWindowPresenceKnown(account.Extra, "5h") {
-		return true
-	}
-	if usage.SevenDay == nil && !codexWindowPresenceKnown(account.Extra, "7d") {
-		return true
-	}
-	// Keep checking a confirmed-absent window at the normal probe TTL so an
-	// upstream 5h/7d window that later returns is restored automatically. This
-	// applies equally to regular OAuth and Codex at-* PAT accounts.
-	if codexWindowKnownAbsent(account.Extra, "5h") || codexWindowKnownAbsent(account.Extra, "7d") {
+	if usage.FiveHour == nil || usage.SevenDay == nil {
 		return true
 	}
 	if account.IsRateLimited() {
@@ -838,10 +820,7 @@ func (s *AccountUsageService) shouldProbeOpenAICodexSnapshot(accountID int64, no
 }
 
 func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, account *Account) (map[string]any, error) {
-	// Codex at-* personal access tokens are stored as OpenAI OAuth accounts
-	// with auth_mode=personalAccessToken, so both regular OAuth and PAT accounts
-	// intentionally use this probe. Static API-key accounts do not.
-	if !supportsOpenAICodexSnapshotProbe(account) {
+	if account == nil || !account.IsOAuth() {
 		return nil, nil
 	}
 	accessToken := ""
@@ -924,10 +903,6 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 	return nil, nil
 }
 
-func supportsOpenAICodexSnapshotProbe(account *Account) bool {
-	return account != nil && account.IsOpenAIOAuth()
-}
-
 func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, updates map[string]any) {
 	if s == nil || s.accountRepo == nil || accountID <= 0 {
 		return
@@ -935,22 +910,11 @@ func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, u
 	if len(updates) == 0 {
 		return
 	}
-	persistedUpdates := make(map[string]any, len(updates))
-	for key, value := range updates {
-		persistedUpdates[key] = value
-	}
 
 	go func() {
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer updateCancel()
-		if repo, ok := s.accountRepo.(CodexUsageExtraRepository); ok {
-			if account, err := s.accountRepo.GetByID(updateCtx, accountID); err == nil && account != nil {
-				persistedUpdates = mergeCodexSnapshotPresence(account.Extra, persistedUpdates)
-			}
-			_ = repo.UpdateCodexUsageExtra(updateCtx, accountID, persistedUpdates, codexWindowCleanupKeys(persistedUpdates))
-			return
-		}
-		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, persistedUpdates)
+		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
 	}()
 }
 
@@ -986,18 +950,10 @@ func applyExtraToUsage(usage *UsageInfo, extra map[string]any, now time.Time) {
 	if usage == nil {
 		return
 	}
-	if codexWindowKnownAbsent(extra, "5h") {
-		// applyExtraToUsage may run twice in a single request: once before the
-		// upstream probe and again after merging its result. Clear the value that
-		// the first pass reconstructed from legacy keys when the probe confirms
-		// that the window is no longer present.
-		usage.FiveHour = nil
-	} else if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil {
+	if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil {
 		usage.FiveHour = progress
 	}
-	if codexWindowKnownAbsent(extra, "7d") {
-		usage.SevenDay = nil
-	} else if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil {
+	if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil {
 		usage.SevenDay = progress
 	}
 }
