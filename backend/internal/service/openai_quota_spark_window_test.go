@@ -182,6 +182,7 @@ func TestBuildCodexWhamWindowExtraUpdates_SevenDayOnly(t *testing.T) {
 	require.Equal(t, 92.0, updates["codex_7d_used_percent"])
 	require.Equal(t, 10080, updates["codex_7d_window_minutes"])
 	require.Equal(t, now.Format(time.RFC3339), updates[codexWhamUsageUpdatedAtKey])
+	require.Equal(t, codexWhamPresenceSchemaV1, updates[codexWhamPresenceSchemaKey])
 }
 
 func TestBuildCodexWhamWindowExtraUpdates_BothWindows(t *testing.T) {

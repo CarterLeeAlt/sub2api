@@ -63,6 +63,16 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 	}, usage, now) {
 		t.Fatal("expected stale wham snapshot to trigger refresh")
 	}
+
+	if !isOpenAICodexSnapshotStale(&Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra: map[string]any{
+			codexWhamUsageUpdatedAtKey: now.Format(time.RFC3339),
+		},
+	}, now) {
+		t.Fatal("expected unversioned wham snapshot to refresh immediately")
+	}
 }
 
 // TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2 外审第9轮 P1:spark 影子用量走
@@ -85,7 +95,10 @@ func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {
 		Type:            AccountTypeOAuth,
 		ParentAccountID: &parentID,
 		QuotaDimension:  QuotaDimensionSpark,
-		Extra:           map[string]any{codexWhamUsageUpdatedAtKey: staleAt},
+		Extra: map[string]any{
+			codexWhamUsageUpdatedAtKey: staleAt,
+			codexWhamPresenceSchemaKey: codexWhamPresenceSchemaV1,
+		},
 	}
 	if !shouldRefreshOpenAICodexSnapshot(shadowStale, usage, now) {
 		t.Fatal("expected stale spark shadow (no WSv2) to trigger refresh")
@@ -97,7 +110,10 @@ func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {
 		Type:            AccountTypeOAuth,
 		ParentAccountID: &parentID,
 		QuotaDimension:  QuotaDimensionSpark,
-		Extra:           map[string]any{codexWhamUsageUpdatedAtKey: freshAt},
+		Extra: map[string]any{
+			codexWhamUsageUpdatedAtKey: freshAt,
+			codexWhamPresenceSchemaKey: codexWhamPresenceSchemaV1,
+		},
 	}
 	if shouldRefreshOpenAICodexSnapshot(shadowFresh, usage, now) {
 		t.Fatal("expected fresh spark shadow to skip refresh (TTL not elapsed)")
@@ -107,7 +123,10 @@ func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {
 	normalNoWS := &Account{
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
-		Extra:    map[string]any{codexWhamUsageUpdatedAtKey: staleAt},
+		Extra: map[string]any{
+			codexWhamUsageUpdatedAtKey: staleAt,
+			codexWhamPresenceSchemaKey: codexWhamPresenceSchemaV1,
+		},
 	}
 	if !shouldRefreshOpenAICodexSnapshot(normalNoWS, usage, now) {
 		t.Fatal("expected stale non-WSv2 account to refresh authoritative wham usage")
@@ -137,6 +156,67 @@ func TestApplyExtraToUsageHidesAuthoritativelyAbsentWindow(t *testing.T) {
 	}
 }
 
+func TestHasCodexWhamWindowPresenceBlocksLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	if hasCodexWhamWindowPresence(map[string]any{
+		codexWham5hWindowPresentKey: false,
+		codexWham7dWindowPresentKey: true,
+	}) != true {
+		t.Fatal("expected authoritative wham presence markers to be detected")
+	}
+	if hasCodexWhamWindowPresence(map[string]any{
+		"codex_5h_used_percent": 100.0,
+	}) {
+		t.Fatal("legacy codex fields must not count as authoritative presence")
+	}
+}
+
+func TestHideUnconfirmedCodexWindows(t *testing.T) {
+	t.Parallel()
+	legacyUsage := &UsageInfo{
+		FiveHour: &UsageProgress{Utilization: 100},
+		SevenDay: &UsageProgress{Utilization: 50},
+	}
+	hideUnconfirmedCodexWindows(legacyUsage, map[string]any{
+		codexWham5hWindowPresentKey: true,
+		codexWham7dWindowPresentKey: true,
+		codexWhamUsageUpdatedAtKey:  time.Now().Format(time.RFC3339),
+	})
+	if legacyUsage.FiveHour != nil || legacyUsage.SevenDay != nil {
+		t.Fatalf("legacy unversioned presence must be hidden pending wham refresh: %#v", legacyUsage)
+	}
+
+	usage := &UsageInfo{
+		FiveHour: &UsageProgress{Utilization: 50},
+		SevenDay: &UsageProgress{Utilization: 75},
+	}
+	extra := map[string]any{
+		codexWham5hWindowPresentKey: false,
+		codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
+	}
+	applyExtraToUsage(usage, extra, time.Now())
+	hideUnconfirmedCodexWindows(usage, extra)
+	if usage.FiveHour != nil {
+		t.Fatalf("known absent 5h window must remain hidden: %#v", usage.FiveHour)
+	}
+	if usage.SevenDay != nil {
+		t.Fatalf("unknown 7d window must not render legacy data: %#v", usage.SevenDay)
+	}
+
+	usage = &UsageInfo{FiveHour: &UsageProgress{}, SevenDay: &UsageProgress{}}
+	extra = map[string]any{
+		codexWham5hWindowPresentKey: false,
+		codexWham7dWindowPresentKey: true,
+		codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
+	}
+	applyExtraToUsage(usage, extra, time.Now())
+	hideUnconfirmedCodexWindows(usage, extra)
+	if usage.FiveHour != nil || usage.SevenDay == nil {
+		t.Fatalf("expected per-window authoritative visibility, got 5h=%#v 7d=%#v", usage.FiveHour, usage.SevenDay)
+	}
+}
+
 func TestExtractOpenAICodexProbeUpdatesAccepts429WithCodexHeaders(t *testing.T) {
 	t.Parallel()
 
@@ -160,6 +240,12 @@ func TestExtractOpenAICodexProbeUpdatesAccepts429WithCodexHeaders(t *testing.T) 
 	}
 	if got := updates["codex_7d_used_percent"]; got != 100.0 {
 		t.Fatalf("codex_7d_used_percent = %v, want 100", got)
+	}
+	if _, ok := updates[codexWham5hWindowPresentKey]; ok {
+		t.Fatal("legacy response headers must not overwrite authoritative 5h presence")
+	}
+	if _, ok := updates[codexWham7dWindowPresentKey]; ok {
+		t.Fatal("legacy response headers must not overwrite authoritative 7d presence")
 	}
 }
 

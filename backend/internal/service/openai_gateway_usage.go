@@ -929,12 +929,10 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 
 	// 归一化到 5h/7d 规范字段
 	if normalized := snapshot.Normalize(); normalized != nil {
-		if normalized.Used5hPercent != nil || normalized.Window5hMinutes != nil {
-			updates[codexWham5hWindowPresentKey] = true
-		}
-		if normalized.Used7dPercent != nil || normalized.Window7dMinutes != nil {
-			updates[codexWham7dWindowPresentKey] = true
-		}
+		// x-codex-* response headers are a passive usage sample, not an
+		// authoritative statement about which /wham/usage windows the account
+		// owns.  In particular, writing presence=true here can resurrect a 5h
+		// row that /wham/usage explicitly reported as absent.
 		if normalized.Used5hPercent != nil {
 			updates["codex_5h_used_percent"] = *normalized.Used5hPercent
 		}
