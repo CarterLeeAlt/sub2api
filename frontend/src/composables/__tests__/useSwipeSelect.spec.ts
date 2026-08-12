@@ -49,9 +49,9 @@ describe('findRowIndexByDomPosition (swipe-select full-render fallback)', () => 
     expect(findRowIndexByDomPosition(el, 400)).toBe(2) // inside the tall row
   })
 
-  it('clamps to the first/last row when Y is outside the rendered range', () => {
+  it('does not clamp below the rendered range to the last row', () => {
     expect(findRowIndexByDomPosition(el, 50)).toBe(0) // above the first row
-    expect(findRowIndexByDomPosition(el, 999)).toBe(2) // below the last row
+    expect(findRowIndexByDomPosition(el, 999)).toBe(-1) // below the last row
   })
 
   it('picks the closer row when Y falls in a gap between rows', () => {
