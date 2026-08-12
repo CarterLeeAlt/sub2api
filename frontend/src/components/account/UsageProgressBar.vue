@@ -42,15 +42,23 @@
         ></div>
       </div>
 
-      <!-- Percentage -->
-      <span :class="['w-[32px] shrink-0 text-right text-[10px] font-medium', textClass]">
-        {{ displayPercent }}
+      <!-- Codex-style remaining quota display -->
+      <span v-if="displayRemaining" class="shrink-0 whitespace-nowrap text-[10px] font-medium">
+        <span :class="textClass">{{ displayPercent }} rem.</span>
+        <span v-if="shouldShowResetTime" class="text-gray-400"> / {{ formatResetTime }}</span>
       </span>
 
-      <!-- Reset time -->
-      <span v-if="shouldShowResetTime" class="shrink-0 text-[10px] text-gray-400">
-        {{ formatResetTime }}
-      </span>
+      <template v-else>
+        <!-- Percentage -->
+        <span :class="['w-[32px] shrink-0 text-right text-[10px] font-medium', textClass]">
+          {{ displayPercent }}
+        </span>
+
+        <!-- Reset time -->
+        <span v-if="shouldShowResetTime" class="shrink-0 text-[10px] text-gray-400">
+          {{ formatResetTime }}
+        </span>
+      </template>
     </div>
   </div>
 </template>
@@ -70,6 +78,7 @@ const props = defineProps<{
   windowStats?: WindowStats | null
   showNowWhenIdle?: boolean
   remainingCapacity?: boolean
+  displayRemaining?: boolean
 }>()
 
 const { t } = useI18n()
@@ -108,12 +117,29 @@ const labelClass = computed(() => {
   return colors[props.color]
 })
 
-// Progress bar color based on utilization
+const displayedUtilization = computed(() => {
+  const utilization = Math.min(Math.max(props.utilization, 0), 100)
+  return props.displayRemaining ? 100 - utilization : utilization
+})
+
+const usesRemainingSemantics = computed(() => {
+  return Boolean(props.remainingCapacity || props.displayRemaining)
+})
+
+// Progress bar color based on the displayed utilization
 const barClass = computed(() => {
-  if (props.remainingCapacity) {
-    if (props.utilization <= 20) {
+  if (props.displayRemaining) {
+    if (displayedUtilization.value <= 0) {
       return 'bg-red-500'
-    } else if (props.utilization <= 50) {
+    } else if (displayedUtilization.value <= 20) {
+      return 'bg-amber-500'
+    }
+    return 'bg-green-500'
+  }
+  if (usesRemainingSemantics.value) {
+    if (displayedUtilization.value <= 20) {
+      return 'bg-red-500'
+    } else if (displayedUtilization.value <= 50) {
       return 'bg-amber-500'
     }
     return 'bg-green-500'
@@ -127,12 +153,20 @@ const barClass = computed(() => {
   }
 })
 
-// Text color based on utilization
+// Text color based on the displayed utilization
 const textClass = computed(() => {
-  if (props.remainingCapacity) {
-    if (props.utilization <= 20) {
+  if (props.displayRemaining) {
+    if (displayedUtilization.value <= 0) {
       return 'text-red-600 dark:text-red-400'
-    } else if (props.utilization <= 50) {
+    } else if (displayedUtilization.value <= 20) {
+      return 'text-amber-600 dark:text-amber-400'
+    }
+    return 'text-gray-600 dark:text-gray-400'
+  }
+  if (usesRemainingSemantics.value) {
+    if (displayedUtilization.value <= 20) {
+      return 'text-red-600 dark:text-red-400'
+    } else if (displayedUtilization.value <= 50) {
       return 'text-amber-600 dark:text-amber-400'
     }
     return 'text-gray-600 dark:text-gray-400'
@@ -148,14 +182,14 @@ const textClass = computed(() => {
 
 // Bar width (capped at 100%)
 const barWidth = computed(() => {
-  return `${Math.min(Math.max(props.utilization, 0), 100)}%`
+  return `${displayedUtilization.value}%`
 })
 
 // Display percentage (cap at 999% for readability)
 const displayPercent = computed(() => {
   const percent = Math.round(
-    props.remainingCapacity
-      ? Math.min(Math.max(props.utilization, 0), 100)
+    usesRemainingSemantics.value
+      ? displayedUtilization.value
       : props.utilization
   )
   return percent > 999 ? '>999%' : `${percent}%`

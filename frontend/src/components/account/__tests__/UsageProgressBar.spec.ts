@@ -133,6 +133,54 @@ describe('UsageProgressBar', () => {
     expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-red-500')
   })
 
+  it('Codex 剩余模式同步反转文字、条宽和颜色，并组合显示重置时间', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '7d',
+        utilization: 86,
+        resetsAt: '2026-03-22T12:00:00Z',
+        displayRemaining: true,
+        color: 'emerald'
+      }
+    })
+
+    expect(wrapper.text()).toContain('14% rem. / 5d 12h')
+    expect(wrapper.get('.h-1\\.5 > div').attributes('style')).toContain('width: 14%')
+    expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-amber-500')
+    expect(wrapper.get('.text-amber-600').text()).toBe('14% rem.')
+  })
+
+  it('Codex 剩余模式在剩余量充足时显示对应的绿色条宽', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '5h',
+        utilization: 40,
+        displayRemaining: true,
+        color: 'indigo'
+      }
+    })
+
+    expect(wrapper.text()).toContain('60% rem.')
+    expect(wrapper.get('.h-1\\.5 > div').attributes('style')).toContain('width: 60%')
+    expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-green-500')
+    expect(wrapper.get('.text-gray-600').text()).toBe('60% rem.')
+  })
+
+  it('Codex 剩余模式沿用原有反向阈值，20% 仍为黄色', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '7d',
+        utilization: 80,
+        displayRemaining: true,
+        color: 'emerald'
+      }
+    })
+
+    expect(wrapper.text()).toContain('20% rem.')
+    expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-amber-500')
+    expect(wrapper.get('.text-amber-600').text()).toBe('20% rem.')
+  })
+
   it('默认利用率模式仍把超限显示为满格红色', () => {
     const wrapper = mount(UsageProgressBar, {
       props: {
