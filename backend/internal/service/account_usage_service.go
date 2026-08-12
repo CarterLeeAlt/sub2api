@@ -769,7 +769,10 @@ func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now ti
 	if usage == nil {
 		return true
 	}
-	if usage.FiveHour == nil && usage.SevenDay == nil && account.Extra["codex_usage_updated_at"] == nil {
+	if usage.FiveHour == nil && !codexWindowPresenceKnown(account.Extra, "5h") {
+		return true
+	}
+	if usage.SevenDay == nil && !codexWindowPresenceKnown(account.Extra, "7d") {
 		return true
 	}
 	if account.IsRateLimited() {

@@ -35,6 +35,15 @@ func codexWindowKnownAbsent(extra map[string]any, window string) bool {
 	return ok && !b
 }
 
+func codexWindowPresenceKnown(extra map[string]any, window string) bool {
+	key := codex5hWindowPresentKey
+	if window == "7d" {
+		key = codex7dWindowPresentKey
+	}
+	_, ok := extra[key]
+	return ok
+}
+
 func codexWindowPresenceUpdates(extra map[string]any, known bool, fiveHourPresent, sevenDayPresent bool) map[string]any {
 	updates := make(map[string]any)
 	if !known {
