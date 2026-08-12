@@ -28,6 +28,11 @@ type SystemHandler struct {
 // its own deadline.
 const systemUpdateTimeout = 15 * time.Minute
 
+// Automatic replacement is intentionally disabled for this fork. Docker
+// deployments must be updated and rolled back by the operator so the running
+// image always remains the fork's own build.
+var automaticSystemUpdatesEnabled = false
+
 // systemUpdateContext detaches a long-running update/rollback from the HTTP
 // request lifetime. Browsers and reverse proxies commonly abort idle requests
 // after 30-60s (axios default, nginx proxy_read_timeout), which canceled
@@ -83,6 +88,10 @@ func (h *SystemHandler) CheckUpdates(c *gin.Context) {
 // PerformUpdate downloads and applies the update
 // POST /api/v1/admin/system/update
 func (h *SystemHandler) PerformUpdate(c *gin.Context) {
+	if !automaticSystemUpdatesEnabled {
+		response.Forbidden(c, "Automatic updates are disabled; update the Docker image manually")
+		return
+	}
 	operationID := buildSystemOperationID(c, "update")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.update", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {
@@ -131,6 +140,10 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 // GetRollbackVersions lists versions available for rollback
 // GET /api/v1/admin/system/rollback-versions
 func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
+	if !automaticSystemUpdatesEnabled {
+		response.Forbidden(c, "Automatic rollback is disabled; roll back the Docker image manually")
+		return
+	}
 	versions, err := h.updateSvc.ListRollbackVersions(c.Request.Context())
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
@@ -147,6 +160,10 @@ func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
 // installs that specific release (must be one of the recent rollback versions).
 // POST /api/v1/admin/system/rollback
 func (h *SystemHandler) Rollback(c *gin.Context) {
+	if !automaticSystemUpdatesEnabled {
+		response.Forbidden(c, "Automatic rollback is disabled; roll back the Docker image manually")
+		return
+	}
 	var req struct {
 		Version string `json:"version"`
 	}
