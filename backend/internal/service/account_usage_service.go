@@ -120,6 +120,8 @@ const (
 	codexWham5hWindowPresentKey = "codex_wham_5h_window_present"
 	codexWham7dWindowPresentKey = "codex_wham_7d_window_present"
 	codexWhamUsageUpdatedAtKey  = "codex_wham_usage_updated_at"
+	codexWhamPresenceSchemaKey  = "codex_wham_presence_schema"
+	codexWhamPresenceSchemaV1   = "wham-usage-v1"
 )
 
 // UsageCache 封装账户使用量相关的缓存
@@ -717,6 +719,12 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 
 	applyExtraToUsage(usage, account.Extra, now)
+	// In production the quota service is authoritative.  Legacy Extra fields
+	// from before /wham/usage was introduced must not be rendered while either
+	// window's presence is still unknown (including transient probe failures).
+	if s.openAIQuotaService != nil {
+		hideUnconfirmedCodexWindows(usage, account.Extra)
+	}
 
 	shouldRefreshSnapshot := force || shouldRefreshOpenAICodexSnapshot(account, usage, now)
 	// Older lightweight deployments may not wire OpenAIQuotaService. Preserve
@@ -733,10 +741,12 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			}
 		}
 
-		// /wham/usage is authoritative for window presence. Fall back to the
-		// /responses headers only when the authoritative request failed; sparse
-		// response headers may prove a window exists, but never prove absence.
-		if len(updates) == 0 && !account.IsShadow() {
+		// /wham/usage is authoritative for window presence. Only lightweight
+		// deployments without OpenAIQuotaService may fall back to /responses
+		// headers, and only before any authoritative presence marker exists.
+		// Production refresh failures preserve the last wham result instead of
+		// letting legacy headers resurrect a stale 5h row.
+		if len(updates) == 0 && s.openAIQuotaService == nil && !account.IsShadow() && !hasCodexWhamWindowPresence(account.Extra) {
 			if probed, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil {
 				updates = probed
 			}
@@ -791,6 +801,9 @@ func isOpenAICodexSnapshotStale(account *Account, now time.Time) bool {
 		return false
 	}
 	if account.Extra == nil {
+		return true
+	}
+	if fmt.Sprint(account.Extra[codexWhamPresenceSchemaKey]) != codexWhamPresenceSchemaV1 {
 		return true
 	}
 	raw, ok := account.Extra[codexWhamUsageUpdatedAtKey]
@@ -973,6 +986,35 @@ func codexWhamWindowPresence(extra map[string]any, window string) (bool, bool) {
 	}
 	present, ok := extra[key].(bool)
 	return present, ok
+}
+
+func hasCodexWhamWindowPresence(extra map[string]any) bool {
+	if len(extra) == 0 {
+		return false
+	}
+	_, fiveKnown := extra[codexWham5hWindowPresentKey].(bool)
+	_, sevenKnown := extra[codexWham7dWindowPresentKey].(bool)
+	return fiveKnown || sevenKnown
+}
+
+func hideUnconfirmedCodexWindows(usage *UsageInfo, extra map[string]any) {
+	if usage == nil {
+		return
+	}
+	// Presence markers written by older builds could be overwritten by passive
+	// x-codex-* headers.  Treat those records as untrusted until a current
+	// /wham/usage refresh stamps the schema marker.
+	if fmt.Sprint(extra[codexWhamPresenceSchemaKey]) != codexWhamPresenceSchemaV1 {
+		usage.FiveHour = nil
+		usage.SevenDay = nil
+		return
+	}
+	if _, known := codexWhamWindowPresence(extra, "5h"); !known {
+		usage.FiveHour = nil
+	}
+	if _, known := codexWhamWindowPresence(extra, "7d"); !known {
+		usage.SevenDay = nil
+	}
 }
 
 func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Account) (*UsageInfo, error) {

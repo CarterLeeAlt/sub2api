@@ -606,6 +606,7 @@ func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Ti
 		codexWham5hWindowPresentKey: false,
 		codexWham7dWindowPresentKey: false,
 		codexWhamUsageUpdatedAtKey:  now.Format(time.RFC3339),
+		codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
 	}
 	if rateLimit == nil {
 		clearAbsentCodexWindowExtra(updates, "5h")
