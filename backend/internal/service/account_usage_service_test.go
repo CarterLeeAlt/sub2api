@@ -53,6 +53,12 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 		t.Fatal("expected missing 5h snapshot to require refresh")
 	}
 
+	if !shouldRefreshOpenAICodexSnapshot(&Account{Extra: map[string]any{
+		"codex_usage_updated_at": now.Format(time.RFC3339),
+	}}, &UsageInfo{FiveHour: &UsageProgress{}, SevenDay: &UsageProgress{}}, now) {
+		t.Fatal("expected legacy unmarked windows to require migration probe")
+	}
+
 	if shouldRefreshOpenAICodexSnapshot(&Account{Extra: map[string]any{
 		codex5hWindowPresentKey: false,
 		codex7dWindowPresentKey: true,

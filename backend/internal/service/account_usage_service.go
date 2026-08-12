@@ -749,13 +749,13 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 
 	if usage.FiveHour != nil {
 		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
-		usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
+			usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 		}
 	}
 
 	if usage.SevenDay != nil {
 		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
-		usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
+			usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 		}
 	}
 
@@ -767,6 +767,15 @@ func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now ti
 		return false
 	}
 	if usage == nil {
+		return true
+	}
+	// Migrate legacy snapshots that predate explicit window-presence markers.
+	// Without this one-time probe, a stale 5h/7d field could remain visible
+	// indefinitely even after upstream stopped returning that window.
+	if usage.FiveHour != nil && !codexWindowPresenceKnown(account.Extra, "5h") {
+		return true
+	}
+	if usage.SevenDay != nil && !codexWindowPresenceKnown(account.Extra, "7d") {
 		return true
 	}
 	if usage.FiveHour == nil && !codexWindowPresenceKnown(account.Extra, "5h") {
