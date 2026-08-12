@@ -76,7 +76,10 @@
             <span class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-dark-400">
               {{ column.label }}
             </span>
-            <div class="min-w-0 max-w-full text-right text-sm text-gray-900 dark:text-gray-100">
+            <div
+              class="min-w-0 max-w-full text-sm text-gray-900 dark:text-gray-100"
+              :class="getCellContentAlignmentClass(column)"
+            >
               <slot :name="`cell-${column.key}`" :row="row" :value="row[column.key]" :expanded="actionsExpanded">
                 {{ column.formatter ? column.formatter(row[column.key], row) : row[column.key] }}
               </slot>
@@ -571,6 +574,14 @@ const getHeaderContentAlignmentClass = (column: Column) => {
   if (className.includes('text-center')) return 'justify-center'
   if (className.includes('text-right')) return 'justify-end'
   return 'justify-start'
+}
+
+const getCellContentAlignmentClass = (column: Column) => {
+  const className = column.class || ''
+  if (className.includes('text-center')) return 'text-center'
+  if (className.includes('text-right')) return 'text-right'
+  if (className.includes('text-left')) return 'text-left'
+  return 'text-right'
 }
 
 const isNullishOrEmpty = (value: any) => value === null || value === undefined || value === ''
