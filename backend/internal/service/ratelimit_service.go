@@ -1561,8 +1561,14 @@ func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, accou
 	if snapshot == nil {
 		return
 	}
-	updates := buildCodexUsageExtraUpdates(snapshot, time.Now())
+	updates := mergeCodexSnapshotPresence(account.Extra, buildCodexUsageExtraUpdatesForAccount(snapshot, time.Now(), account.Extra))
 	if len(updates) == 0 {
+		return
+	}
+	if repo, ok := s.accountRepo.(CodexUsageExtraRepository); ok {
+		if err := repo.UpdateCodexUsageExtra(ctx, account.ID, updates, codexWindowCleanupKeys(updates)); err != nil {
+			slog.Warn("openai_codex_snapshot_persist_failed", "account_id", account.ID, "error", err)
+		}
 		return
 	}
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {

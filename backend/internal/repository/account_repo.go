@@ -56,6 +56,8 @@ var schedulerNeutralExtraKeyPrefixes = []string{
 	"codex_secondary_",
 	"codex_5h_",
 	"codex_7d_",
+	"codex_5h_window_",
+	"codex_7d_window_",
 	"codex_reset_credit_",
 	"passive_usage_",
 	"upstream_billing_probe",
@@ -2520,8 +2522,21 @@ func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now ti
 }
 
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
+	return r.updateExtra(ctx, id, updates, nil)
+}
+
+// UpdateCodexUsageExtra atomically merges a Codex snapshot and, when the
+// service has observed an explicitly absent window three times, removes the
+// stale derived window fields in the same SQL statement.
+func (r *accountRepository) UpdateCodexUsageExtra(ctx context.Context, id int64, updates map[string]any, deleteKeys []string) error {
+	return r.updateExtra(ctx, id, updates, deleteKeys)
+}
+
+func (r *accountRepository) updateExtra(ctx context.Context, id int64, updates map[string]any, deleteKeys []string) error {
 	if len(updates) == 0 {
-		return nil
+		if len(deleteKeys) == 0 {
+			return nil
+		}
 	}
 
 	// 使用 JSONB 合并操作实现原子更新，避免读-改-写的并发丢失更新问题
@@ -2552,10 +2567,17 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	if clearProbeSnapshot {
 		extraExpression = "(" + extraExpression + ") - 'upstream_billing_probe'"
 	}
+	if len(deleteKeys) > 0 {
+		extraExpression = "(" + extraExpression + ") - $3::text[]"
+	}
+	args := []any{string(payload), id}
+	if len(deleteKeys) > 0 {
+		args = append(args, pq.Array(deleteKeys))
+	}
 	result, err := client.ExecContext(
 		ctx,
 		"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL",
-		string(payload), id,
+		args...,
 	)
 
 	if err != nil {

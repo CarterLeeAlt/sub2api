@@ -138,9 +138,12 @@ type NormalizedCodexLimits struct {
 	Used5hPercent   *float64
 	Reset5hSeconds  *int
 	Window5hMinutes *int
+	Has5hWindow     bool
 	Used7dPercent   *float64
 	Reset7dSeconds  *int
 	Window7dMinutes *int
+	Has7dWindow     bool
+	PresenceKnown   bool
 }
 
 // Normalize converts primary/secondary fields to canonical 5h/7d fields.
@@ -172,6 +175,7 @@ func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 	use7dFromPrimary := false
 
 	if hasPrimaryWindow && hasSecondaryWindow {
+		result.PresenceKnown = true
 		// Both known: smaller window is 5h, larger is 7d
 		if primaryMins < secondaryMins {
 			use5hFromPrimary = true
@@ -179,6 +183,7 @@ func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 			use7dFromPrimary = true
 		}
 	} else if hasPrimaryWindow {
+		result.PresenceKnown = true
 		// Only primary known: classify by threshold (<=360 min = 6h -> 5h window)
 		if primaryMins <= 360 {
 			use5hFromPrimary = true
@@ -186,6 +191,7 @@ func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 			use7dFromPrimary = true
 		}
 	} else if hasSecondaryWindow {
+		result.PresenceKnown = true
 		// Only secondary known: classify by threshold
 		if secondaryMins <= 360 {
 			// 5h from secondary, so primary (if any data) is 7d
@@ -201,6 +207,8 @@ func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 
 	// Assign values
 	if use5hFromPrimary {
+		result.Has5hWindow = s.PrimaryUsedPercent != nil || s.PrimaryResetAfterSeconds != nil || s.PrimaryWindowMinutes != nil
+		result.Has7dWindow = s.SecondaryUsedPercent != nil || s.SecondaryResetAfterSeconds != nil || s.SecondaryWindowMinutes != nil
 		result.Used5hPercent = s.PrimaryUsedPercent
 		result.Reset5hSeconds = s.PrimaryResetAfterSeconds
 		result.Window5hMinutes = s.PrimaryWindowMinutes
@@ -208,6 +216,8 @@ func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 		result.Reset7dSeconds = s.SecondaryResetAfterSeconds
 		result.Window7dMinutes = s.SecondaryWindowMinutes
 	} else if use7dFromPrimary {
+		result.Has7dWindow = s.PrimaryUsedPercent != nil || s.PrimaryResetAfterSeconds != nil || s.PrimaryWindowMinutes != nil
+		result.Has5hWindow = s.SecondaryUsedPercent != nil || s.SecondaryResetAfterSeconds != nil || s.SecondaryWindowMinutes != nil
 		result.Used7dPercent = s.PrimaryUsedPercent
 		result.Reset7dSeconds = s.PrimaryResetAfterSeconds
 		result.Window7dMinutes = s.PrimaryWindowMinutes

@@ -721,6 +721,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			if s.openAIQuotaService != nil {
 				if quotaUsage, err := s.openAIQuotaService.QueryUsage(ctx, account.ID); err == nil {
 					if updates := buildCodexSparkWindowExtraUpdates(quotaUsage, now); len(updates) > 0 {
+						mergeCodexPresenceCounts(account.Extra, updates)
 						mergeAccountExtra(account, updates)
 						s.persistOpenAICodexProbeSnapshot(account.ID, updates)
 						if usage.UpdatedAt == nil {
@@ -732,6 +733,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			}
 		} else {
 			if updates, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil && len(updates) > 0 {
+				mergeCodexPresenceCounts(account.Extra, updates)
 				mergeAccountExtra(account, updates)
 				if usage.UpdatedAt == nil {
 					usage.UpdatedAt = &now
@@ -745,18 +747,16 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		return usage, nil
 	}
 
-	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
-		if usage.FiveHour == nil {
-			usage.FiveHour = &UsageProgress{Utilization: 0}
-		}
+	if usage.FiveHour != nil {
+		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
 		usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
+		}
 	}
 
-	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
-		if usage.SevenDay == nil {
-			usage.SevenDay = &UsageProgress{Utilization: 0}
-		}
+	if usage.SevenDay != nil {
+		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
 		usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
+		}
 	}
 
 	return usage, nil
@@ -769,7 +769,7 @@ func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now ti
 	if usage == nil {
 		return true
 	}
-	if usage.FiveHour == nil || usage.SevenDay == nil {
+	if usage.FiveHour == nil && usage.SevenDay == nil && account.Extra["codex_usage_updated_at"] == nil {
 		return true
 	}
 	if account.IsRateLimited() {
@@ -914,6 +914,13 @@ func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, u
 	go func() {
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer updateCancel()
+		if repo, ok := s.accountRepo.(CodexUsageExtraRepository); ok {
+			if account, err := s.accountRepo.GetByID(updateCtx, accountID); err == nil && account != nil {
+				updates = mergeCodexSnapshotPresence(account.Extra, updates)
+			}
+			_ = repo.UpdateCodexUsageExtra(updateCtx, accountID, updates, codexWindowCleanupKeys(updates))
+			return
+		}
 		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
 	}()
 }
@@ -950,10 +957,10 @@ func applyExtraToUsage(usage *UsageInfo, extra map[string]any, now time.Time) {
 	if usage == nil {
 		return
 	}
-	if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil {
+	if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil && !codexWindowKnownAbsent(extra, "5h") {
 		usage.FiveHour = progress
 	}
-	if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil {
+	if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil && !codexWindowKnownAbsent(extra, "7d") {
 		usage.SevenDay = progress
 	}
 }

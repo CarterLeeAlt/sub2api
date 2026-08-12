@@ -896,6 +896,10 @@ func codexResetAtRFC3339(base time.Time, resetAfterSeconds *int) *string {
 }
 
 func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow time.Time) map[string]any {
+	return buildCodexUsageExtraUpdatesForAccount(snapshot, fallbackNow, nil)
+}
+
+func buildCodexUsageExtraUpdatesForAccount(snapshot *OpenAICodexUsageSnapshot, fallbackNow time.Time, _ map[string]any) map[string]any {
 	if snapshot == nil {
 		return nil
 	}
@@ -929,6 +933,10 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 
 	// 归一化到 5h/7d 规范字段
 	if normalized := snapshot.Normalize(); normalized != nil {
+		if normalized.PresenceKnown {
+			updates[codex5hWindowPresentKey] = normalized.Has5hWindow
+			updates[codex7dWindowPresentKey] = normalized.Has7dWindow
+		}
 		if normalized.Used5hPercent != nil {
 			updates["codex_5h_used_percent"] = *normalized.Used5hPercent
 		}
@@ -958,6 +966,18 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	return updates
 }
 
+func mergeCodexSnapshotPresence(extra, updates map[string]any) map[string]any {
+	if len(updates) == 0 {
+		return updates
+	}
+	merged := make(map[string]any, len(updates)+4)
+	for key, value := range updates {
+		merged[key] = value
+	}
+	mergeCodexPresenceCounts(extra, merged)
+	return merged
+}
+
 // updateCodexUsageSnapshot saves the Codex usage snapshot to account's Extra field
 // updateCodexUsageSnapshot 把 /responses 的 x-codex-* 全局头快照写入账号 codex_* Extra。
 // ⚠️ 调用方必须排除 spark 影子账号(account.IsShadow()):影子的 codex_* 仅由 QueryUsage
@@ -983,6 +1003,16 @@ func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, acc
 	go func() {
 		updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if account, err := s.accountRepo.GetByID(updateCtx, accountID); err == nil && account != nil {
+			updates = mergeCodexSnapshotPresence(account.Extra, buildCodexUsageExtraUpdatesForAccount(snapshot, now, account.Extra))
+		}
+		if len(updates) == 0 {
+			return
+		}
+		if repo, ok := s.accountRepo.(CodexUsageExtraRepository); ok {
+			_ = repo.UpdateCodexUsageExtra(updateCtx, accountID, updates, codexWindowCleanupKeys(updates))
+			return
+		}
 		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
 	}()
 }
