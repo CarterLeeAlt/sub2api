@@ -237,8 +237,8 @@ describe('AccountUsageCell', () => {
       global: {
         stubs: {
           UsageProgressBar: {
-            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'color'],
-            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ windowStats?.tokens }}</div>'
+            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'color', 'displayRemaining'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ windowStats?.tokens }}|{{ displayRemaining }}</div>'
           },
           AccountQuotaInfo: true
         }
@@ -298,8 +298,8 @@ describe('AccountUsageCell', () => {
       global: {
         stubs: {
           UsageProgressBar: {
-            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'color'],
-            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ windowStats?.tokens }}</div>'
+            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'color', 'displayRemaining'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ windowStats?.tokens }}|{{ displayRemaining }}</div>'
           },
           AccountQuotaInfo: true
         }
@@ -310,8 +310,8 @@ describe('AccountUsageCell', () => {
 
     expect(getUsage).toHaveBeenCalledWith(2001)
     // 单一数据源：始终使用 /usage API 返回值，忽略 codex 快照
-    expect(wrapper.text()).toContain('5h|18|900')
-    expect(wrapper.text()).toContain('7d|36|900')
+    expect(wrapper.text()).toContain('5h|18|900|true')
+    expect(wrapper.text()).toContain('7d|36|900|true')
   })
 
   it('OpenAI OAuth 有现成快照时，手动刷新信号会触发 usage 重拉', async () => {
