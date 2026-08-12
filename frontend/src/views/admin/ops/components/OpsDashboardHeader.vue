@@ -1105,8 +1105,8 @@ function handleToolbarRefresh() {
 
           <!-- 2) Realtime Traffic -->
           <div class="flex h-full flex-col justify-center">
-            <div class="mb-4 flex flex-col items-center gap-2">
-              <div class="flex items-center justify-center gap-2">
+            <div class="mb-4 flex flex-col gap-3">
+              <div class="flex items-center gap-2">
                 <div class="relative flex h-3 w-3 shrink-0">
                   <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75"></span>
                   <span class="relative inline-flex h-3 w-3 rounded-full bg-blue-500"></span>
@@ -1116,7 +1116,7 @@ function handleToolbarRefresh() {
               </div>
 
               <!-- Time Window Selector -->
-              <div class="flex flex-wrap justify-center gap-1">
+              <div class="flex flex-wrap gap-1">
                 <button
                   v-for="window in availableRealtimeWindows"
                   :key="window"
