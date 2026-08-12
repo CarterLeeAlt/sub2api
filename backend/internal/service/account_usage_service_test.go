@@ -53,6 +53,13 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 		t.Fatal("expected missing 5h snapshot to require refresh")
 	}
 
+	if shouldRefreshOpenAICodexSnapshot(&Account{Extra: map[string]any{
+		codex5hWindowPresentKey: false,
+		codex7dWindowPresentKey: true,
+	}}, &UsageInfo{}, now) {
+		t.Fatal("expected explicitly absent 5h snapshot to skip refresh")
+	}
+
 	staleAt := now.Add(-(openAIProbeCacheTTL + time.Minute)).Format(time.RFC3339)
 	if !shouldRefreshOpenAICodexSnapshot(&Account{
 		Platform: PlatformOpenAI,
