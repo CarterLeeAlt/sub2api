@@ -595,6 +595,10 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 	}
 
 	updates := make(map[string]any)
+	if normalized.PresenceKnown {
+		updates[codex5hWindowPresentKey] = normalized.Has5hWindow
+		updates[codex7dWindowPresentKey] = normalized.Has7dWindow
+	}
 	if normalized.Used5hPercent != nil {
 		updates["codex_5h_used_percent"] = *normalized.Used5hPercent
 	}

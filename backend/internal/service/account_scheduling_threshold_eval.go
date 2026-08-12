@@ -243,6 +243,9 @@ func openAIThresholdCandidate(extra map[string]any, window string, now time.Time
 	if !ok {
 		return nil
 	}
+	if codexWindowKnownAbsent(extra, window) {
+		return nil
+	}
 	if openAIQuotaWindowReset(extra, window, now) || openAICodexSnapshotStaleForPause(extra, now) {
 		return nil
 	}
