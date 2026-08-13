@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`5935e674`](https://github.com/Wei-Shaw/sub2api/commit/5935e674a84341c3536e27e6a968384f67d9062b) |
-| 最近一次上游合并提交 | [`810eef47`](https://github.com/CarterLeeAlt/sub2api/commit/810eef477fee4303645b8d04eda21785dd919ed5) |
+| 当前已同步上游节点 | [`fbfdcef81`](https://github.com/Wei-Shaw/sub2api/commit/fbfdcef8184ae4b2e224d5cfc47cf1d0e3742710) |
+| 最近一次上游合并提交 | [`5306cbe37`](https://github.com/CarterLeeAlt/sub2api/commit/5306cbe374b0ffffe19d66690baf21851d0d8959) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -83,7 +83,7 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 
 ### CUSTOM-004：界面显示镜像构建标识（`active`）
 
-版本徽标在上游版本号后显示与镜像 `sha-xxxxxxx` 标签一致的 7 位提交标识，例如 `v0.1.173 · sha-3e72a08`。这用于确认正在运行的容器是否来自预期的 `latest` 构建，不负责自动检查或拉取镜像更新。
+镜像继续使用与 Git 提交一致的 `sha-xxxxxxx` 构建标识，但左上角收起状态只显示大版本号，例如 `v0.1.175`，避免 SHA 干扰日常界面阅读。点击版本徽章展开下拉详情后仍显示 `sha-xxxxxxx`，用于确认正在运行的容器是否来自预期构建；该徽章不负责自动检查或拉取镜像更新。
 
 主要文件：
 
@@ -93,7 +93,7 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - `frontend/src/utils/__tests__/buildIdentity.spec.ts`
 - `frontend/src/vite-env.d.ts`
 
-相关提交：[`3e72a088`](https://github.com/CarterLeeAlt/sub2api/commit/3e72a088264568f3d744a60e45be246a82a4e9dc)。
+相关提交：[`3e72a088`](https://github.com/CarterLeeAlt/sub2api/commit/3e72a088264568f3d744a60e45be246a82a4e9dc)、[`5306cbe37`](https://github.com/CarterLeeAlt/sub2api/commit/5306cbe374b0ffffe19d66690baf21851d0d8959)。
 
 ### CUSTOM-005：内容审核缓存测试稳定化（`active`，仅测试）
 
@@ -141,6 +141,21 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-08-13：同步至上游 `fbfdcef81`
+
+合并提交：[`5306cbe37`](https://github.com/CarterLeeAlt/sub2api/commit/5306cbe374b0ffffe19d66690baf21851d0d8959)。
+
+本次上游 `main` 相对共同祖先 `5935e674` 新增 26 个提交；本地 fork 同时保留 35 个独有提交。Git 自动合并无文本冲突，但以下 4 个文件发生语义重叠，按功能逐段合并：
+
+- `backend/internal/service/openai_gateway_usage.go`：保留本地 OpenAI OAuth 动态图片模型和 Codex 用量逻辑，同时接入上游 Group → Channel → 内置的逐模型媒体定价、长上下文开关和 Grok 计费路径；未采用整文件 ours/theirs 覆盖。
+- `frontend/src/components/account/AccountUsageCell.vue`：保留本地 OpenAI 用量剩余百分比显示，并接入上游 Grok 免费/付费档位判断。
+- `frontend/src/components/account/__tests__/AccountUsageCell.spec.ts`：保留本地 Codex 用量断言，同时合并上游 Grok 快照、Free 和 Lite 覆盖。
+- `frontend/src/views/admin/AccountsView.vue`：保留本地账户页布局修改，并接入上游 Grok 用量快照增量刷新和订阅档位展示。
+
+本次同步还保留 fork 的 OAuth manifest 模型清单同步、动态生图主模型选择、自有 GHCR 工作流、手动 Docker 更新策略、字体和账户管理界面定制。后端 `internal/service` 单元测试、受影响前端测试、TypeScript 类型检查和生产构建均通过。
+
+本次新增的版本徽章行为：左上角常驻区域仅显示 `v0.1.175` 形式的版本号，`sha-xxxxxxx` 仅在点击后的下拉详情中显示；对应测试位于 `frontend/src/components/common/__tests__/VersionBadge.spec.ts`。
 
 ### 2026-08-12：同步至上游 `5935e674`
 
@@ -209,6 +224,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 16 | [`3e72a088`](https://github.com/CarterLeeAlt/sub2api/commit/3e72a088264568f3d744a60e45be246a82a4e9dc) | 功能 | 镜像和主界面显示一致的 Git SHA 标识。 |
 | 17 | [`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf) | 上游同步 | 合并上游 `1e618dbc`，保留本地测试和动态生图逻辑，并稳定化 Windows 缓存测试。 |
 | 18 | [`810eef47`](https://github.com/CarterLeeAlt/sub2api/commit/810eef477fee4303645b8d04eda21785dd919ed5) | 上游同步 | 合并上游 `5935e674`，接受 Codex 指纹默认 `session`，保留 fork 的 OAuth 模型同步、动态生图逻辑与测试。 |
+| 19 | [`5306cbe37`](https://github.com/CarterLeeAlt/sub2api/commit/5306cbe374b0ffffe19d66690baf21851d0d8959) | 上游同步 | 合并上游 `fbfdcef81`，保留 OAuth 动态模型/生图、Codex 用量和界面定制，接入 Grok 4.6、逐模型定价、长上下文与 x_search；版本徽章收起状态只显示版本号。 |
 
 ## 下次同步检查清单
 
