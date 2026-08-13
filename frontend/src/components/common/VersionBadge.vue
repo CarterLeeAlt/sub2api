@@ -11,12 +11,7 @@
         ]"
         :title="hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
       >
-        <span v-if="currentVersion" class="flex min-w-0 items-baseline gap-1 font-medium">
-          <span>v{{ currentVersion }}</span>
-          <span v-if="buildIdentity" class="font-mono text-[10px] font-normal opacity-80">
-            · {{ buildIdentity }}
-          </span>
-        </span>
+        <span v-if="currentVersion" class="font-medium">v{{ currentVersion }}</span>
         <span v-else class="h-3 w-12 animate-pulse rounded bg-gray-200 dark:bg-dark-600"></span>
         <span v-if="hasUpdate" class="relative flex h-2 w-2">
           <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75"></span>
@@ -100,9 +95,7 @@
       </transition>
     </template>
 
-    <span v-else-if="version" class="text-xs text-gray-500 dark:text-dark-400">
-      v{{ version }}<span v-if="buildIdentity" class="font-mono text-[10px]"> · {{ buildIdentity }}</span>
-    </span>
+    <span v-else-if="version" class="text-xs text-gray-500 dark:text-dark-400">v{{ version }}</span>
   </div>
 </template>
 
