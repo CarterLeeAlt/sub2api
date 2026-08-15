@@ -276,6 +276,76 @@ func TestEvaluateAccountSchedulingThreshold_OpenAIPausesFreshExhaustedSevenDayWi
 	require.True(t, resetAt.Equal(*decision.Until))
 }
 
+func TestShouldClearOpenAISchedulingThresholdPause_WhenFreshSnapshotFallsBelowThreshold(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	until := now.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform:         PlatformOpenAI,
+		Window:           "7d",
+		ThresholdPercent: 90,
+		UsedPercent:      95,
+		Until:            until,
+		Now:              now.Add(-time.Hour),
+	})
+	account := &Account{
+		Platform:                PlatformOpenAI,
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			"codex_7d_used_percent":  0.0,
+			"codex_7d_reset_at":      until.Format(time.RFC3339),
+			"codex_usage_updated_at": now.Format(time.RFC3339),
+		},
+	}
+
+	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now))
+}
+
+func TestShouldClearOpenAISchedulingThresholdPause_DoesNotClearUnrecoveredOrUnrelatedState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	until := now.Add(5 * 24 * time.Hour)
+	thresholdReason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform:         PlatformOpenAI,
+		Window:           "7d",
+		ThresholdPercent: 90,
+		UsedPercent:      95,
+		Until:            until,
+		Now:              now.Add(-time.Hour),
+	})
+
+	tests := []struct {
+		name    string
+		reason  string
+		updated time.Time
+		used    float64
+		want    bool
+	}{
+		{name: "still above threshold", reason: thresholdReason, updated: now, used: 95, want: false},
+		{name: "snapshot predates pause", reason: thresholdReason, updated: now.Add(-2 * time.Hour), used: 0, want: false},
+		{name: "unrelated temporary block", reason: "transport error", updated: now, used: 0, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			account := &Account{
+				Platform:                PlatformOpenAI,
+				TempUnschedulableUntil:  &until,
+				TempUnschedulableReason: tc.reason,
+				Extra: map[string]any{
+					"codex_7d_used_percent":  tc.used,
+					"codex_7d_reset_at":      until.Format(time.RFC3339),
+					"codex_usage_updated_at": tc.updated.Format(time.RFC3339),
+				},
+			}
+			require.Equal(t, tc.want, shouldClearOpenAISchedulingThresholdPause(account, now))
+		})
+	}
+}
+
 func TestEvaluateAccountSchedulingThreshold_AnthropicFractionalUtilizationKeepsFractionSemantics(t *testing.T) {
 	t.Parallel()
 

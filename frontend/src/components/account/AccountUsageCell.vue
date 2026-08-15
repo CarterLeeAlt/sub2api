@@ -1299,6 +1299,21 @@ const syncManagedUsageState = () => {
   loading.value = props.batchedUsageLoading === true
 }
 
+const refreshAccountStateAfterUsage = async () => {
+  // Only rows that were visibly paused need a follow-up account fetch. The
+  // backend may clear a threshold pause while returning a fresh usage snapshot;
+  // emit the authoritative row so the parent can update the status badge.
+  if (!props.account.temp_unschedulable_until) return
+  try {
+    const updated = await adminAPI.accounts.getById(props.account.id)
+    if (!updated.temp_unschedulable_until) {
+      emit('account-updated', updated)
+    }
+  } catch (e) {
+    console.debug('Failed to refresh account state after usage query:', e)
+  }
+}
+
 const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?: boolean }) => {
   if (!shouldFetchUsage.value) return
   if (isBatchManaged.value) {
@@ -1327,6 +1342,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
     if (!unmounted.value) {
       usageInfo.value = result
       _usageCache.set(props.account.id, { data: result, ts: Date.now() })
+      await refreshAccountStateAfterUsage()
     }
   } catch (e: any) {
     if (!unmounted.value) {
@@ -1392,6 +1408,7 @@ const loadActiveUsage = async () => {
   activeQueryLoading.value = true
   try {
     usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    await refreshAccountStateAfterUsage()
   } catch (e: any) {
     console.error('Failed to load active usage:', e)
   } finally {

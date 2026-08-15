@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -27,6 +28,54 @@ type accountSchedulingThresholdCandidate struct {
 }
 
 const accountSchedulingThresholdCredentialKey = "account_scheduling_threshold"
+
+// shouldClearOpenAISchedulingThresholdPause reports whether a persisted
+// temporary pause created by the account scheduling threshold has been
+// superseded by a fresh OpenAI Codex snapshot. Other temporary pause sources
+// are deliberately excluded so authentication, transport, and custom-rule
+// cooldowns cannot be cleared by a quota refresh.
+func shouldClearOpenAISchedulingThresholdPause(account *Account, now time.Time) bool {
+	if account == nil || account.Platform != PlatformOpenAI || account.TempUnschedulableUntil == nil {
+		return false
+	}
+	if !IsAccountSchedulingThresholdReason(account.TempUnschedulableReason) {
+		return false
+	}
+
+	reason, ok := parseTempUnschedReasonPayload(account.TempUnschedulableReason)
+	if !ok || (reason.Window != "5h" && reason.Window != "7d") {
+		return false
+	}
+	if !now.Before(*account.TempUnschedulableUntil) {
+		return true
+	}
+
+	extra := account.Extra
+	updatedAtRaw, ok := extra["codex_usage_updated_at"]
+	if !ok {
+		return false
+	}
+	updatedAt, err := parseTime(fmt.Sprint(updatedAtRaw))
+	if err != nil {
+		return false
+	}
+	if reason.TriggeredAtUnix > 0 && updatedAt.Unix() < reason.TriggeredAtUnix {
+		return false
+	}
+	if openAICodexSnapshotStaleForPause(extra, now) {
+		return false
+	}
+
+	if present, known := codexWhamWindowPresence(extra, reason.Window); known && !present {
+		return true
+	}
+	if openAIQuotaWindowReset(extra, reason.Window, now) {
+		return true
+	}
+
+	usedPercent, ok := resolveAccountExtraNumber(extra, "codex_"+reason.Window+"_used_percent")
+	return ok && usedPercent < float64(reason.ThresholdPercent)
+}
 
 // EvaluateAccountSchedulingThreshold evaluates whether an account should be paused
 // based on the current per-platform scheduling threshold snapshot.

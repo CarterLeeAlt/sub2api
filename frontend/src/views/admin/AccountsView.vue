@@ -801,6 +801,13 @@ const flushQueuedUsageBatch = async () => {
     usageBatchByAccountId.value = nextUsage
     usageBatchErrorByAccountId.value = nextErrors
     usageBatchLoadingByAccountId.value = nextLoading
+
+    // A fresh Codex snapshot may clear a threshold-triggered temporary pause.
+    // Apply the authoritative account rows returned by the batch endpoint so
+    // the status badge updates in the same refresh, without another list load.
+    for (const updatedAccount of Object.values(result.account_updates ?? {})) {
+      patchAccountInList(updatedAccount)
+    }
   } catch (error) {
     const nextErrors = { ...usageBatchErrorByAccountId.value }
     const nextLoading = { ...usageBatchLoadingByAccountId.value }

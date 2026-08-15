@@ -172,7 +172,7 @@ func TestAccountUsageService_GetUsageBatch_BestEffortByAccount(t *testing.T) {
 		cache:        NewUsageCache(),
 	}
 
-	usageByAccount, errorsByAccount, err := svc.GetUsageBatch(context.Background(), []int64{7001, 7002, 7003, 7002}, false)
+	usageByAccount, errorsByAccount, recoveredAccountIDs, err := svc.GetUsageBatch(context.Background(), []int64{7001, 7002, 7003, 7002}, false)
 	if err != nil {
 		t.Fatalf("GetUsageBatch() error = %v", err)
 	}
@@ -187,5 +187,8 @@ func TestAccountUsageService_GetUsageBatch_BestEffortByAccount(t *testing.T) {
 
 	if !strings.Contains(strings.ToLower(errorsByAccount[7003]), "does not support usage query") {
 		t.Fatalf("expected API key account error to be preserved, got %q", errorsByAccount[7003])
+	}
+	if len(recoveredAccountIDs) != 0 {
+		t.Fatalf("expected no recovered accounts, got %v", recoveredAccountIDs)
 	}
 }

@@ -2511,21 +2511,35 @@ func (h *AccountHandler) GetBatchUsage(c *gin.Context) {
 	accountIDs := normalizeInt64IDList(req.AccountIDs)
 	if len(accountIDs) == 0 {
 		response.Success(c, gin.H{
-			"usage":  map[string]any{},
-			"errors": map[string]string{},
+			"usage":           map[string]any{},
+			"errors":          map[string]string{},
+			"account_updates": map[string]any{},
 		})
 		return
 	}
 
-	usageByAccount, errorsByAccount, err := h.accountUsageService.GetUsageBatch(c.Request.Context(), accountIDs, req.Force)
+	usageByAccount, errorsByAccount, recoveredAccountIDs, err := h.accountUsageService.GetUsageBatch(c.Request.Context(), accountIDs, req.Force)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 
+	accountUpdates := make(map[string]any, len(recoveredAccountIDs))
+	for _, accountID := range recoveredAccountIDs {
+		account, getErr := h.adminService.GetAccount(c.Request.Context(), accountID)
+		if getErr != nil || account == nil {
+			if getErr != nil {
+				slog.Warn("account_usage_batch_recovered_account_refresh_failed", "account_id", accountID, "error", getErr)
+			}
+			continue
+		}
+		accountUpdates[strconv.FormatInt(accountID, 10)] = h.buildAccountResponseWithRuntime(c.Request.Context(), account)
+	}
+
 	response.Success(c, gin.H{
-		"usage":  usageByAccount,
-		"errors": errorsByAccount,
+		"usage":           usageByAccount,
+		"errors":          errorsByAccount,
+		"account_updates": accountUpdates,
 	})
 }
 
