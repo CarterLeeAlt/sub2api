@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -300,6 +301,7 @@ type ClaudeUsageFetcher interface {
 // AccountUsageService 账号使用量查询服务
 type AccountUsageService struct {
 	accountRepo             AccountRepository
+	tempUnschedCache        TempUnschedCache
 	usageLogRepo            UsageLogRepository
 	usageFetcher            ClaudeUsageFetcher
 	geminiQuotaService      *GeminiQuotaService
@@ -312,6 +314,15 @@ type AccountUsageService struct {
 	tlsFPProfileService     *TLSFingerprintProfileService
 	agentIdentityTaskMu     sync.Mutex
 	agentIdentityWS         agentIdentityWSConnectionInvalidator
+}
+
+// SetTempUnschedCache wires the Redis mirror used for temporary scheduling
+// state. It is optional for lightweight deployments and tests.
+func (s *AccountUsageService) SetTempUnschedCache(cache TempUnschedCache) {
+	if s == nil {
+		return
+	}
+	s.tempUnschedCache = cache
 }
 
 // NewAccountUsageService 创建AccountUsageService实例
@@ -515,7 +526,7 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64, for
 // GetUsageBatch 批量获取账号使用量。
 // Anthropic OAuth/SetupToken 统一走 passive 链路，其他账号复用现有主动查询逻辑。
 // 单个账号失败不会中断整批请求，错误会按账号返回。
-func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []int64, force bool) (map[int64]*UsageInfo, map[int64]string, error) {
+func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []int64, force bool) (map[int64]*UsageInfo, map[int64]string, []int64, error) {
 	uniqueIDs := make([]int64, 0, len(accountIDs))
 	seen := make(map[int64]struct{}, len(accountIDs))
 	for _, accountID := range accountIDs {
@@ -532,12 +543,12 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 	usageByAccount := make(map[int64]*UsageInfo, len(uniqueIDs))
 	errorsByAccount := make(map[int64]string)
 	if len(uniqueIDs) == 0 {
-		return usageByAccount, errorsByAccount, nil
+		return usageByAccount, errorsByAccount, nil, nil
 	}
 
 	accounts, err := s.accountRepo.GetByIDs(ctx, uniqueIDs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get accounts failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("get accounts failed: %w", err)
 	}
 
 	accountsByID := make(map[int64]*Account, len(accounts))
@@ -549,6 +560,7 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 	}
 
 	var mu sync.Mutex
+	recoveredAccountIDs := make([]int64, 0)
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(6)
 
@@ -561,6 +573,9 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 		}
 
 		g.Go(func() error {
+			wasSchedulingThresholdPaused := account.Platform == PlatformOpenAI &&
+				account.TempUnschedulableUntil != nil &&
+				IsAccountSchedulingThresholdReason(account.TempUnschedulableReason)
 			var usage *UsageInfo
 			var usageErr error
 			if supportsAnthropicPassiveUsage(account) {
@@ -576,15 +591,19 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 				return nil
 			}
 			usageByAccount[id] = usage
+			if wasSchedulingThresholdPaused && account.TempUnschedulableUntil == nil {
+				recoveredAccountIDs = append(recoveredAccountIDs, id)
+			}
 			return nil
 		})
 	}
 
 	if err := g.Wait(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return usageByAccount, errorsByAccount, nil
+	sort.Slice(recoveredAccountIDs, func(i, j int) bool { return recoveredAccountIDs[i] < recoveredAccountIDs[j] })
+	return usageByAccount, errorsByAccount, recoveredAccountIDs, nil
 }
 
 // GetPassiveUsage 从 Account.Extra 中的被动采样数据构建 UsageInfo，不调用外部 API。
@@ -758,6 +777,24 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 				usage.UpdatedAt = &now
 			}
 			applyExtraToUsage(usage, account.Extra, now)
+		}
+	}
+
+	// A successful Codex snapshot can prove that a threshold-triggered pause
+	// has recovered before the original cooldown timestamp. Clear only that
+	// structured pause source; unrelated temporary blocks remain intact.
+	if shouldClearOpenAISchedulingThresholdPause(account, now) {
+		if err := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); err != nil {
+			slog.Warn("openai_scheduling_threshold_recovery_clear_failed", "account_id", account.ID, "error", err)
+		} else {
+			account.TempUnschedulableUntil = nil
+			account.TempUnschedulableReason = ""
+			if s.tempUnschedCache != nil {
+				if err := s.tempUnschedCache.DeleteTempUnsched(ctx, account.ID); err != nil {
+					slog.Warn("openai_scheduling_threshold_recovery_cache_clear_failed", "account_id", account.ID, "error", err)
+				}
+			}
+			slog.Info("openai_scheduling_threshold_recovered", "account_id", account.ID)
 		}
 	}
 

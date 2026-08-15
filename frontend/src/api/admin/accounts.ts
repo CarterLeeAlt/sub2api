@@ -320,6 +320,7 @@ export async function getUsage(id: number, source?: 'passive' | 'active', force?
 export interface BatchAccountUsageResponse {
   usage: Record<string, AccountUsageInfo>
   errors: Record<string, string>
+  account_updates?: Record<string, Account>
 }
 
 export async function getBatchUsage(accountIds: number[], force?: boolean): Promise<BatchAccountUsageResponse> {

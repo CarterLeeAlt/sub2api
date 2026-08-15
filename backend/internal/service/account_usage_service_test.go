@@ -9,8 +9,9 @@ import (
 
 type accountUsageCodexProbeRepo struct {
 	stubOpenAIAccountRepo
-	updateExtraCh chan map[string]any
-	rateLimitCh   chan time.Time
+	updateExtraCh  chan map[string]any
+	rateLimitCh    chan time.Time
+	clearTempCalls int
 }
 
 func (r *accountUsageCodexProbeRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
@@ -28,6 +29,11 @@ func (r *accountUsageCodexProbeRepo) SetRateLimited(_ context.Context, _ int64, 
 	if r.rateLimitCh != nil {
 		r.rateLimitCh <- resetAt
 	}
+	return nil
+}
+
+func (r *accountUsageCodexProbeRepo) ClearTempUnschedulable(_ context.Context, _ int64) error {
+	r.clearTempCalls++
 	return nil
 }
 
@@ -311,6 +317,47 @@ func TestAccountUsageService_GetOpenAIUsage_DoesNotPromoteCodexExtraToRateLimit(
 	case got := <-repo.rateLimitCh:
 		t.Fatalf("不应将已耗尽的 codex extra 持久化为运行时限流状态: %v", got)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPause(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	until := now.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform:         PlatformOpenAI,
+		Window:           "7d",
+		ThresholdPercent: 90,
+		UsedPercent:      95,
+		Until:            until,
+		Now:              now.Add(-time.Hour),
+	})
+	repo := &accountUsageCodexProbeRepo{}
+	svc := &AccountUsageService{accountRepo: repo}
+	account := &Account{
+		ID:                      3211,
+		Platform:                PlatformOpenAI,
+		Type:                    AccountTypeOAuth,
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			"codex_5h_used_percent":  0.0,
+			"codex_5h_reset_at":      now.Add(2 * time.Hour).Format(time.RFC3339),
+			"codex_7d_used_percent":  0.0,
+			"codex_7d_reset_at":      until.Format(time.RFC3339),
+			"codex_usage_updated_at": now.Format(time.RFC3339),
+		},
+	}
+
+	if _, err := svc.getOpenAIUsage(context.Background(), account, false); err != nil {
+		t.Fatalf("getOpenAIUsage() error = %v", err)
+	}
+	if repo.clearTempCalls != 1 {
+		t.Fatalf("ClearTempUnschedulable calls = %d, want 1", repo.clearTempCalls)
+	}
+	if account.TempUnschedulableUntil != nil || account.TempUnschedulableReason != "" {
+		t.Fatalf("expected in-memory scheduling pause to be cleared, got until=%v reason=%q", account.TempUnschedulableUntil, account.TempUnschedulableReason)
 	}
 }
 
