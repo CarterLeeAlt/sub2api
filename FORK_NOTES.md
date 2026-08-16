@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`fbfdcef81`](https://github.com/Wei-Shaw/sub2api/commit/fbfdcef8184ae4b2e224d5cfc47cf1d0e3742710) |
-| 最近一次上游合并提交 | [`5306cbe37`](https://github.com/CarterLeeAlt/sub2api/commit/5306cbe374b0ffffe19d66690baf21851d0d8959) |
+| 当前已同步上游节点 | [`baeac1f3d`](https://github.com/Wei-Shaw/sub2api/commit/baeac1f3de21d37b129405f092ef86c24b3f203d) |
+| 最近一次上游合并提交 | [`78fe75aa0`](https://github.com/CarterLeeAlt/sub2api/commit/78fe75aa0d5d14f6634ac9bd521ab640ad019248) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -73,13 +73,14 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - 构建前运行本 fork 的 OpenAI 定向回归测试；
 - 仅在回归测试通过后构建 `linux/amd64` 镜像；
 - 将完整 Git commit 写入镜像标签、OCI revision 和前后端构建信息。
+- Docker 后端构建镜像的 Go 版本必须与 `backend/go.mod` 声明严格一致；当前两者均为 `1.26.6`。
 
 主要文件：
 
 - `.github/workflows/custom-docker.yml`
 - `Dockerfile`
 
-相关提交：[`40a7694b`](https://github.com/CarterLeeAlt/sub2api/commit/40a7694b2ce8cb9aadf18b340d1a875f253de6f8)、[`99717aa1`](https://github.com/CarterLeeAlt/sub2api/commit/99717aa1d100cb94da8945589dc86e2be50a2a47)。
+相关提交：[`40a7694b`](https://github.com/CarterLeeAlt/sub2api/commit/40a7694b2ce8cb9aadf18b340d1a875f253de6f8)、[`99717aa1`](https://github.com/CarterLeeAlt/sub2api/commit/99717aa1d100cb94da8945589dc86e2be50a2a47)、[`5914e9fef`](https://github.com/CarterLeeAlt/sub2api/commit/5914e9fef6e70c493c4318553102a254e72e76c1)。
 
 ### CUSTOM-004：界面显示镜像构建标识（`active`）
 
@@ -104,6 +105,46 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - `backend/internal/service/content_moderation_runtime_cache_test.go`
 
 相关提交：[`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf)。
+
+### CUSTOM-006：Codex 账号级停调阈值统一与状态协调（`active`）
+
+Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_threshold` 现在是账号级最高优先级策略：
+
+- 账号设置 `1-99` 时，该值统一接管 5h 与 7d 两个配额窗口；任一窗口达到已用百分比阈值即停止调度；
+- 账号设置 `100` 时，禁用该账号的全部配额自动停调；
+- 旧版 `extra.auto_pause_5h_*`、`extra.auto_pause_7d_*` 与运维页 Codex 默认值只在账号未设置通用覆盖时生效；
+- 编辑阈值后立即重新评估已有的 `account_scheduling_threshold` 停调原因，并以 compare-and-swap 方式协调数据库、Redis、调度快照和运行时快速阻断；其他停调原因及模型级限流不受影响；
+- 账户编辑界面启用通用覆盖时禁用旧版 Codex 配额自动暂停控件，明确显示优先级。
+
+主要文件：
+
+- `backend/internal/repository/account_repo.go`
+- `backend/internal/service/account_scheduling_threshold_eval.go`
+- `backend/internal/service/account_usage_service.go`
+- `backend/internal/service/openai_gateway_scheduling.go`
+- `backend/internal/service/ratelimit_service.go`
+- `frontend/src/components/account/EditAccountModal.vue`
+
+相关提交：[`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557)、[`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6)。
+
+### CUSTOM-007：Codex 指纹请求起始时间一致性（`active`）
+
+Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时生成一次，随后由 HTTP 头、普通 JSON 请求体和 raw 透传请求体共享。不得在各载体改写函数中分别读取当前时间，否则同一请求可能出现 1 毫秒差异。
+
+主要文件：
+
+- `backend/internal/service/openai_codex_fingerprint.go`
+- `backend/internal/service/openai_codex_fingerprint_test.go`
+
+### CUSTOM-008：分组用量汇总时区测试稳定化（`active`，仅测试）
+
+分组用量汇总触发器集成测试显式设置数据库会话时区，避免运行环境默认时区不同导致日期边界断言漂移。
+
+主要文件：
+
+- `backend/internal/repository/group_usage_rollup_trigger_integration_test.go`
+
+相关提交：[`adaf4ed3d`](https://github.com/CarterLeeAlt/sub2api/commit/adaf4ed3d86b287bb3cda96a879a342bfa7a2c2b)。
 
 ## 已被上游吸收
 
@@ -141,6 +182,14 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-08-16：同步至上游 `baeac1f3d`
+
+合并提交：[`78fe75aa0`](https://github.com/CarterLeeAlt/sub2api/commit/78fe75aa0d5d14f6634ac9bd521ab640ad019248)。
+
+本次同步将上游版本推进到 `v0.1.177`，合入分组用量日汇总与时区迁移、Codex turn state/compaction、OpenAI channel restriction、Responses HTTP/WS 路径增强以及相应后端和前端测试。合并保留了 fork 的 OAuth manifest 模型清单、动态生图主模型、自有 GHCR 工作流、版本徽章、手动更新策略、额度百分比语义和界面定制；Git 合并未产生需要手工解决的文本冲突。
+
+合并后的补充修正包括：Docker Go 构建镜像对齐 `backend/go.mod` 的 `1.26.6`、分组汇总集成测试固定数据库时区，以及账号恢复和账号级 Codex 停调阈值的状态协调。这些后续提交均列入下方提交索引和对应 `CUSTOM` 条目。
 
 ### 2026-08-13：同步至上游 `fbfdcef81`
 
@@ -225,11 +274,16 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 17 | [`9f5bde85`](https://github.com/CarterLeeAlt/sub2api/commit/9f5bde85c49185826ffb4c512e9612a412c81fcf) | 上游同步 | 合并上游 `1e618dbc`，保留本地测试和动态生图逻辑，并稳定化 Windows 缓存测试。 |
 | 18 | [`810eef47`](https://github.com/CarterLeeAlt/sub2api/commit/810eef477fee4303645b8d04eda21785dd919ed5) | 上游同步 | 合并上游 `5935e674`，接受 Codex 指纹默认 `session`，保留 fork 的 OAuth 模型同步、动态生图逻辑与测试。 |
 | 19 | [`5306cbe37`](https://github.com/CarterLeeAlt/sub2api/commit/5306cbe374b0ffffe19d66690baf21851d0d8959) | 上游同步 | 合并上游 `fbfdcef81`，保留 OAuth 动态模型/生图、Codex 用量和界面定制，接入 Grok 4.6、逐模型定价、长上下文与 x_search；版本徽章收起状态只显示版本号。 |
+| 20 | [`78fe75aa0`](https://github.com/CarterLeeAlt/sub2api/commit/78fe75aa0d5d14f6634ac9bd521ab640ad019248) | 上游同步 | 合并上游 `baeac1f3d`，推进到 `v0.1.177`，接入分组用量日汇总、Codex turn state/compaction、channel restriction 及相关测试。 |
+| 21 | [`5914e9fef`](https://github.com/CarterLeeAlt/sub2api/commit/5914e9fef6e70c493c4318553102a254e72e76c1) | 构建修复 | Docker Go 构建镜像与 `backend/go.mod` 的 `1.26.6` 对齐。 |
+| 22 | [`adaf4ed3d`](https://github.com/CarterLeeAlt/sub2api/commit/adaf4ed3d86b287bb3cda96a879a342bfa7a2c2b) | 测试 | 固定分组用量汇总触发器集成测试的数据库会话时区。 |
+| 23 | [`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557) | 修复 | 额度恢复后清理 OpenAI 账号既有的调度阈值停调状态。 |
+| 24 | [`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6) | 修复 | 统一 Codex 账号级停调阈值优先级，并协调编辑阈值后的既有停调状态。 |
 
 ## 下次同步检查清单
 
 1. 获取 `upstream/main`，先比较当前共同祖先和上游新增提交，不直接覆盖本地分支。
-2. 检查 `CUSTOM-001` 至 `CUSTOM-005` 的主要文件是否被上游修改。
+2. 检查 `CUSTOM-001` 至 `CUSTOM-008` 的主要文件是否被上游修改。
 3. 如果上游已经提供等价功能，比较行为和测试后将对应条目标记为 `upstreamed`；不要长期维护重复生产代码。
 4. 对测试冲突按覆盖行为判断，不按来源机械选择；保留覆盖更完整且与当前实现一致的测试。
 5. 不恢复 `retired` 的一次性工作流。
@@ -247,7 +301,14 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 - `backend/internal/service/openai_images_responses.go`
 - `backend/internal/service/account_scheduling_threshold_eval_test.go`
 - `backend/internal/service/content_moderation_runtime_cache_test.go`
+- `backend/internal/service/account_usage_service.go`
+- `backend/internal/service/openai_gateway_scheduling.go`
+- `backend/internal/service/openai_codex_fingerprint.go`
+- `backend/internal/service/ratelimit_service.go`
+- `backend/internal/repository/account_repo.go`
+- `backend/internal/repository/group_usage_rollup_trigger_integration_test.go`
 - `frontend/src/components/account/ModelWhitelistSelector.vue`
+- `frontend/src/components/account/EditAccountModal.vue`
 - `.github/workflows/custom-docker.yml`
 - `Dockerfile`
 - `frontend/src/components/common/VersionBadge.vue`
