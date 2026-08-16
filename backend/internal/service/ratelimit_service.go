@@ -39,6 +39,12 @@ type AccountRuntimeBlocker interface {
 	ClearAccountSchedulingBlock(accountID int64)
 }
 
+// AccountSchedulingThresholdPolicyReconciler keeps persisted/runtime pause
+// state aligned with an account's current scheduling-threshold policy.
+type AccountSchedulingThresholdPolicyReconciler interface {
+	ReconcileAccountSchedulingThresholdPolicy(ctx context.Context, account *Account) error
+}
+
 // SuccessfulTestRecoveryResult 表示测试成功后恢复了哪些运行时状态。
 type SuccessfulTestRecoveryResult struct {
 	ClearedError     bool
@@ -205,6 +211,76 @@ func (s *RateLimitService) ApplyAccountSchedulingThreshold(ctx context.Context, 
 		"used_percent", decision.UsedPercent,
 		"until", decision.Until.UTC())
 	return true
+}
+
+// ReconcileAccountSchedulingThresholdPolicy re-evaluates only pauses created
+// by the generic account scheduling threshold. It intentionally leaves every
+// other temporary-unschedulable source untouched.
+func (s *RateLimitService) ReconcileAccountSchedulingThresholdPolicy(ctx context.Context, account *Account) error {
+	if s == nil || s.settingService == nil || s.accountRepo == nil || account == nil || account.ID <= 0 {
+		return nil
+	}
+	if !IsAccountSchedulingThresholdReason(account.TempUnschedulableReason) {
+		return nil
+	}
+
+	repo, ok := s.accountRepo.(AccountSchedulingThresholdPauseRepository)
+	if !ok {
+		return fmt.Errorf("account repository does not support scheduling-threshold pause reconciliation")
+	}
+
+	now := time.Now().UTC()
+	decision := EvaluateAccountSchedulingThreshold(account, s.settingService.GetAccountSchedulingThresholds(ctx), now)
+	var nextUntil *time.Time
+	var nextReason string
+	if decision.ShouldPause && decision.Until != nil && decision.Until.After(now) {
+		nextUntil = cloneTimePtr(decision.Until)
+		nextReason = BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+			Platform:         decision.Platform,
+			Window:           decision.Window,
+			Scope:            decision.Scope,
+			ThresholdPercent: decision.ThresholdPercent,
+			UsedPercent:      decision.UsedPercent,
+			Until:            *decision.Until,
+			Now:              now,
+		})
+		if accountHasSameSchedulingThresholdPause(account, *decision.Until, nextReason) {
+			return nil
+		}
+	}
+
+	expectedReason := account.TempUnschedulableReason
+	updated, err := repo.ReconcileAccountSchedulingThresholdPause(
+		ctx,
+		account.ID,
+		expectedReason,
+		nextUntil,
+		nextReason,
+	)
+	if err != nil || !updated {
+		return err
+	}
+
+	if s.tempUnschedCache != nil {
+		if err := s.tempUnschedCache.DeleteTempUnsched(ctx, account.ID); err != nil {
+			slog.Warn("account_scheduling_threshold_cache_delete_failed", "account_id", account.ID, "error", err)
+		}
+		if nextUntil != nil {
+			if state := tempUnschedStateFromStoredReason(nextReason, nextUntil.Unix()); state != nil {
+				if err := s.tempUnschedCache.SetTempUnsched(ctx, account.ID, state); err != nil {
+					slog.Warn("account_scheduling_threshold_cache_set_failed", "account_id", account.ID, "error", err)
+				}
+			}
+		}
+	}
+
+	s.notifyAccountSchedulingBlockCleared(account.ID)
+	account.TempUnschedulableUntil = cloneTimePtr(nextUntil)
+	account.TempUnschedulableReason = nextReason
+	if nextUntil != nil {
+		s.notifyAccountSchedulingBlocked(account, *nextUntil, AccountSchedulingThresholdReasonSource)
+	}
+	return nil
 }
 
 func accountHasSameSchedulingThresholdPause(account *Account, until time.Time, reason string) bool {

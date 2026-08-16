@@ -2294,6 +2294,49 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 	return nil
 }
 
+// ReconcileAccountSchedulingThresholdPause replaces or clears a threshold-
+// generated pause only if the persisted reason is still the exact reason the
+// service evaluated. The state change and scheduler outbox event are committed
+// by one SQL statement so a concurrent unrelated pause cannot be lost.
+func (r *accountRepository) ReconcileAccountSchedulingThresholdPause(
+	ctx context.Context,
+	id int64,
+	expectedReason string,
+	until *time.Time,
+	reason string,
+) (bool, error) {
+	var untilValue any
+	var reasonValue any
+	if until != nil {
+		untilValue = until.UTC()
+		reasonValue = reason
+	}
+
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET temp_unschedulable_until = $1,
+				temp_unschedulable_reason = $2,
+				updated_at = NOW()
+			WHERE id = $3
+				AND deleted_at IS NULL
+				AND temp_unschedulable_reason = $4
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $5, updated.id, NULL, NULL FROM updated
+	`, untilValue, reasonValue, id, expectedReason, service.SchedulerOutboxEventAccountChanged)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		return false, err
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
+}
+
 func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 	ctx context.Context,
 	id int64,

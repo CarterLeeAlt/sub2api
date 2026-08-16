@@ -326,7 +326,7 @@ export default {
         'standard-tier 且未自动返回 project_id 的 Antigravity 账号需要填写用户自带 GCP project。',
       accountSchedulingThresholdOverride: '账号自动停调阈值覆盖',
       accountSchedulingThresholdOverrideHint:
-        '仅对当前账号覆盖平台级自动停调阈值；关闭后使用平台设置。',
+        '覆盖当前账号的全部自动停调阈值，包括 Codex 5h/7d 窗口；关闭后使用平台与 Codex 设置。',
       accountSchedulingThresholdOverrideValue: '账号阈值百分比',
       accountSchedulingThresholdOverrideDisabledHint:
         '1-100，达到该用量百分比后临时不可调度；100 表示禁用当前账号自动停调。',
@@ -846,6 +846,7 @@ export default {
 	  autoPause5hDisabled: '禁用 5h 自动暂停',
 	  autoPause7dDisabled: '禁用 7d 自动暂停',
 	  autoPauseDisabledHint: '开启后该账号永不进入自动暂停（即使全局默认阈值已配置）。',
+	  autoPauseManagedByAccountThresholdHint: '上方账号自动停调阈值覆盖已启用，它会统一控制 Codex 两个窗口；此处旧版 5h/7d 设置不生效。',
       // Quota control (Anthropic OAuth/SetupToken only)
       quotaControl: {
         title: '配额控制',

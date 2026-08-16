@@ -846,6 +846,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
+	if s.thresholdReconciler != nil {
+		if err := s.thresholdReconciler.ReconcileAccountSchedulingThresholdPolicy(ctx, updated); err != nil {
+			return nil, err
+		}
+	}
 	return updated, nil
 }
 

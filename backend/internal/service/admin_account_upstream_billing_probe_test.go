@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/stretchr/testify/require"
@@ -13,8 +14,43 @@ type upstreamBillingProbeAdminRepo struct {
 	*upstreamBillingProbeAccountRepo
 }
 
+type thresholdPolicyReconcilerRecorder struct {
+	calls int
+}
+
+func (r *thresholdPolicyReconcilerRecorder) ReconcileAccountSchedulingThresholdPolicy(_ context.Context, account *Account) error {
+	r.calls++
+	account.TempUnschedulableUntil = nil
+	account.TempUnschedulableReason = ""
+	return nil
+}
+
 func (r *upstreamBillingProbeAdminRepo) ListShadowsByParent(context.Context, int64) ([]*Account, error) {
 	return nil, nil
+}
+
+func TestUpdateAccountReconcilesSchedulingThresholdPauseBeforeReturning(t *testing.T) {
+	accountID := int64(108)
+	until := time.Now().UTC().Add(time.Hour)
+	repo := &upstreamBillingProbeAdminRepo{upstreamBillingProbeAccountRepo: &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
+		accountID: {
+			ID: accountID, Name: "before", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true,
+			Credentials:             map[string]any{"account_scheduling_threshold": 97},
+			TempUnschedulableUntil:  &until,
+			TempUnschedulableReason: BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{Platform: PlatformOpenAI, Window: "5h", ThresholdPercent: 97, UsedPercent: 99, Until: until, Now: time.Now().UTC()}),
+		},
+	}}}
+	reconciler := &thresholdPolicyReconcilerRecorder{}
+	svc := &adminServiceImpl{accountRepo: repo, thresholdReconciler: reconciler}
+
+	updated, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
+		Credentials: map[string]any{"account_scheduling_threshold": 100},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, reconciler.calls)
+	require.Nil(t, updated.TempUnschedulableUntil)
+	require.Empty(t, updated.TempUnschedulableReason)
 }
 
 type accountBillingSettingsAdminRepo struct {
