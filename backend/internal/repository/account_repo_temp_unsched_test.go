@@ -26,6 +26,54 @@ func TestAccountRepository_SetTempUnschedulable_NoRowsAffectedDoesNotWriteOutbox
 	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
 }
 
+func TestAccountRepository_ReconcileAccountSchedulingThresholdPause_UsesReasonCAS(t *testing.T) {
+	until := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	tests := []struct {
+		name       string
+		until      *time.Time
+		reason     string
+		affected   int64
+		wantUpdate bool
+	}{
+		{name: "clear matching pause", affected: 1, wantUpdate: true},
+		{name: "replace matching pause", until: &until, reason: "new-reason", affected: 1, wantUpdate: true},
+		{name: "preserve concurrently replaced pause", affected: 0, wantUpdate: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exec := &recordingSQLExecutor{result: rowsAffectedResult(tt.affected)}
+			repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+			updated, err := repo.ReconcileAccountSchedulingThresholdPause(
+				context.Background(),
+				42,
+				"expected-old-reason",
+				tt.until,
+				tt.reason,
+			)
+
+			require.NoError(t, err)
+			require.Equal(t, tt.wantUpdate, updated)
+			require.Len(t, exec.execQueries, 1)
+			normalized := normalizeSQLWhitespace(exec.execQueries[0])
+			require.Contains(t, normalized, "AND temp_unschedulable_reason = $4")
+			require.Contains(t, normalized, "INSERT INTO scheduler_outbox")
+			require.Len(t, exec.execArgs[0], 5)
+			require.Equal(t, int64(42), exec.execArgs[0][2])
+			require.Equal(t, "expected-old-reason", exec.execArgs[0][3])
+			require.Equal(t, service.SchedulerOutboxEventAccountChanged, exec.execArgs[0][4])
+			if tt.until == nil {
+				require.Nil(t, exec.execArgs[0][0])
+				require.Nil(t, exec.execArgs[0][1])
+			} else {
+				require.Equal(t, until, exec.execArgs[0][0])
+				require.Equal(t, tt.reason, exec.execArgs[0][1])
+			}
+		})
+	}
+}
+
 func TestAccountRepository_GrokCredentialConditionalMutationsAreEligibleAndAtomicallyPropagated(t *testing.T) {
 	proxyID := int64(77)
 	snapshot := service.GrokCredentialMutationSnapshot{

@@ -1662,6 +1662,61 @@ func TestOpenAIGatewayService_SelectAccountForModelWithExclusions_UsesGlobalDefa
 	require.Equal(t, int64(35402), account.ID)
 }
 
+func TestOpenAIGatewayService_SelectAccountForModelWithExclusions_GenericOverride100WinsOverCodexGlobal(t *testing.T) {
+	ctx := withOpenAIQuotaAutoPauseSettings(context.Background(), OpsOpenAIAccountQuotaAutoPauseSettings{DefaultThreshold5h: 0.95})
+	primary := Account{
+		ID: 35411, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 0,
+		Credentials: map[string]any{"account_scheduling_threshold": 100},
+		Extra:       map[string]any{"codex_5h_used_percent": 99.0},
+	}
+	secondary := Account{ID: 35412, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 5}
+	svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{primary, secondary}}, cfg: &config.Config{}}
+
+	account, err := svc.SelectAccountForModelWithExclusions(ctx, nil, "", "gpt-5.1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, primary.ID, account.ID)
+}
+
+func TestOpenAIQuotaAutoPause_GenericAccountOverrideOwnsBothWindows(t *testing.T) {
+	ctx := withOpenAIQuotaAutoPauseSettings(context.Background(), OpsOpenAIAccountQuotaAutoPauseSettings{DefaultThreshold5h: 0.95, DefaultThreshold7d: 0.95})
+	until := time.Now().UTC().Add(time.Hour)
+
+	t.Run("100 disables both legacy windows", func(t *testing.T) {
+		account := &Account{
+			Platform:    PlatformOpenAI,
+			Credentials: map[string]any{"account_scheduling_threshold": 100},
+			Extra:       map[string]any{"codex_5h_used_percent": 99.0, "codex_7d_used_percent": 99.0},
+		}
+		paused, _ := shouldAutoPauseOpenAIAccountByQuota(ctx, account)
+		require.False(t, paused)
+		require.False(t, EvaluateAccountSchedulingThreshold(account, map[string]int{PlatformOpenAI: 97}, time.Now()).ShouldPause)
+	})
+
+	t.Run("1 through 99 use the generic account rule", func(t *testing.T) {
+		account := &Account{
+			Platform:    PlatformOpenAI,
+			Credentials: map[string]any{"account_scheduling_threshold": 80},
+			Extra: map[string]any{
+				"codex_5h_used_percent": 85.0, "codex_5h_reset_at": until.Format(time.RFC3339),
+				"auto_pause_5h_threshold": 0.95,
+			},
+		}
+		paused, pauseDecision := shouldAutoPauseOpenAIAccountByQuota(ctx, account)
+		require.True(t, paused)
+		require.Equal(t, 0.8, pauseDecision.threshold, "generic 80% rule must replace the legacy 95% rule")
+		decision := EvaluateAccountSchedulingThreshold(account, map[string]int{PlatformOpenAI: 97}, time.Now())
+		require.True(t, decision.ShouldPause)
+		require.Equal(t, 80, decision.ThresholdPercent)
+	})
+
+	t.Run("legacy policy remains when generic override is absent", func(t *testing.T) {
+		account := &Account{Platform: PlatformOpenAI, Extra: map[string]any{"codex_5h_used_percent": 96.0}}
+		paused, _ := shouldAutoPauseOpenAIAccountByQuota(ctx, account)
+		require.True(t, paused)
+	})
+}
+
 // Regression: a per-account explicit-disable flag exempts the account from auto-pause
 // even when a global default threshold is set. Without this, "leave threshold blank"
 // silently falls back to global default and admins have no way to whitelist a single
@@ -3110,6 +3165,21 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_LoadBalanceTopKExcludes
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
+}
+
+func TestDefaultOpenAIAccountScheduler_GenericOverride100PassesInitialQuotaFilter(t *testing.T) {
+	ctx := withOpenAIQuotaAutoPauseSettings(context.Background(), OpsOpenAIAccountQuotaAutoPauseSettings{DefaultThreshold5h: 0.95})
+	account := &Account{
+		ID: 37011, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{"account_scheduling_threshold": 100},
+		Extra:       map[string]any{"codex_5h_used_percent": 99.0},
+	}
+	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{cfg: &config.Config{}}}
+
+	compatible, reason := scheduler.isAccountRequestCompatibleReason(ctx, account, OpenAIAccountScheduleRequest{})
+
+	require.True(t, compatible)
+	require.Empty(t, reason)
 }
 
 func TestOpenAIGatewayService_OpenAIAccountSchedulerMetrics(t *testing.T) {

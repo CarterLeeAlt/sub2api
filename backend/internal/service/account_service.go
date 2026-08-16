@@ -125,6 +125,20 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
+// AccountSchedulingThresholdPauseRepository atomically replaces or clears a
+// temporary pause only while its stored reason still matches the reason the
+// caller evaluated. This prevents an account-policy edit from clearing a newer
+// authentication, proxy, or custom-rule pause that won a concurrent race.
+type AccountSchedulingThresholdPauseRepository interface {
+	ReconcileAccountSchedulingThresholdPause(
+		ctx context.Context,
+		accountID int64,
+		expectedReason string,
+		until *time.Time,
+		reason string,
+	) (bool, error)
+}
+
 type AccountDuplicateRepository interface {
 	// CreateWithAccountGroups atomically persists an account, its exact group priorities,
 	// and the scheduler outbox event for the new routing snapshot.

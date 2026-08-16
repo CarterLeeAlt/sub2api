@@ -123,7 +123,7 @@ export default {
         'Antigravity standard-tier accounts that do not receive an automatic project_id need a user-owned GCP project.',
       accountSchedulingThresholdOverride: 'Account Auto-Pause Threshold Override',
       accountSchedulingThresholdOverrideHint:
-        'Override the platform auto-pause threshold for this account only. Disable to use platform settings.',
+        'Override every auto-pause threshold for this account, including Codex 5h/7d windows. Disable to use platform and Codex settings.',
       accountSchedulingThresholdOverrideValue: 'Account threshold percent',
       accountSchedulingThresholdOverrideDisabledHint:
         'Use 1-100. The account becomes temporarily unschedulable after reaching this usage percent; 100 disables it for this account.',
@@ -782,6 +782,7 @@ export default {
 	  autoPause5hDisabled: 'Disable 5h auto-pause',
 	  autoPause7dDisabled: 'Disable 7d auto-pause',
 	  autoPauseDisabledHint: 'When enabled, this account is never auto-paused (even if a global default threshold is configured).',
+	  autoPauseManagedByAccountThresholdHint: 'The account auto-pause threshold override above is active, so it controls both Codex windows and these legacy 5h/7d controls are ignored.',
       // Quota control (Anthropic OAuth/SetupToken only)
       quotaControl: {
         title: 'Quota Control',

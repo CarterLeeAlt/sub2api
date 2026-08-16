@@ -2127,15 +2127,24 @@
         v-if="account?.platform === 'openai'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
+        <p
+          v-if="accountSchedulingThresholdOverrideEnabled"
+          class="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
+          data-testid="auto-pause-managed-by-account-threshold-hint"
+        >
+          {{ t('admin.accounts.autoPauseManagedByAccountThresholdHint') }}
+        </p>
         <div class="space-y-2">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('admin.accounts.autoPause5hDisabled') }}</label>
             <button
               type="button"
+              :disabled="accountSchedulingThresholdOverrideEnabled"
               @click="autoPause5hDisabled = !autoPause5hDisabled"
               :class="[
                 'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
-                autoPause5hDisabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+                autoPause5hDisabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600',
+                accountSchedulingThresholdOverrideEnabled ? 'cursor-not-allowed opacity-50' : ''
               ]"
               data-testid="auto-pause-5h-disabled"
             >
@@ -2158,7 +2167,7 @@
             max="100"
             step="0.1"
             class="input"
-            :disabled="autoPause5hDisabled"
+            :disabled="accountSchedulingThresholdOverrideEnabled || autoPause5hDisabled"
             data-testid="auto-pause-5h-threshold"
           />
           <p class="input-hint">{{ t('admin.accounts.autoPauseThresholdHint') }}</p>
@@ -2168,10 +2177,12 @@
             <label class="input-label mb-0">{{ t('admin.accounts.autoPause7dDisabled') }}</label>
             <button
               type="button"
+              :disabled="accountSchedulingThresholdOverrideEnabled"
               @click="autoPause7dDisabled = !autoPause7dDisabled"
               :class="[
                 'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
-                autoPause7dDisabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+                autoPause7dDisabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600',
+                accountSchedulingThresholdOverrideEnabled ? 'cursor-not-allowed opacity-50' : ''
               ]"
               data-testid="auto-pause-7d-disabled"
             >
@@ -2194,7 +2205,7 @@
             max="100"
             step="0.1"
             class="input"
-            :disabled="autoPause7dDisabled"
+            :disabled="accountSchedulingThresholdOverrideEnabled || autoPause7dDisabled"
             data-testid="auto-pause-7d-threshold"
           />
           <p class="input-hint">{{ t('admin.accounts.autoPauseThresholdHint') }}</p>

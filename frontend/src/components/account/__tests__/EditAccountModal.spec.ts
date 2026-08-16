@@ -851,6 +851,19 @@ describe('EditAccountModal', () => {
 	  expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.auto_pause_7d_disabled).toBeUndefined()
 	})
 
+	it('disables legacy Codex window controls while the generic account override is active', () => {
+	  const account = buildAccount()
+	  account.credentials.account_scheduling_threshold = 100
+
+	  const wrapper = mountModal(account)
+
+	  expect(wrapper.get('[data-testid="auto-pause-managed-by-account-threshold-hint"]').exists()).toBe(true)
+	  expect(wrapper.get<HTMLButtonElement>('[data-testid="auto-pause-5h-disabled"]').element.disabled).toBe(true)
+	  expect(wrapper.get<HTMLInputElement>('[data-testid="auto-pause-5h-threshold"]').element.disabled).toBe(true)
+	  expect(wrapper.get<HTMLButtonElement>('[data-testid="auto-pause-7d-disabled"]').element.disabled).toBe(true)
+	  expect(wrapper.get<HTMLInputElement>('[data-testid="auto-pause-7d-threshold"]').element.disabled).toBe(true)
+	})
+
   it('keeps at least one OpenAI APIKey endpoint capability selected', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

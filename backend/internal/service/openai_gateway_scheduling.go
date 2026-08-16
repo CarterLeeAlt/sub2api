@@ -445,6 +445,21 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 	if account == nil || !account.IsOpenAI() {
 		return false, openAIQuotaAutoPauseDecision{}
 	}
+	// The generic per-account threshold is the account-level source of truth for
+	// every Codex quota window. When present, evaluate it here too because sticky
+	// WebSocket selection bypasses the ordinary account-list threshold filter.
+	// This is one generic decision, not a second legacy per-window veto.
+	if thresholdPercent, configured := accountSchedulingThresholdOverride(account); configured {
+		decision := EvaluateAccountSchedulingThreshold(account, nil, time.Now().UTC())
+		if !decision.ShouldPause {
+			return false, openAIQuotaAutoPauseDecision{}
+		}
+		return true, openAIQuotaAutoPauseDecision{
+			window:      decision.Window,
+			threshold:   float64(thresholdPercent) / 100,
+			utilization: decision.UsedPercent / 100,
+		}
+	}
 	// Per-account explicit-disable flags must take precedence over the global default.
 	// Without these, leaving the account threshold blank means "use global default",
 	// so an admin has no way to exempt a single account from auto-pause once a global
