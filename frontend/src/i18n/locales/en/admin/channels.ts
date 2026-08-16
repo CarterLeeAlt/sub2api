@@ -291,7 +291,7 @@ export default {
       retryCount: 'Retry Count',
       sampleRate: 'Sample Rate',
       proxy: 'Proxy Server',
-      proxyHint: 'Send moderation requests through the selected proxy (IP Management - Proxy Servers), useful when the egress IP is not supported by OpenAI. Defaults to direct connection.',
+      proxyHint: 'Send moderation requests through the selected proxy (Proxy Management - Proxy Servers), useful when the egress IP is not supported by OpenAI. Defaults to direct connection.',
       recordNonHits: 'Record Non-Hits',
       recordNonHitsHint: 'When enabled, sampled non-hit request summaries are redacted before storage.',
       preHashCheck: 'Enable Pre-Hash Check',

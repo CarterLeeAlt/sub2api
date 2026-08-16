@@ -191,9 +191,8 @@
           @select-all-results="handleSelectAllResults"
           @toggle-schedulable="handleBulkToggleSchedulable"
         />
-        <div ref="accountTableRef" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <DataTable
-          ref="dataTableRef"
           :columns="cols"
           :data="accounts"
           :loading="loading"
@@ -493,7 +492,6 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
 import { useTableLoader } from '@/composables/useTableLoader'
-import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
@@ -540,8 +538,6 @@ const authStore = useAuthStore()
 
 const proxies = ref<AccountProxy[]>([])
 const groups = ref<AdminGroup[]>([])
-const accountTableRef = ref<HTMLElement | null>(null)
-const dataTableRef = ref<InstanceType<typeof DataTable> | null>(null)
 type AccountBulkEditTarget =
   | {
       mode: 'selected'
@@ -1096,14 +1092,11 @@ const {
   allVisibleSelected,
   isSelected,
   setSelectedIds,
-  select,
-  deselect,
   toggle: toggleSel,
   clear: clearSelectedIds,
   removeMany: removeSelectedAccounts,
   toggleVisible,
-  selectVisible: selectCurrentPage,
-  batchUpdate
+  selectVisible: selectCurrentPage
 } = useTableSelection<Account>({
   rows: accounts,
   getId: (account) => account.id
@@ -1128,19 +1121,6 @@ const clearSelection = () => {
 const selectPage = () => {
   selectCurrentPage()
 }
-
-const swipeVirtualContext: SwipeSelectVirtualContext = {
-  getVirtualizer: () => dataTableRef.value?.virtualizer ?? null,
-  getSortedData: () => dataTableRef.value?.sortedData ?? accounts.value,
-  getRowId: (row: any) => row.id,
-}
-
-useSwipeSelect(accountTableRef, {
-  isSelected,
-  select,
-  deselect,
-  batchUpdate
-}, swipeVirtualContext)
 
 const resetAutoRefreshCache = () => {
   autoRefreshETag.value = null

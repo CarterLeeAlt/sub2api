@@ -143,7 +143,7 @@ type ContentModerationConfig struct {
 	Mode    string `json:"mode"`
 	BaseURL string `json:"base_url"`
 	Model   string `json:"model"`
-	// ProxyID 指定审计请求使用的代理服务器（IP管理-代理服务器），nil 表示直连。
+	// ProxyID 指定审计请求使用的代理服务器（代理管理-代理服务器），nil 表示直连。
 	ProxyID              *int64                       `json:"proxy_id,omitempty"`
 	APIKey               string                       `json:"api_key,omitempty"`
 	APIKeys              []string                     `json:"api_keys,omitempty"`

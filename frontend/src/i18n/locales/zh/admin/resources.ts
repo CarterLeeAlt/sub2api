@@ -42,7 +42,7 @@ export default {
 
     // Proxies Management
     proxies: {
-      title: 'IP管理',
+      title: '代理管理',
       description: '管理代理服务器配置',
       createProxy: '添加代理',
       editProxy: '编辑代理',
