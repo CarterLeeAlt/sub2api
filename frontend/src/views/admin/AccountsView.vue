@@ -801,7 +801,13 @@ const flushQueuedUsageBatch = async () => {
     // A fresh Codex snapshot may clear a threshold-triggered temporary pause.
     // Apply the authoritative account rows returned by the batch endpoint so
     // the status badge updates in the same refresh, without another list load.
-    for (const updatedAccount of Object.values(result.account_updates ?? {})) {
+    for (const [key, updatedAccount] of Object.entries(result.account_updates ?? {})) {
+      // A config save invalidates any usage request that started from the old
+      // account row. Its late full-row response must not roll credentials (or
+      // the threshold override switch) back in the list after the save.
+      if ((usageBatchRequestTokenByAccountId.value[key] ?? 0) !== requestTokensByAccount[key]) {
+        continue
+      }
       patchAccountInList(updatedAccount)
     }
   } catch (error) {
@@ -2168,6 +2174,12 @@ const handleProbeUpstreamBilling = async (account: Account) => {
   }
 }
 const handleAccountUpdated = (updatedAccount: Account) => {
+  const key = String(updatedAccount.id)
+  usageBatchCache.delete(updatedAccount.id)
+  usageBatchRequestTokenByAccountId.value = {
+    ...usageBatchRequestTokenByAccountId.value,
+    [key]: ++usageBatchRequestToken
+  }
   patchAccountInList(updatedAccount)
   enterAutoRefreshSilentWindow()
 }

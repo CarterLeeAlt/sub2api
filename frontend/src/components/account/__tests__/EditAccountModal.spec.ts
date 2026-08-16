@@ -877,6 +877,28 @@ describe('EditAccountModal', () => {
 	  expect(wrapper.get<HTMLInputElement>('[data-testid="auto-pause-5h-threshold"]').element.disabled).toBe(false)
 	})
 
+	it('does not let a same-account runtime refresh overwrite the threshold override being edited', async () => {
+	  const account = buildAccount()
+	  const wrapper = mountModal(account)
+	  const overrideSwitch = wrapper.get<HTMLButtonElement>(
+		'[data-testid="account-scheduling-threshold-override-enabled"]'
+	  )
+
+	  expect(overrideSwitch.attributes('aria-checked')).toBe('false')
+	  await overrideSwitch.trigger('click')
+	  expect(overrideSwitch.attributes('aria-checked')).toBe('true')
+
+	  await wrapper.setProps({
+		account: {
+		  ...account,
+		  updated_at: '2026-08-17T06:05:25Z',
+		  temp_unschedulable_until: '2026-08-23T03:14:48Z'
+		}
+	  })
+
+	  expect(overrideSwitch.attributes('aria-checked')).toBe('true')
+	})
+
   it('keeps at least one OpenAI APIKey endpoint capability selected', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

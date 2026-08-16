@@ -139,6 +139,21 @@ type AccountSchedulingThresholdPauseRepository interface {
 	) (bool, error)
 }
 
+// AccountSchedulingThresholdPauseWriter persists a newly-triggered threshold
+// pause only while the account row is still the exact version that was
+// evaluated. In particular, a concurrent account-threshold override, usage
+// refresh, manual scheduling toggle, or unrelated cooldown must make the write
+// lose the compare-and-swap instead of resurrecting stale scheduling state.
+type AccountSchedulingThresholdPauseWriter interface {
+	SetAccountSchedulingThresholdPauseIfUnchanged(
+		ctx context.Context,
+		accountID int64,
+		expectedUpdatedAt time.Time,
+		until time.Time,
+		reason string,
+	) (bool, error)
+}
+
 type AccountDuplicateRepository interface {
 	// CreateWithAccountGroups atomically persists an account, its exact group priorities,
 	// and the scheduler outbox event for the new routing snapshot.

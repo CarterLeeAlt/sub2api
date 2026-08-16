@@ -3,6 +3,7 @@ package repository
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
@@ -35,6 +36,44 @@ func TestSchedulerMetadataAccountKeepsOpenAISubscriptionIdentity(t *testing.T) {
 
 	require.True(t, metadata.IsOpenAIChatGPTSubscription())
 	require.Empty(t, metadata.GetCredential("access_token"))
+}
+
+func TestSchedulerMetadataAccountKeepsSchedulingThresholdOverrideAndVersion(t *testing.T) {
+	updatedAt := time.Date(2026, 8, 17, 6, 5, 24, 123456000, time.UTC)
+	resetAt := updatedAt.Add(7 * 24 * time.Hour)
+	account := service.Account{
+		ID:          25,
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		UpdatedAt:   updatedAt,
+		Credentials: map[string]any{
+			"account_scheduling_threshold": 100,
+			"access_token":                 "secret-access-token",
+		},
+		Extra: map[string]any{
+			"codex_7d_used_percent":        99.0,
+			"codex_7d_reset_at":            resetAt.Format(time.RFC3339),
+			"codex_wham_presence_schema":   "wham-usage-v1",
+			"codex_wham_5h_window_present": false,
+			"codex_wham_7d_window_present": true,
+		},
+	}
+
+	metadata := buildSchedulerMetadataAccount(account)
+
+	require.Equal(t, 100, metadata.Credentials["account_scheduling_threshold"])
+	require.Equal(t, updatedAt, metadata.UpdatedAt)
+	require.NotContains(t, metadata.Credentials, "access_token")
+	require.Equal(t, "wham-usage-v1", metadata.Extra["codex_wham_presence_schema"])
+	require.Equal(t, false, metadata.Extra["codex_wham_5h_window_present"])
+	require.Equal(t, true, metadata.Extra["codex_wham_7d_window_present"])
+	require.False(t, service.EvaluateAccountSchedulingThreshold(
+		&metadata,
+		map[string]int{service.PlatformOpenAI: 97},
+		updatedAt,
+	).ShouldPause, "the scheduler projection must honor the account-level 100 override")
 }
 
 func TestSchedulerMetadataAccountProjectsUpstreamBillingProbe(t *testing.T) {

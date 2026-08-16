@@ -7,12 +7,14 @@ const {
   listAccounts,
   listWithEtag,
   getBatchTodayStats,
+  getBatchUsage,
   getAllProxies,
   getAllGroups
 } = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   listWithEtag: vi.fn(),
   getBatchTodayStats: vi.fn(),
+  getBatchUsage: vi.fn(),
   getAllProxies: vi.fn(),
   getAllGroups: vi.fn()
 }))
@@ -23,6 +25,7 @@ vi.mock('@/api/admin', () => ({
       list: listAccounts,
       listWithEtag,
       getBatchTodayStats,
+      getBatchUsage,
       getUpstreamBillingProbeSettings: vi.fn().mockResolvedValue({ enabled: true, interval_minutes: 30 }),
       delete: vi.fn(),
       batchClearError: vi.fn(),
@@ -75,8 +78,9 @@ const DataTableStub = {
           <slot :name="'header-' + column.key" :column="column" />
         </div>
       </template>
-      <div v-for="row in data" :key="row.id" data-test="account-rate">
-        <slot name="cell-rate_multiplier" :row="row" />
+      <div v-for="row in data" :key="row.id">
+        <div data-test="account-rate"><slot name="cell-rate_multiplier" :row="row" /></div>
+        <slot name="cell-usage" :row="row" />
       </div>
     </div>
   `
@@ -86,6 +90,33 @@ const DataTableStub = {
 const HelpTooltipStub = {
   props: ['content', 'widthClass'],
   template: '<span data-test="usage-windows-hint">{{ content }}</span>'
+}
+
+const AccountUsageCellStub = {
+  props: ['account', 'requestBatchedUsage'],
+  emits: ['account-updated'],
+  methods: {
+    requestUsage() {
+      this.requestBatchedUsage?.(this.account)
+    },
+    emitSavedAccount() {
+      this.$emit('account-updated', {
+        ...this.account,
+        credentials: {
+          ...(this.account.credentials ?? {}),
+          account_scheduling_threshold: 100
+        },
+        updated_at: '2026-08-17T06:05:25Z'
+      })
+    }
+  },
+  template: `
+    <div>
+      <span data-test="account-threshold">{{ account.credentials?.account_scheduling_threshold ?? 'default' }}</span>
+      <button data-test="request-usage" @click="requestUsage">request</button>
+      <button data-test="save-account" @click="emitSavedAccount">save</button>
+    </div>
+  `
 }
 
 function mountView() {
@@ -121,7 +152,7 @@ function mountView() {
         AccountStatusIndicator: true,
         AccountTodayStatsCell: true,
         AccountGroupsCell: true,
-        AccountUsageCell: true,
+        AccountUsageCell: AccountUsageCellStub,
         Icon: true
       }
     }
@@ -135,6 +166,7 @@ describe('admin AccountsView usage windows hint', () => {
     listAccounts.mockReset()
     listWithEtag.mockReset()
     getBatchTodayStats.mockReset()
+    getBatchUsage.mockReset()
     getAllProxies.mockReset()
     getAllGroups.mockReset()
 
@@ -151,6 +183,7 @@ describe('admin AccountsView usage windows hint', () => {
       data: null
     })
     getBatchTodayStats.mockResolvedValue({ stats: {} })
+    getBatchUsage.mockResolvedValue({ usage: {}, errors: {}, account_updates: {} })
     getAllProxies.mockResolvedValue([])
     getAllGroups.mockResolvedValue([])
   })
@@ -222,5 +255,48 @@ describe('admin AccountsView usage windows hint', () => {
     expect(wrapper.get('[data-test="account-rate"]').text()).toBe('0.065x')
     const indicator = wrapper.get('[data-testid="account-rate-sync-indicator"]')
     expect(indicator.attributes('title')).toBe('admin.accounts.upstreamBilling.syncedRateTooltip')
+  })
+
+  it('ignores a late usage row captured before an account override save', async () => {
+    const staleAccount = {
+      id: 41,
+      name: 'codex-account',
+      platform: 'openai',
+      type: 'oauth',
+      status: 'active',
+      schedulable: true,
+      credentials: {},
+      created_at: '2026-08-17T06:00:00Z',
+      updated_at: '2026-08-17T06:00:00Z'
+    }
+    listAccounts.mockResolvedValueOnce({
+      items: [staleAccount],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+
+    let resolveUsage!: (value: unknown) => void
+    getBatchUsage.mockReturnValueOnce(new Promise(resolve => {
+      resolveUsage = resolve
+    }))
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="request-usage"]').trigger('click')
+    await vi.waitFor(() => expect(getBatchUsage).toHaveBeenCalledWith([41], false))
+
+    await wrapper.get('[data-test="save-account"]').trigger('click')
+    expect(wrapper.get('[data-test="account-threshold"]').text()).toBe('100')
+
+    resolveUsage({
+      usage: { '41': { plan_type: 'team' } },
+      errors: {},
+      account_updates: { '41': staleAccount }
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="account-threshold"]').text()).toBe('100')
   })
 })

@@ -74,6 +74,44 @@ func TestAccountRepository_ReconcileAccountSchedulingThresholdPause_UsesReasonCA
 	}
 }
 
+func TestAccountRepository_SetAccountSchedulingThresholdPauseIfUnchanged_UsesAccountVersionCAS(t *testing.T) {
+	updatedAt := time.Date(2026, 8, 17, 6, 5, 24, 123456000, time.UTC)
+	until := updatedAt.Add(7 * 24 * time.Hour)
+	tests := []struct {
+		name       string
+		affected   int64
+		wantUpdate bool
+	}{
+		{name: "matching account version", affected: 1, wantUpdate: true},
+		{name: "concurrent account edit wins", affected: 0, wantUpdate: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exec := &recordingSQLExecutor{result: rowsAffectedResult(tt.affected)}
+			repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+			updated, err := repo.SetAccountSchedulingThresholdPauseIfUnchanged(
+				context.Background(), 42, updatedAt, until, "threshold-reason",
+			)
+
+			require.NoError(t, err)
+			require.Equal(t, tt.wantUpdate, updated)
+			require.Len(t, exec.execQueries, 1)
+			normalized := normalizeSQLWhitespace(exec.execQueries[0])
+			require.Contains(t, normalized, "AND updated_at = $4")
+			require.Contains(t, normalized, "AND status = $5")
+			require.Contains(t, normalized, "AND schedulable IS TRUE")
+			require.Contains(t, normalized, "temp_unschedulable_until IS NULL OR temp_unschedulable_until <= NOW()")
+			require.Contains(t, normalized, "INSERT INTO scheduler_outbox")
+			require.Len(t, exec.execArgs[0], 6)
+			require.Equal(t, updatedAt, exec.execArgs[0][3])
+			require.Equal(t, service.StatusActive, exec.execArgs[0][4])
+			require.Equal(t, service.SchedulerOutboxEventAccountChanged, exec.execArgs[0][5])
+		})
+	}
+}
+
 func TestAccountRepository_GrokCredentialConditionalMutationsAreEligibleAndAtomicallyPropagated(t *testing.T) {
 	proxyID := int64(77)
 	snapshot := service.GrokCredentialMutationSnapshot{
