@@ -148,6 +148,31 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 
 相关提交：[`adaf4ed3d`](https://github.com/CarterLeeAlt/sub2api/commit/adaf4ed3d86b287bb3cda96a879a342bfa7a2c2b)。
 
+### CUSTOM-009：表格仅允许显式复选框选择（`active`）
+
+账号管理和代理管理不启用鼠标拖拽框选，避免用户拖动页面或复制内容时误选记录。单项选择统一通过每行左侧复选框完成，批量选择保留表头全选框和页面已有的明确批量选择控件。
+
+主要文件：
+
+- `frontend/src/views/admin/AccountsView.vue`
+- `frontend/src/views/admin/ProxiesView.vue`
+- `frontend/src/composables/useSwipeSelect.ts`（已删除，后续同步不得恢复）
+
+相关提交：[`96bf166d5`](https://github.com/CarterLeeAlt/sub2api/commit/96bf166d5f416b3e7aa586a71c0a0fcecf73ca1e)。
+
+### CUSTOM-010：代理管理中文命名统一（`active`）
+
+中文导航、页面标题及面向用户的功能提示统一使用“代理管理”，不再使用容易误解为单纯 IP 地址维护的旧称；英文引用同步使用“Proxy Management”。路由、接口和代码中的 `proxy` / `proxies` 技术标识保持不变。
+
+主要文件：
+
+- `frontend/src/i18n/locales/zh/common.ts`
+- `frontend/src/i18n/locales/zh/admin/resources.ts`
+- `frontend/src/i18n/locales/zh/admin/channels.ts`
+- `frontend/src/i18n/locales/en/admin/channels.ts`
+
+相关提交：[`96bf166d5`](https://github.com/CarterLeeAlt/sub2api/commit/96bf166d5f416b3e7aa586a71c0a0fcecf73ca1e)。
+
 ## 已被上游吸收
 
 ### OpenAI 调度阈值百分比语义（`upstreamed`）
