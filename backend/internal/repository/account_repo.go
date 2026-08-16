@@ -2294,6 +2294,50 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 	return nil
 }
 
+// SetAccountSchedulingThresholdPauseIfUnchanged is the threshold-specific
+// compare-and-swap writer. The generic SetTempUnschedulable method is used by
+// error policies that intentionally extend an existing cooldown; a scheduling
+// policy derived from a cached account must instead prove that no account edit,
+// usage refresh, manual scheduling toggle, or competing runtime block landed
+// after the evaluated snapshot.
+func (r *accountRepository) SetAccountSchedulingThresholdPauseIfUnchanged(
+	ctx context.Context,
+	id int64,
+	expectedUpdatedAt time.Time,
+	until time.Time,
+	reason string,
+) (bool, error) {
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET temp_unschedulable_until = $1,
+				temp_unschedulable_reason = $2,
+				updated_at = NOW()
+			WHERE id = $3
+				AND deleted_at IS NULL
+				AND updated_at = $4
+				AND status = $5
+				AND schedulable IS TRUE
+				AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at <= NOW())
+				AND (overload_until IS NULL OR overload_until <= NOW())
+				AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until <= NOW())
+				AND (auto_pause_on_expired IS NOT TRUE OR expires_at IS NULL OR expires_at > NOW())
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $6, updated.id, NULL, NULL FROM updated
+	`, until.UTC(), reason, id, expectedUpdatedAt.UTC(), service.StatusActive, service.SchedulerOutboxEventAccountChanged)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		return false, err
+	}
+	r.syncSchedulerAccountSnapshotDetached(ctx, id)
+	return true, nil
+}
+
 // ReconcileAccountSchedulingThresholdPause replaces or clears a threshold-
 // generated pause only if the persisted reason is still the exact reason the
 // service evaluated. The state change and scheduler outbox event are committed

@@ -3759,7 +3759,12 @@ watch(
     if (!show || !newAccount) {
       return
     }
-    if (!wasShow || newAccount !== previousAccount) {
+    // Runtime usage/status refreshes replace the parent row object while the
+    // dialog is open. Rehydrating the whole form for the same account would
+    // overwrite unsaved admin input (most visibly the threshold-override
+    // switch). Only an actual open/reopen or account-ID change starts a new
+    // editing session.
+    if (!wasShow || newAccount.id !== previousAccount?.id) {
       syncFormFromAccount(newAccount)
       loadTLSProfiles()
     }

@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -65,6 +66,43 @@ func (c *thresholdPauseCacheRecorder) DeleteTempUnsched(_ context.Context, accou
 type thresholdPauseRuntimeBlocker struct {
 	blocked []int64
 	cleared []int64
+}
+
+type versionedThresholdPauseRepoStub struct {
+	rateLimitAccountRepoStub
+	current           *Account
+	apply             bool
+	writeErr          error
+	getCalls          int
+	casCalls          int
+	expectedUpdatedAt time.Time
+	onCAS             func(*versionedThresholdPauseRepoStub)
+}
+
+func (r *versionedThresholdPauseRepoStub) GetByID(context.Context, int64) (*Account, error) {
+	r.getCalls++
+	if r.current == nil {
+		return nil, nil
+	}
+	copyAccount := *r.current
+	copyAccount.Credentials = shallowCopyMap(r.current.Credentials)
+	copyAccount.Extra = shallowCopyMap(r.current.Extra)
+	return &copyAccount, nil
+}
+
+func (r *versionedThresholdPauseRepoStub) SetAccountSchedulingThresholdPauseIfUnchanged(
+	_ context.Context,
+	_ int64,
+	expectedUpdatedAt time.Time,
+	_ time.Time,
+	_ string,
+) (bool, error) {
+	r.casCalls++
+	r.expectedUpdatedAt = expectedUpdatedAt
+	if r.onCAS != nil {
+		r.onCAS(r)
+	}
+	return r.apply, r.writeErr
 }
 
 func (b *thresholdPauseRuntimeBlocker) BlockAccountScheduling(account *Account, _ time.Time, _ string) {
@@ -153,6 +191,114 @@ func TestRateLimitService_ApplyAccountSchedulingThreshold_UsesAccountOverrideInR
 	require.Equal(t, float64(80), payload["threshold_percent"])
 	require.Equal(t, float64(85.5), payload["used_percent"])
 	require.Contains(t, payload["error_message"], "85.5% used >= 80%")
+}
+
+func TestRateLimitService_ApplyAccountSchedulingThreshold_RechecksCanonicalOverrideMissingFromSlimSnapshot(t *testing.T) {
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	settingsRepo := newMockSettingRepo()
+	settingsRepo.data[SettingKeyAccountSchedulingThresholds] = `{"openai":97}`
+
+	now := time.Now().UTC()
+	until := now.Add(6 * 24 * time.Hour)
+	metadataAccount := &Account{
+		ID: 5001, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true,
+		Extra: map[string]any{"codex_7d_used_percent": 99.0, "codex_7d_reset_at": until.Format(time.RFC3339)},
+	}
+	repo := &versionedThresholdPauseRepoStub{current: &Account{
+		ID: 5001, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, UpdatedAt: now,
+		Credentials: map[string]any{accountSchedulingThresholdCredentialKey: 100},
+		Extra:       shallowCopyMap(metadataAccount.Extra),
+	}}
+	blocker := &thresholdPauseRuntimeBlocker{}
+	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	rl.SetSettingService(NewSettingService(settingsRepo, &config.Config{}))
+	rl.SetAccountRuntimeBlocker(blocker)
+
+	blocked := rl.ApplyAccountSchedulingThreshold(context.Background(), metadataAccount)
+
+	require.False(t, blocked)
+	require.Equal(t, 1, repo.getCalls)
+	require.Zero(t, repo.casCalls)
+	require.Nil(t, metadataAccount.TempUnschedulableUntil)
+	require.Empty(t, blocker.blocked)
+}
+
+func TestRateLimitService_ApplyAccountSchedulingThreshold_CASLosesToOverrideSaveWithoutPublishingBlock(t *testing.T) {
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	settingsRepo := newMockSettingRepo()
+	settingsRepo.data[SettingKeyAccountSchedulingThresholds] = `{"openai":97}`
+
+	now := time.Now().UTC()
+	until := now.Add(6 * 24 * time.Hour)
+	account := &Account{
+		ID: 5002, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, UpdatedAt: now,
+		Extra: map[string]any{"codex_7d_used_percent": 99.0, "codex_7d_reset_at": until.Format(time.RFC3339)},
+	}
+	canonical := *account
+	canonical.Extra = shallowCopyMap(account.Extra)
+	repo := &versionedThresholdPauseRepoStub{current: &canonical}
+	repo.onCAS = func(r *versionedThresholdPauseRepoStub) {
+		r.current.Credentials = map[string]any{accountSchedulingThresholdCredentialKey: 100}
+		r.current.UpdatedAt = now.Add(time.Millisecond)
+	}
+	blocker := &thresholdPauseRuntimeBlocker{}
+	cache := &thresholdPauseCacheRecorder{}
+	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+	rl.SetSettingService(NewSettingService(settingsRepo, &config.Config{}))
+	rl.SetAccountRuntimeBlocker(blocker)
+
+	blocked := rl.ApplyAccountSchedulingThreshold(context.Background(), account)
+
+	require.False(t, blocked)
+	require.Equal(t, 1, repo.casCalls)
+	require.GreaterOrEqual(t, repo.getCalls, 2)
+	require.Nil(t, account.TempUnschedulableUntil)
+	require.Empty(t, blocker.blocked)
+	require.Empty(t, cache.set)
+}
+
+func TestRateLimitService_ApplyAccountSchedulingThreshold_PublishesOnlyAfterDurableCAS(t *testing.T) {
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	settingsRepo := newMockSettingRepo()
+	settingsRepo.data[SettingKeyAccountSchedulingThresholds] = `{"openai":97}`
+
+	now := time.Now().UTC()
+	until := now.Add(6 * 24 * time.Hour)
+	account := &Account{
+		ID: 5003, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, UpdatedAt: now,
+		Extra: map[string]any{"codex_7d_used_percent": 99.0, "codex_7d_reset_at": until.Format(time.RFC3339)},
+	}
+	canonical := *account
+	canonical.Extra = shallowCopyMap(account.Extra)
+	repo := &versionedThresholdPauseRepoStub{current: &canonical, apply: true}
+	blocker := &thresholdPauseRuntimeBlocker{}
+	cache := &thresholdPauseCacheRecorder{}
+	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+	rl.SetSettingService(NewSettingService(settingsRepo, &config.Config{}))
+	rl.SetAccountRuntimeBlocker(blocker)
+
+	require.True(t, rl.ApplyAccountSchedulingThreshold(context.Background(), account))
+	require.Equal(t, 1, repo.casCalls)
+	require.Equal(t, now, repo.expectedUpdatedAt)
+	require.NotNil(t, account.TempUnschedulableUntil)
+	require.Equal(t, []int64{account.ID}, blocker.blocked)
+	require.Contains(t, cache.set, account.ID)
+
+	account.TempUnschedulableUntil = nil
+	account.TempUnschedulableReason = ""
+	repo.current = &canonical
+	repo.apply = false
+	repo.writeErr = errors.New("database unavailable")
+	blocker.blocked = nil
+	cache.set = nil
+
+	require.False(t, rl.ApplyAccountSchedulingThreshold(context.Background(), account))
+	require.Nil(t, account.TempUnschedulableUntil)
+	require.Empty(t, blocker.blocked)
+	require.Empty(t, cache.set)
 }
 
 func TestRateLimitService_ApplyAccountSchedulingThreshold_SkipsDuplicateTempUnschedulable(t *testing.T) {

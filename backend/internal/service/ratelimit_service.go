@@ -222,14 +222,102 @@ func (s *RateLimitService) ApplyAccountSchedulingThreshold(ctx context.Context, 
 		return false
 	}
 
-	now := time.Now().UTC()
 	thresholds := s.settingService.GetAccountSchedulingThresholds(ctx)
-	decision := EvaluateAccountSchedulingThreshold(account, thresholds, now)
-	if !decision.ShouldPause || decision.Until == nil || !decision.Until.After(now) {
+	now := time.Now().UTC()
+	initialDecision := EvaluateAccountSchedulingThreshold(account, thresholds, now)
+	if !validAccountSchedulingThresholdPause(initialDecision, now) {
 		return false
 	}
 
-	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+	// Production repositories provide a versioned writer. A scheduler bucket is
+	// intentionally a slim cache and can lag an account edit for a short time, so
+	// any would-pause decision must be re-evaluated from the canonical row and
+	// committed with an updated_at compare-and-swap. This prevents an old global
+	// threshold decision from racing a newly-saved account override (especially
+	// the value 100, which disables automatic threshold pauses).
+	if writer, ok := s.accountRepo.(AccountSchedulingThresholdPauseWriter); ok {
+		candidate, err := s.accountRepo.GetByID(ctx, account.ID)
+		if err != nil || candidate == nil {
+			slog.Warn("account_scheduling_threshold_current_account_load_failed", "account_id", account.ID, "error", err)
+			return false
+		}
+		for attempt := 0; attempt < 3; attempt++ {
+			if !candidate.IsActive() || !candidate.Schedulable {
+				return true
+			}
+			now = time.Now().UTC()
+			decision := EvaluateAccountSchedulingThreshold(candidate, thresholds, now)
+			if !validAccountSchedulingThresholdPause(decision, now) {
+				return false
+			}
+			reason := accountSchedulingThresholdDecisionReason(decision, now)
+			if accountHasSameSchedulingThresholdPause(candidate, *decision.Until, reason) {
+				return true
+			}
+			if !candidate.IsSchedulable() {
+				return true
+			}
+
+			applied, writeErr := writer.SetAccountSchedulingThresholdPauseIfUnchanged(
+				ctx,
+				candidate.ID,
+				candidate.UpdatedAt,
+				*decision.Until,
+				reason,
+			)
+			if writeErr != nil {
+				logAccountSchedulingThresholdWriteFailure(candidate.ID, decision, writeErr)
+				return false
+			}
+			if applied {
+				s.markAccountSchedulingThresholdPaused(ctx, account, candidate, decision, reason)
+				return true
+			}
+
+			candidate, err = s.accountRepo.GetByID(ctx, account.ID)
+			if err != nil || candidate == nil {
+				slog.Warn("account_scheduling_threshold_cas_reload_failed", "account_id", account.ID, "error", err)
+				return false
+			}
+		}
+
+		// Continuous account writes can make all bounded CAS attempts lose. Keep
+		// the request fail-closed only when the newest canonical row still proves
+		// the threshold is breached; do not manufacture a runtime/cache block that
+		// lacks a durable database source of truth.
+		now = time.Now().UTC()
+		decision := EvaluateAccountSchedulingThreshold(candidate, thresholds, now)
+		if validAccountSchedulingThresholdPause(decision, now) {
+			slog.Warn("account_scheduling_threshold_cas_contended", "account_id", account.ID)
+			return true
+		}
+		return false
+	}
+
+	// Lightweight/unit repositories retain the original interface. Persist
+	// first; only a successful durable write may publish runtime/cache state.
+	decision := initialDecision
+	reason := accountSchedulingThresholdDecisionReason(decision, now)
+	if accountHasSameSchedulingThresholdPause(account, *decision.Until, reason) {
+		return true
+	}
+	if !account.IsSchedulable() {
+		return false
+	}
+	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, *decision.Until, reason); err != nil {
+		logAccountSchedulingThresholdWriteFailure(account.ID, decision, err)
+		return false
+	}
+	s.markAccountSchedulingThresholdPaused(ctx, account, account, decision, reason)
+	return true
+}
+
+func validAccountSchedulingThresholdPause(decision AccountSchedulingThresholdDecision, now time.Time) bool {
+	return decision.ShouldPause && decision.Until != nil && decision.Until.After(now)
+}
+
+func accountSchedulingThresholdDecisionReason(decision AccountSchedulingThresholdDecision, now time.Time) string {
+	return BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
 		Platform:         decision.Platform,
 		Window:           decision.Window,
 		Scope:            decision.Scope,
@@ -238,45 +326,50 @@ func (s *RateLimitService) ApplyAccountSchedulingThreshold(ctx context.Context, 
 		Until:            *decision.Until,
 		Now:              now,
 	})
+}
 
-	if accountHasSameSchedulingThresholdPause(account, *decision.Until, reason) {
-		return true
+func logAccountSchedulingThresholdWriteFailure(accountID int64, decision AccountSchedulingThresholdDecision, err error) {
+	slog.Warn("account_scheduling_threshold_set_temp_unsched_failed",
+		"account_id", accountID,
+		"platform", decision.Platform,
+		"window", decision.Window,
+		"scope", decision.Scope,
+		"threshold_percent", decision.ThresholdPercent,
+		"used_percent", decision.UsedPercent,
+		"until", decision.Until.UTC(),
+		"error", err)
+}
+
+func (s *RateLimitService) markAccountSchedulingThresholdPaused(
+	ctx context.Context,
+	original *Account,
+	canonical *Account,
+	decision AccountSchedulingThresholdDecision,
+	reason string,
+) {
+	canonical.TempUnschedulableUntil = cloneTimePtr(decision.Until)
+	canonical.TempUnschedulableReason = reason
+	if original != nil && original != canonical {
+		original.TempUnschedulableUntil = cloneTimePtr(decision.Until)
+		original.TempUnschedulableReason = reason
 	}
-	if !account.IsSchedulable() {
-		return false
-	}
-
-	account.TempUnschedulableUntil = cloneTimePtr(decision.Until)
-	account.TempUnschedulableReason = reason
-	s.notifyAccountSchedulingBlocked(account, *decision.Until, "account_scheduling_threshold")
-
-	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, *decision.Until, reason); err != nil {
-		slog.Warn("account_scheduling_threshold_set_temp_unsched_failed",
-			"account_id", account.ID,
-			"platform", decision.Platform,
-			"window", decision.Window,
-			"scope", decision.Scope,
-			"threshold_percent", decision.ThresholdPercent,
-			"used_percent", decision.UsedPercent,
-			"until", decision.Until.UTC(),
-			"error", err)
-	} else if s.tempUnschedCache != nil {
+	s.notifyAccountSchedulingBlocked(canonical, *decision.Until, AccountSchedulingThresholdReasonSource)
+	if s.tempUnschedCache != nil {
 		if state := tempUnschedStateFromStoredReason(reason, decision.Until.Unix()); state != nil {
-			if err := s.tempUnschedCache.SetTempUnsched(ctx, account.ID, state); err != nil {
-				slog.Warn("account_scheduling_threshold_cache_set_failed", "account_id", account.ID, "error", err)
+			if err := s.tempUnschedCache.SetTempUnsched(ctx, canonical.ID, state); err != nil {
+				slog.Warn("account_scheduling_threshold_cache_set_failed", "account_id", canonical.ID, "error", err)
 			}
 		}
 	}
 
 	slog.Info("account_scheduling_threshold_temp_unschedulable",
-		"account_id", account.ID,
+		"account_id", canonical.ID,
 		"platform", decision.Platform,
 		"window", decision.Window,
 		"scope", decision.Scope,
 		"threshold_percent", decision.ThresholdPercent,
 		"used_percent", decision.UsedPercent,
 		"until", decision.Until.UTC())
-	return true
 }
 
 // ReconcileAccountSchedulingThresholdPolicy re-evaluates only pauses created
