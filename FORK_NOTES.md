@@ -136,6 +136,8 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 - `backend/internal/service/openai_codex_fingerprint.go`
 - `backend/internal/service/openai_codex_fingerprint_test.go`
 
+相关提交：[`992b51eb7`](https://github.com/CarterLeeAlt/sub2api/commit/992b51eb7d601bcb2fb490f185b45722d08dfcaa)。
+
 ### CUSTOM-008：分组用量汇总时区测试稳定化（`active`，仅测试）
 
 分组用量汇总触发器集成测试显式设置数据库会话时区，避免运行环境默认时区不同导致日期边界断言漂移。
@@ -279,6 +281,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 22 | [`adaf4ed3d`](https://github.com/CarterLeeAlt/sub2api/commit/adaf4ed3d86b287bb3cda96a879a342bfa7a2c2b) | 测试 | 固定分组用量汇总触发器集成测试的数据库会话时区。 |
 | 23 | [`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557) | 修复 | 额度恢复后清理 OpenAI 账号既有的调度阈值停调状态。 |
 | 24 | [`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6) | 修复 | 统一 Codex 账号级停调阈值优先级，并协调编辑阈值后的既有停调状态。 |
+| 25 | [`992b51eb7`](https://github.com/CarterLeeAlt/sub2api/commit/992b51eb7d601bcb2fb490f185b45722d08dfcaa) | 修复 | 为同一 Codex 请求预计算并共享起始时间，消除头、普通 JSON 和 raw 透传路径之间的 1 毫秒竞态。 |
 
 ## 下次同步检查清单
 
