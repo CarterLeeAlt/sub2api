@@ -851,17 +851,30 @@ describe('EditAccountModal', () => {
 	  expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.auto_pause_7d_disabled).toBeUndefined()
 	})
 
-	it('disables legacy Codex window controls while the generic account override is active', () => {
+	it('renders the generic account override as a switch and disables legacy Codex controls while active', async () => {
 	  const account = buildAccount()
 	  account.credentials.account_scheduling_threshold = 100
 
 	  const wrapper = mountModal(account)
+	  const overrideSwitch = wrapper.get<HTMLButtonElement>(
+		'[data-testid="account-scheduling-threshold-override-enabled"]'
+	  )
 
+	  expect(overrideSwitch.element.tagName).toBe('BUTTON')
+	  expect(overrideSwitch.attributes('role')).toBe('switch')
+	  expect(overrideSwitch.attributes('aria-checked')).toBe('true')
 	  expect(wrapper.get('[data-testid="auto-pause-managed-by-account-threshold-hint"]').exists()).toBe(true)
 	  expect(wrapper.get<HTMLButtonElement>('[data-testid="auto-pause-5h-disabled"]').element.disabled).toBe(true)
 	  expect(wrapper.get<HTMLInputElement>('[data-testid="auto-pause-5h-threshold"]').element.disabled).toBe(true)
 	  expect(wrapper.get<HTMLButtonElement>('[data-testid="auto-pause-7d-disabled"]').element.disabled).toBe(true)
 	  expect(wrapper.get<HTMLInputElement>('[data-testid="auto-pause-7d-threshold"]').element.disabled).toBe(true)
+
+	  await overrideSwitch.trigger('click')
+
+	  expect(overrideSwitch.attributes('aria-checked')).toBe('false')
+	  expect(wrapper.find('[data-testid="auto-pause-managed-by-account-threshold-hint"]').exists()).toBe(false)
+	  expect(wrapper.get<HTMLButtonElement>('[data-testid="auto-pause-5h-disabled"]').element.disabled).toBe(false)
+	  expect(wrapper.get<HTMLInputElement>('[data-testid="auto-pause-5h-threshold"]').element.disabled).toBe(false)
 	})
 
   it('keeps at least one OpenAI APIKey endpoint capability selected', async () => {
