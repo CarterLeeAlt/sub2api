@@ -516,6 +516,36 @@ func TestApplyCodexFingerprintClientMetadataRaw_MatchesMapVariant(t *testing.T) 
 	}
 }
 
+func TestCodexFingerprintTurnStartedAtIsSharedAcrossCarriers(t *testing.T) {
+	account := newTestOAuthAccount(4244, nil)
+	ids := resolveCodexFingerprintIDs(account, "client-sess-started-at", codexFingerprintSession)
+	require.NotNil(t, ids)
+
+	const startedAt int64 = 1786910586896
+	ids.turnStartedAtUnixMilli = startedAt
+
+	headers := make(http.Header)
+	headers.Set("x-codex-turn-metadata", `{"sandbox":"seatbelt"}`)
+	applyCodexFingerprintHeaders(headers, ids)
+	var headerMetadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(headers.Get("x-codex-turn-metadata")), &headerMetadata))
+	assert.Equal(t, float64(startedAt), headerMetadata["turn_started_at_unix_ms"])
+
+	body := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{\"sandbox\":\"seatbelt\"}"}}`)
+	mapCM, rawCM := rawVsMapClientMetadata(t, body, ids)
+	assert.Equal(t, mapCM, rawCM)
+
+	for name, clientMetadata := range map[string]map[string]any{"map": mapCM, "raw": rawCM} {
+		t.Run(name, func(t *testing.T) {
+			rawMetadata, ok := clientMetadata["x-codex-turn-metadata"].(string)
+			require.True(t, ok)
+			var metadata map[string]any
+			require.NoError(t, json.Unmarshal([]byte(rawMetadata), &metadata))
+			assert.Equal(t, float64(startedAt), metadata["turn_started_at_unix_ms"])
+		})
+	}
+}
+
 func TestApplyCodexFingerprintClientMetadataRaw_PreservesUnrelatedFields(t *testing.T) {
 	account := newTestOAuthAccount(4243, nil)
 	ids := resolveCodexFingerprintIDs(account, "client-sess-preserve", codexFingerprintSession)

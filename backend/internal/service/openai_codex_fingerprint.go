@@ -141,21 +141,22 @@ func resolveConvergedThreadID(account *Account, clientSessionID string) string {
 
 // codexFingerprintIDs 收敛后的完整 ID 集合。
 // 由 resolveCodexFingerprintIDs 一次性生成，同一个实例在头改写和体改写之间共享，
-// 确保所有载体中的 turn_id 等随机字段一致。
+// 确保所有载体中的 turn_id、请求起始时间等字段一致。
 type codexFingerprintIDs struct {
-	mode           codexFingerprintMode
-	installationID string
-	sessionID      string
-	threadID       string
-	turnID         string
-	windowID       string
+	mode                   codexFingerprintMode
+	installationID         string
+	sessionID              string
+	threadID               string
+	turnID                 string
+	windowID               string
+	turnStartedAtUnixMilli int64
 }
 
 // resolveCodexFingerprintIDs 按收敛模式计算出站 ID 集合。
 // clientSessionID 是客户端原始的 session-id 头值（连字符形式），用于 session 模式下
 // 的 thread_id 派生——每个真实 Codex 会话得到一个独立线程。
 // 返回 nil 表示 off 模式，不需要改写。
-// 注意：包含随机生成的 turn_id，调用方必须只调用一次并共享结果给头改写和体改写。
+// 注意：包含随机生成的 turn_id 和请求起始时间，调用方必须只调用一次并共享结果给头改写和体改写。
 func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode codexFingerprintMode) *codexFingerprintIDs {
 	if mode == codexFingerprintOff {
 		return nil
@@ -180,6 +181,7 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		}
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
 		ids.windowID = ids.threadID + ":0"
+		ids.turnStartedAtUnixMilli = time.Now().UnixMilli()
 		return ids
 
 	case codexFingerprintFull:
@@ -187,6 +189,7 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		ids.threadID = ids.sessionID
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
 		ids.windowID = ids.threadID + ":0"
+		ids.turnStartedAtUnixMilli = time.Now().UnixMilli()
 		return ids
 	}
 
@@ -252,7 +255,7 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 		"thread_id":               ids.threadID,
 		"turn_id":                 ids.turnID,
 		"window_id":               ids.windowID,
-		"turn_started_at_unix_ms": time.Now().UnixMilli(),
+		"turn_started_at_unix_ms": ids.turnStartedAtUnixMilli,
 	})
 }
 
@@ -330,7 +333,7 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 		"thread_id":               ids.threadID,
 		"turn_id":                 ids.turnID,
 		"window_id":               ids.windowID,
-		"turn_started_at_unix_ms": time.Now().UnixMilli(),
+		"turn_started_at_unix_ms": ids.turnStartedAtUnixMilli,
 	})
 	return true
 }
