@@ -114,7 +114,8 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - 账号设置 `100` 时，禁用该账号的全部配额自动停调；
 - 旧版 `extra.auto_pause_5h_*`、`extra.auto_pause_7d_*` 与运维页 Codex 默认值只在账号未设置通用覆盖时生效；
 - 编辑阈值后立即重新评估已有的 `account_scheduling_threshold` 停调原因，并以 compare-and-swap 方式协调数据库、Redis、调度快照和运行时快速阻断；其他停调原因及模型级限流不受影响；
-- 账户编辑界面启用通用覆盖时禁用旧版 Codex 配额自动暂停控件，明确显示优先级。
+- 进程启动时一次性扫描仍带结构化阈值停调原因的活动账号，按当前策略协调历史数据库与缓存状态；用量刷新恢复判断也使用当前账号覆盖值，不再沿用旧原因中的阈值；
+- 账户编辑界面启用通用覆盖时禁用旧版 Codex 配额自动暂停控件，明确显示优先级；覆盖启用控件与同页其他布尔项统一使用开关样式。
 
 主要文件：
 
@@ -123,9 +124,12 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - `backend/internal/service/account_usage_service.go`
 - `backend/internal/service/openai_gateway_scheduling.go`
 - `backend/internal/service/ratelimit_service.go`
+- `backend/internal/service/wire.go`
+- `backend/cmd/server/wire_gen.go`
 - `frontend/src/components/account/EditAccountModal.vue`
+- `frontend/src/components/account/__tests__/EditAccountModal.spec.ts`
 
-相关提交：[`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557)、[`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6)。
+相关提交：[`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557)、[`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6)、[`c9c28fc8a`](https://github.com/CarterLeeAlt/sub2api/commit/c9c28fc8a1aef9705a162d39181ec17c2e8aa91b)、[`36ad5b5ee`](https://github.com/CarterLeeAlt/sub2api/commit/36ad5b5eec735c90dee5bfa52ac8870b835091ff)。
 
 ### CUSTOM-007：Codex 指纹请求起始时间一致性（`active`）
 
