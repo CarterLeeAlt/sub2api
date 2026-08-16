@@ -19,6 +19,11 @@ type thresholdPauseReconcileRepoStub struct {
 	expectedReason string
 	nextUntil      *time.Time
 	nextReason     string
+	activeAccounts []Account
+}
+
+func (r *thresholdPauseReconcileRepoStub) ListActive(context.Context) ([]Account, error) {
+	return r.activeAccounts, nil
 }
 
 func (r *thresholdPauseReconcileRepoStub) ReconcileAccountSchedulingThresholdPause(
@@ -337,4 +342,53 @@ func TestRateLimitService_ReconcileAccountSchedulingThresholdPolicy_PreservesOth
 		require.Empty(t, cache.deleted)
 		require.Empty(t, blocker.cleared)
 	})
+}
+
+func TestRateLimitService_ReconcileActiveAccountSchedulingThresholdPolicies_ClearsPersistedPauseAfterDeploy(t *testing.T) {
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	settingsRepo := newMockSettingRepo()
+	settingsRepo.data[SettingKeyAccountSchedulingThresholds] = `{"openai":97}`
+
+	now := time.Now().UTC()
+	until := now.Add(5 * 24 * time.Hour).Truncate(time.Second)
+	oldReason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform: PlatformOpenAI, Window: "7d", ThresholdPercent: 97, UsedPercent: 97, Until: until, Now: now.Add(-time.Hour),
+	})
+	repo := &thresholdPauseReconcileRepoStub{
+		updated: true,
+		activeAccounts: []Account{
+			{
+				ID: 4001, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true,
+				Credentials: map[string]any{accountSchedulingThresholdCredentialKey: 100},
+				Extra: map[string]any{
+					"codex_7d_used_percent": 97.0,
+					"codex_7d_reset_at":     until.Format(time.RFC3339),
+				},
+				TempUnschedulableUntil: &until, TempUnschedulableReason: oldReason,
+			},
+			{
+				ID: 4002, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true,
+				TempUnschedulableUntil:  &until,
+				TempUnschedulableReason: BuildTempUnschedReasonPayload("oauth_401", "unauthorized"),
+			},
+			{
+				ID: 4003, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true,
+				TempUnschedulableUntil: &until, TempUnschedulableReason: oldReason,
+			},
+		},
+	}
+	cache := &thresholdPauseCacheRecorder{}
+	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+	rl.SetSettingService(NewSettingService(settingsRepo, &config.Config{}))
+
+	count, err := rl.ReconcileActiveAccountSchedulingThresholdPolicies(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, 1, repo.reconcileCalls)
+	require.Equal(t, oldReason, repo.expectedReason)
+	require.Nil(t, repo.nextUntil)
+	require.Empty(t, repo.nextReason)
+	require.Equal(t, []int64{4001}, cache.deleted)
 }
