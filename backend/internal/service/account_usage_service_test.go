@@ -37,6 +37,17 @@ func (r *accountUsageCodexProbeRepo) ClearTempUnschedulable(_ context.Context, _
 	return nil
 }
 
+type accountUsageThresholdReconciler struct {
+	calls int
+}
+
+func (r *accountUsageThresholdReconciler) ReconcileAccountSchedulingThresholdPolicy(_ context.Context, account *Account) error {
+	r.calls++
+	account.TempUnschedulableUntil = nil
+	account.TempUnschedulableReason = ""
+	return nil
+}
+
 func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -334,7 +345,8 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 		Now:              now.Add(-time.Hour),
 	})
 	repo := &accountUsageCodexProbeRepo{}
-	svc := &AccountUsageService{accountRepo: repo}
+	reconciler := &accountUsageThresholdReconciler{}
+	svc := &AccountUsageService{accountRepo: repo, thresholdReconciler: reconciler}
 	account := &Account{
 		ID:                      3211,
 		Platform:                PlatformOpenAI,
@@ -353,8 +365,11 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 	if _, err := svc.getOpenAIUsage(context.Background(), account, false); err != nil {
 		t.Fatalf("getOpenAIUsage() error = %v", err)
 	}
-	if repo.clearTempCalls != 1 {
-		t.Fatalf("ClearTempUnschedulable calls = %d, want 1", repo.clearTempCalls)
+	if reconciler.calls != 1 {
+		t.Fatalf("threshold reconciler calls = %d, want 1", reconciler.calls)
+	}
+	if repo.clearTempCalls != 0 {
+		t.Fatalf("legacy ClearTempUnschedulable calls = %d, want 0", repo.clearTempCalls)
 	}
 	if account.TempUnschedulableUntil != nil || account.TempUnschedulableReason != "" {
 		t.Fatalf("expected in-memory scheduling pause to be cleared, got until=%v reason=%q", account.TempUnschedulableUntil, account.TempUnschedulableReason)

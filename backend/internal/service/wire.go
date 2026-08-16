@@ -203,6 +203,7 @@ func ProvideAccountUsageService(
 	tlsFPProfileService *TLSFingerprintProfileService,
 	openAIGatewayService *OpenAIGatewayService,
 	tempUnschedCache TempUnschedCache,
+	rateLimitService *RateLimitService,
 ) *AccountUsageService {
 	service := NewAccountUsageService(
 		accountRepo,
@@ -219,6 +220,10 @@ func ProvideAccountUsageService(
 	)
 	service.agentIdentityWS = openAIGatewayService
 	service.SetTempUnschedCache(tempUnschedCache)
+	if rateLimitService != nil {
+		service.SetAccountSchedulingThresholdPolicyReconciler(rateLimitService)
+		rateLimitService.StartAccountSchedulingThresholdReconciliation()
+	}
 	return service
 }
 

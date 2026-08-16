@@ -73,8 +73,16 @@ func shouldClearOpenAISchedulingThresholdPause(account *Account, now time.Time) 
 		return true
 	}
 
+	thresholdPercent := reason.ThresholdPercent
+	if currentThreshold, ok := accountSchedulingThresholdOverride(account); ok {
+		thresholdPercent = currentThreshold
+	}
+	if thresholdPercent >= 100 {
+		return true
+	}
+
 	usedPercent, ok := resolveAccountExtraNumber(extra, "codex_"+reason.Window+"_used_percent")
-	return ok && usedPercent < float64(reason.ThresholdPercent)
+	return ok && usedPercent < float64(thresholdPercent)
 }
 
 // EvaluateAccountSchedulingThreshold evaluates whether an account should be paused

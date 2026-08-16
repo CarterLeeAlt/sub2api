@@ -312,6 +312,7 @@ type AccountUsageService struct {
 	cache                   *UsageCache
 	identityCache           IdentityCache
 	tlsFPProfileService     *TLSFingerprintProfileService
+	thresholdReconciler     AccountSchedulingThresholdPolicyReconciler
 	agentIdentityTaskMu     sync.Mutex
 	agentIdentityWS         agentIdentityWSConnectionInvalidator
 }
@@ -323,6 +324,16 @@ func (s *AccountUsageService) SetTempUnschedCache(cache TempUnschedCache) {
 		return
 	}
 	s.tempUnschedCache = cache
+}
+
+// SetAccountSchedulingThresholdPolicyReconciler wires the all-layer
+// coordinator used after a fresh usage snapshot proves a threshold pause can
+// recover. It is optional for lightweight deployments and tests.
+func (s *AccountUsageService) SetAccountSchedulingThresholdPolicyReconciler(reconciler AccountSchedulingThresholdPolicyReconciler) {
+	if s == nil {
+		return
+	}
+	s.thresholdReconciler = reconciler
 }
 
 // NewAccountUsageService 创建AccountUsageService实例
@@ -784,17 +795,23 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	// has recovered before the original cooldown timestamp. Clear only that
 	// structured pause source; unrelated temporary blocks remain intact.
 	if shouldClearOpenAISchedulingThresholdPause(account, now) {
-		if err := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); err != nil {
-			slog.Warn("openai_scheduling_threshold_recovery_clear_failed", "account_id", account.ID, "error", err)
-		} else {
-			account.TempUnschedulableUntil = nil
-			account.TempUnschedulableReason = ""
-			if s.tempUnschedCache != nil {
-				if err := s.tempUnschedCache.DeleteTempUnsched(ctx, account.ID); err != nil {
-					slog.Warn("openai_scheduling_threshold_recovery_cache_clear_failed", "account_id", account.ID, "error", err)
-				}
+		if s.thresholdReconciler != nil {
+			if err := s.thresholdReconciler.ReconcileAccountSchedulingThresholdPolicy(ctx, account); err != nil {
+				slog.Warn("openai_scheduling_threshold_recovery_reconcile_failed", "account_id", account.ID, "error", err)
 			}
-			slog.Info("openai_scheduling_threshold_recovered", "account_id", account.ID)
+		} else {
+			if err := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); err != nil {
+				slog.Warn("openai_scheduling_threshold_recovery_clear_failed", "account_id", account.ID, "error", err)
+			} else {
+				account.TempUnschedulableUntil = nil
+				account.TempUnschedulableReason = ""
+				if s.tempUnschedCache != nil {
+					if err := s.tempUnschedCache.DeleteTempUnsched(ctx, account.ID); err != nil {
+						slog.Warn("openai_scheduling_threshold_recovery_cache_clear_failed", "account_id", account.ID, "error", err)
+					}
+				}
+				slog.Info("openai_scheduling_threshold_recovered", "account_id", account.ID)
+			}
 		}
 	}
 

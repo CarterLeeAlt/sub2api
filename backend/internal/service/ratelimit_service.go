@@ -20,18 +20,19 @@ import (
 
 // RateLimitService 处理限流和过载状态管理
 type RateLimitService struct {
-	accountRepo           AccountRepository
-	usageRepo             UsageLogRepository
-	cfg                   *config.Config
-	geminiQuotaService    *GeminiQuotaService
-	tempUnschedCache      TempUnschedCache
-	timeoutCounterCache   TimeoutCounterCache
-	openAI403CounterCache OpenAI403CounterCache
-	settingService        *SettingService
-	tokenCacheInvalidator TokenCacheInvalidator
-	runtimeBlocker        AccountRuntimeBlocker
-	usageCacheMu          sync.RWMutex
-	usageCache            map[int64]*geminiUsageCacheEntry
+	accountRepo            AccountRepository
+	usageRepo              UsageLogRepository
+	cfg                    *config.Config
+	geminiQuotaService     *GeminiQuotaService
+	tempUnschedCache       TempUnschedCache
+	timeoutCounterCache    TimeoutCounterCache
+	openAI403CounterCache  OpenAI403CounterCache
+	settingService         *SettingService
+	tokenCacheInvalidator  TokenCacheInvalidator
+	runtimeBlocker         AccountRuntimeBlocker
+	usageCacheMu           sync.RWMutex
+	usageCache             map[int64]*geminiUsageCacheEntry
+	thresholdReconcileOnce sync.Once
 }
 
 type AccountRuntimeBlocker interface {
@@ -120,6 +121,71 @@ func (s *RateLimitService) SetTokenCacheInvalidator(invalidator TokenCacheInvali
 
 func (s *RateLimitService) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocker) {
 	s.runtimeBlocker = blocker
+}
+
+// StartAccountSchedulingThresholdReconciliation performs a one-shot startup
+// reconciliation for active accounts that still carry a structured scheduling
+// threshold pause from an earlier policy. This makes a newly deployed process
+// converge persisted and cached state without requiring another admin edit.
+func (s *RateLimitService) StartAccountSchedulingThresholdReconciliation() {
+	if s == nil {
+		return
+	}
+	s.thresholdReconcileOnce.Do(func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			count, err := s.ReconcileActiveAccountSchedulingThresholdPolicies(ctx)
+			if err != nil {
+				slog.Warn("account_scheduling_threshold_startup_reconcile_failed", "accounts", count, "error", err)
+				return
+			}
+			if count > 0 {
+				slog.Info("account_scheduling_threshold_startup_reconciled", "accounts", count)
+			}
+		}()
+	})
+}
+
+// ReconcileActiveAccountSchedulingThresholdPolicies re-evaluates every active
+// account with a structured threshold pause. Reconciliation itself remains
+// compare-and-swap protected, so concurrent replacement reasons are preserved.
+func (s *RateLimitService) ReconcileActiveAccountSchedulingThresholdPolicies(ctx context.Context) (int, error) {
+	if s == nil || s.accountRepo == nil || s.settingService == nil {
+		return 0, nil
+	}
+
+	accounts, err := s.accountRepo.ListActive(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	now := time.Now().UTC()
+	thresholds := s.settingService.GetAccountSchedulingThresholds(ctx)
+	reconciled := 0
+	var firstErr error
+	for i := range accounts {
+		account := &accounts[i]
+		if !IsAccountSchedulingThresholdReason(account.TempUnschedulableReason) {
+			continue
+		}
+		threshold, configured := resolveEffectiveAccountSchedulingThreshold(account, thresholds, account.Platform)
+		if configured && threshold < 100 && !EvaluateAccountSchedulingThreshold(account, thresholds, now).ShouldPause {
+			// A low-threshold policy still exists, but the cached snapshot cannot
+			// currently prove whether the old pause recovered or merely became
+			// stale. Preserve it until a fresh usage refresh can decide safely.
+			continue
+		}
+		reconciled++
+		if err := s.ReconcileAccountSchedulingThresholdPolicy(ctx, account); err != nil {
+			slog.Warn("account_scheduling_threshold_startup_account_failed", "account_id", account.ID, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return reconciled, firstErr
 }
 
 func (s *RateLimitService) IsOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx context.Context) bool {

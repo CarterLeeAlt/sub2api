@@ -303,6 +303,37 @@ func TestShouldClearOpenAISchedulingThresholdPause_WhenFreshSnapshotFallsBelowTh
 	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now))
 }
 
+func TestShouldClearOpenAISchedulingThresholdPause_UsesCurrentAccountOverride(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 17, 4, 58, 13, 0, time.UTC)
+	until := now.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform:         PlatformOpenAI,
+		Window:           "7d",
+		ThresholdPercent: 97,
+		UsedPercent:      97,
+		Until:            until,
+		Now:              now.Add(-time.Hour),
+	})
+	account := &Account{
+		Platform:                PlatformOpenAI,
+		Credentials:             map[string]any{"account_scheduling_threshold": 100},
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			"codex_7d_used_percent":  97.0,
+			"codex_7d_reset_at":      until.Format(time.RFC3339),
+			"codex_usage_updated_at": now.Format(time.RFC3339),
+		},
+	}
+
+	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now))
+
+	account.Credentials[accountSchedulingThresholdCredentialKey] = 96
+	require.False(t, shouldClearOpenAISchedulingThresholdPause(account, now))
+}
+
 func TestShouldClearOpenAISchedulingThresholdPause_DoesNotClearUnrecoveredOrUnrelatedState(t *testing.T) {
 	t.Parallel()
 
