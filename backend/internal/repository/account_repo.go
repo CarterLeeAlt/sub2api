@@ -2715,8 +2715,8 @@ func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now ti
 // UpdateOpenAICodexWhamSnapshotIfNewer atomically rejects an out-of-order WHAM
 // write and commits the metadata retry event with an accepted snapshot. New
 // generations use a fixed-width UTC timestamp, so lexical order is temporal
-// order; the length-20 branch accepts legacy second-precision RFC3339 values
-// from before the generation CAS was introduced.
+// order without losing nanoseconds. Legacy RFC3339 values may carry the server's
+// local offset, so the SQL predicate compares those as timestamptz instants.
 func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 	ctx context.Context,
 	id int64,
@@ -2767,12 +2767,23 @@ func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 			AND deleted_at IS NULL
 			AND (
 				COALESCE(extra->>'codex_wham_usage_updated_at', '') = ''
-				OR (
-					char_length(extra->>'codex_wham_usage_updated_at') = 20
-					AND right(extra->>'codex_wham_usage_updated_at', 1) = 'Z'
-					AND left(extra->>'codex_wham_usage_updated_at', 19) <= left($3, 19)
-				)
-				OR extra->>'codex_wham_usage_updated_at' <= $3
+				OR CASE
+					-- New generations have fixed-width nanosecond UTC text. Keep
+					-- lexical comparison here so PostgreSQL timestamp precision cannot
+					-- collapse two observations that differ below one microsecond.
+					WHEN extra->>'codex_wham_usage_updated_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$'
+						AND $3 ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$'
+						THEN extra->>'codex_wham_usage_updated_at' <= $3
+					-- Legacy snapshots were written with time.Now().Format and may
+					-- carry a local offset such as +08:00. Compare those instants,
+					-- rather than their wall-clock strings.
+					WHEN extra->>'codex_wham_usage_updated_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+						THEN (extra->>'codex_wham_usage_updated_at')::timestamptz <= $3::timestamptz
+					-- An invalid historical value must not pin quota refreshes
+					-- forever; the incoming generation has already passed Go's
+					-- RFC3339Nano validation.
+					ELSE TRUE
+				END
 			)
 	`, string(payload), id, expectedWhamUpdatedAt)
 	if err != nil {
