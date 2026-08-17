@@ -1527,6 +1527,46 @@ func (s *AccountRepoSuite) TestUpdateExtra_ExhaustedCodexSnapshotSyncsSchedulerC
 	s.Require().Equal(100.0, cacheRecorder.setAccounts[0].Extra["codex_7d_used_percent"])
 }
 
+func (s *AccountRepoSuite) TestUpdateOpenAICodexWhamSnapshotIfNewer_AcceptsNewerUTCGenerationAfterLegacyOffset() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:     "acc-wham-legacy-offset",
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeOAuth,
+		Extra: map[string]any{
+			"codex_wham_usage_updated_at": "2026-08-17T11:00:00+08:00",
+		},
+	})
+	_, err := s.repo.sql.ExecContext(s.ctx, "TRUNCATE scheduler_outbox")
+	s.Require().NoError(err)
+
+	newerGeneration := "2026-08-17T03:00:01.123456789Z"
+	updated, err := s.repo.UpdateOpenAICodexWhamSnapshotIfNewer(s.ctx, account.ID, newerGeneration, map[string]any{
+		"codex_wham_usage_updated_at":  newerGeneration,
+		"codex_wham_presence_schema":   "wham-usage-v1",
+		"codex_wham_5h_window_present": true,
+		"codex_5h_used_percent":        95.0,
+	})
+	s.Require().NoError(err)
+	s.Require().True(updated)
+
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(newerGeneration, got.Extra["codex_wham_usage_updated_at"])
+
+	olderGeneration := "2026-08-17T03:00:00.999999999Z"
+	updated, err = s.repo.UpdateOpenAICodexWhamSnapshotIfNewer(s.ctx, account.ID, olderGeneration, map[string]any{
+		"codex_wham_usage_updated_at": olderGeneration,
+		"codex_5h_used_percent":       98.0,
+	})
+	s.Require().NoError(err)
+	s.Require().False(updated)
+
+	got, err = s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(newerGeneration, got.Extra["codex_wham_usage_updated_at"])
+	s.Require().Equal(95.0, got.Extra["codex_5h_used_percent"])
+}
+
 func (s *AccountRepoSuite) TestUpdateExtra_SchedulerRelevantStillEnqueuesOutbox() {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:     "acc-extra-mixed",

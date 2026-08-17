@@ -101,7 +101,7 @@ func TestAccountRepository_UpdateOpenAICodexWhamSnapshotIfNewer_IsMonotonicAndAt
 			t.Cleanup(func() { _ = client.Close() })
 
 			mock.ExpectBegin()
-			mock.ExpectExec(`(?s)`+regexp.QuoteMeta("UPDATE accounts")+`.*`+regexp.QuoteMeta("extra->>'codex_wham_usage_updated_at' <= $3")).
+			mock.ExpectExec(`(?s)`+regexp.QuoteMeta("UPDATE accounts")+`.*`+regexp.QuoteMeta("CASE")+`.*`+regexp.QuoteMeta("::timestamptz <= $3::timestamptz")).
 				WithArgs(sqlmock.AnyArg(), int64(17), generation).
 				WillReturnResult(sqlmock.NewResult(0, tt.affected))
 			if tt.wantUpdate {
