@@ -123,6 +123,7 @@ const (
 	codexWhamUsageUpdatedAtKey  = "codex_wham_usage_updated_at"
 	codexWhamPresenceSchemaKey  = "codex_wham_presence_schema"
 	codexWhamPresenceSchemaV1   = "wham-usage-v1"
+	codexWhamGenerationLayout   = "2006-01-02T15:04:05.000000000Z"
 )
 
 // UsageCache 封装账户使用量相关的缓存
@@ -328,7 +329,8 @@ func (s *AccountUsageService) SetTempUnschedCache(cache TempUnschedCache) {
 
 // SetAccountSchedulingThresholdPolicyReconciler wires the all-layer
 // coordinator used after a fresh usage snapshot proves a threshold pause can
-// recover. It is optional for lightweight deployments and tests.
+// recover. Lightweight deployments and tests may omit it, but quota-driven
+// recovery then deliberately fails closed instead of using a generic clear.
 func (s *AccountUsageService) SetAccountSchedulingThresholdPolicyReconciler(reconciler AccountSchedulingThresholdPolicyReconciler) {
 	if s == nil {
 		return
@@ -757,6 +759,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 
 	shouldRefreshSnapshot := force || shouldRefreshOpenAICodexSnapshot(account, usage, now)
+	allowThresholdRecovery := true
 	// Older lightweight deployments may not wire OpenAIQuotaService. Preserve
 	// their existing WS-header behavior instead of attempting an unauthenticated
 	// /responses probe for every account; production wiring uses /wham/usage.
@@ -767,7 +770,13 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		var updates map[string]any
 		if s.openAIQuotaService != nil {
 			if quotaUsage, err := s.openAIQuotaService.QueryUsageWindows(ctx, account.ID); err == nil {
-				updates = buildCodexWhamWindowExtraUpdates(quotaUsage, now, account.IsShadow())
+				// Order concurrent observations by response completion, not request
+				// start. A request that started earlier but returned later must not
+				// be discarded merely because the upstream call took longer.
+				updates = buildCodexWhamWindowExtraUpdates(quotaUsage, time.Now(), account.IsShadow())
+			} else {
+				allowThresholdRecovery = false
+				slog.Warn("openai_codex_wham_snapshot_refresh_failed", "account_id", account.ID, "error", err)
 			}
 		}
 
@@ -782,35 +791,43 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			}
 		}
 		if len(updates) > 0 {
-			mergeAccountExtra(account, updates)
-			s.persistOpenAICodexProbeSnapshot(account.ID, updates)
-			if usage.UpdatedAt == nil {
-				usage.UpdatedAt = &now
+			persisted, err := s.persistOpenAICodexProbeSnapshot(ctx, account.ID, updates)
+			if err != nil {
+				allowThresholdRecovery = false
+				slog.Warn("openai_codex_snapshot_persist_failed", "account_id", account.ID, "error", err)
+				if s.cache != nil {
+					s.cache.openAIProbeCache.Delete(account.ID)
+				}
+			} else if persisted {
+				mergeAccountExtra(account, updates)
+				if usage.UpdatedAt == nil {
+					usage.UpdatedAt = &now
+				}
+				applyExtraToUsage(usage, account.Extra, now)
+			} else {
+				// A newer generation already won in the database. This request's
+				// in-memory account is no longer authoritative for recovery.
+				allowThresholdRecovery = false
 			}
-			applyExtraToUsage(usage, account.Extra, now)
 		}
 	}
 
 	// A successful Codex snapshot can prove that a threshold-triggered pause
 	// has recovered before the original cooldown timestamp. Clear only that
 	// structured pause source; unrelated temporary blocks remain intact.
-	if shouldClearOpenAISchedulingThresholdPause(account, now) {
-		if s.thresholdReconciler != nil {
-			if err := s.thresholdReconciler.ReconcileAccountSchedulingThresholdPolicy(ctx, account); err != nil {
+	if allowThresholdRecovery && shouldClearOpenAISchedulingThresholdPause(account, now) {
+		expectedWhamUpdatedAt := codexWhamSnapshotGeneration(account.Extra)
+		reconciler, ok := s.thresholdReconciler.(AccountSchedulingThresholdSnapshotPolicyReconciler)
+		switch {
+		case s.thresholdReconciler == nil:
+			slog.Warn("openai_scheduling_threshold_recovery_skipped", "account_id", account.ID, "reason", "threshold reconciler is not configured")
+		case !ok:
+			slog.Warn("openai_scheduling_threshold_recovery_skipped", "account_id", account.ID, "reason", "threshold reconciler does not support WHAM generation CAS")
+		case expectedWhamUpdatedAt == "":
+			slog.Warn("openai_scheduling_threshold_recovery_skipped", "account_id", account.ID, "reason", "authoritative WHAM snapshot generation is missing")
+		default:
+			if err := reconciler.ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(ctx, account, expectedWhamUpdatedAt); err != nil {
 				slog.Warn("openai_scheduling_threshold_recovery_reconcile_failed", "account_id", account.ID, "error", err)
-			}
-		} else {
-			if err := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); err != nil {
-				slog.Warn("openai_scheduling_threshold_recovery_clear_failed", "account_id", account.ID, "error", err)
-			} else {
-				account.TempUnschedulableUntil = nil
-				account.TempUnschedulableReason = ""
-				if s.tempUnschedCache != nil {
-					if err := s.tempUnschedCache.DeleteTempUnsched(ctx, account.ID); err != nil {
-						slog.Warn("openai_scheduling_threshold_recovery_cache_clear_failed", "account_id", account.ID, "error", err)
-					}
-				}
-				slog.Info("openai_scheduling_threshold_recovered", "account_id", account.ID)
 			}
 		}
 	}
@@ -965,25 +982,35 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 		return nil, err
 	}
 	if len(updates) > 0 {
-		s.persistOpenAICodexProbeSnapshot(account.ID, updates)
 		return updates, nil
 	}
 	return nil, nil
 }
 
-func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, updates map[string]any) {
+func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(ctx context.Context, accountID int64, updates map[string]any) (bool, error) {
 	if s == nil || s.accountRepo == nil || accountID <= 0 {
-		return
+		return false, fmt.Errorf("account repository is unavailable")
 	}
 	if len(updates) == 0 {
-		return
+		return false, nil
 	}
 
-	go func() {
-		updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer updateCancel()
-		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
-	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	updateCtx, updateCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer updateCancel()
+	if expectedWhamUpdatedAt := codexWhamSnapshotGeneration(updates); expectedWhamUpdatedAt != "" {
+		repo, ok := s.accountRepo.(OpenAICodexWhamSnapshotRepository)
+		if !ok {
+			return false, fmt.Errorf("account repository does not support monotonic WHAM snapshot persistence")
+		}
+		return repo.UpdateOpenAICodexWhamSnapshotIfNewer(updateCtx, accountID, expectedWhamUpdatedAt, updates)
+	}
+	if err := s.accountRepo.UpdateExtra(updateCtx, accountID, updates); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func extractOpenAICodexProbeUpdates(resp *http.Response) (map[string]any, error) {
@@ -1009,6 +1036,21 @@ func mergeAccountExtra(account *Account, updates map[string]any) {
 	for k, v := range updates {
 		account.Extra[k] = v
 	}
+}
+
+func codexWhamSnapshotGeneration(extra map[string]any) string {
+	if len(extra) == 0 {
+		return ""
+	}
+	raw, ok := extra[codexWhamUsageUpdatedAtKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(raw))
+}
+
+func formatCodexWhamSnapshotGeneration(observedAt time.Time) string {
+	return observedAt.UTC().Format(codexWhamGenerationLayout)
 }
 
 // applyExtraToUsage rebuilds the codex 5h/7d windows in usage from the

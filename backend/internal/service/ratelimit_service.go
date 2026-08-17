@@ -33,6 +33,7 @@ type RateLimitService struct {
 	usageCacheMu           sync.RWMutex
 	usageCache             map[int64]*geminiUsageCacheEntry
 	thresholdReconcileOnce sync.Once
+	thresholdRetryBase     time.Duration
 }
 
 type AccountRuntimeBlocker interface {
@@ -44,6 +45,18 @@ type AccountRuntimeBlocker interface {
 // state aligned with an account's current scheduling-threshold policy.
 type AccountSchedulingThresholdPolicyReconciler interface {
 	ReconcileAccountSchedulingThresholdPolicy(ctx context.Context, account *Account) error
+}
+
+// AccountSchedulingThresholdSnapshotPolicyReconciler is required for quota-
+// driven recovery. The expected WHAM timestamp becomes part of the repository
+// CAS, preventing an older response from clearing state after a newer quota
+// snapshot lands.
+type AccountSchedulingThresholdSnapshotPolicyReconciler interface {
+	ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(
+		ctx context.Context,
+		account *Account,
+		expectedWhamUpdatedAt string,
+	) error
 }
 
 // SuccessfulTestRecoveryResult 表示测试成功后恢复了哪些运行时状态。
@@ -68,6 +81,13 @@ type geminiUsageTotalsBatchProvider interface {
 }
 
 const geminiPrecheckCacheTTL = time.Minute
+
+const (
+	accountSchedulingThresholdStartupAttempts = 3
+	accountSchedulingThresholdStartupTimeout  = 2 * time.Minute
+	accountSchedulingThresholdStartupPageSize = 200
+	accountSchedulingThresholdRetryBase       = time.Second
+)
 
 const (
 	defaultRateLimit429CooldownSeconds = 5
@@ -96,6 +116,7 @@ func NewRateLimitService(accountRepo AccountRepository, usageRepo UsageLogReposi
 		geminiQuotaService: geminiQuotaService,
 		tempUnschedCache:   tempUnschedCache,
 		usageCache:         make(map[int64]*geminiUsageCacheEntry),
+		thresholdRetryBase: accountSchedulingThresholdRetryBase,
 	}
 }
 
@@ -123,29 +144,44 @@ func (s *RateLimitService) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocke
 	s.runtimeBlocker = blocker
 }
 
-// StartAccountSchedulingThresholdReconciliation performs a one-shot startup
-// reconciliation for active accounts that still carry a structured scheduling
-// threshold pause from an earlier policy. This makes a newly deployed process
-// converge persisted and cached state without requiring another admin edit.
+// StartAccountSchedulingThresholdReconciliation starts one reconciliation
+// worker. The worker itself performs bounded retries so a transient database
+// outage at process startup does not permanently consume the sync.Once guard.
 func (s *RateLimitService) StartAccountSchedulingThresholdReconciliation() {
 	if s == nil {
 		return
 	}
 	s.thresholdReconcileOnce.Do(func() {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-
-			count, err := s.ReconcileActiveAccountSchedulingThresholdPolicies(ctx)
-			if err != nil {
-				slog.Warn("account_scheduling_threshold_startup_reconcile_failed", "accounts", count, "error", err)
-				return
-			}
-			if count > 0 {
-				slog.Info("account_scheduling_threshold_startup_reconciled", "accounts", count)
-			}
-		}()
+		go s.runAccountSchedulingThresholdStartupReconciliation()
 	})
+}
+
+func (s *RateLimitService) runAccountSchedulingThresholdStartupReconciliation() {
+	retryBase := s.thresholdRetryBase
+	if retryBase <= 0 {
+		retryBase = accountSchedulingThresholdRetryBase
+	}
+
+	for attempt := 1; attempt <= accountSchedulingThresholdStartupAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), accountSchedulingThresholdStartupTimeout)
+		count, err := s.ReconcileActiveAccountSchedulingThresholdPolicies(ctx)
+		cancel()
+		if err == nil {
+			if count > 0 {
+				slog.Info("account_scheduling_threshold_startup_reconciled", "accounts", count, "attempt", attempt)
+			}
+			return
+		}
+
+		slog.Warn("account_scheduling_threshold_startup_reconcile_failed", "accounts", count, "attempt", attempt, "error", err)
+		if attempt == accountSchedulingThresholdStartupAttempts {
+			return
+		}
+
+		delay := retryBase << (attempt - 1)
+		timer := time.NewTimer(delay)
+		<-timer.C
+	}
 }
 
 // ReconcileActiveAccountSchedulingThresholdPolicies re-evaluates every active
@@ -156,35 +192,70 @@ func (s *RateLimitService) ReconcileActiveAccountSchedulingThresholdPolicies(ctx
 		return 0, nil
 	}
 
-	accounts, err := s.accountRepo.ListActive(ctx)
-	if err != nil {
-		return 0, err
-	}
-
 	now := time.Now().UTC()
 	thresholds := s.settingService.GetAccountSchedulingThresholds(ctx)
 	reconciled := 0
 	var firstErr error
-	for i := range accounts {
-		account := &accounts[i]
-		if !IsAccountSchedulingThresholdReason(account.TempUnschedulableReason) {
-			continue
-		}
-		threshold, configured := resolveEffectiveAccountSchedulingThreshold(account, thresholds, account.Platform)
-		if configured && threshold < 100 && !EvaluateAccountSchedulingThreshold(account, thresholds, now).ShouldPause {
-			// A low-threshold policy still exists, but the cached snapshot cannot
-			// currently prove whether the old pause recovered or merely became
-			// stale. Preserve it until a fresh usage refresh can decide safely.
-			continue
-		}
-		reconciled++
-		if err := s.ReconcileAccountSchedulingThresholdPolicy(ctx, account); err != nil {
-			slog.Warn("account_scheduling_threshold_startup_account_failed", "account_id", account.ID, "error", err)
-			if firstErr == nil {
-				firstErr = err
+	reconcilePage := func(accounts []Account) {
+		for i := range accounts {
+			account := &accounts[i]
+			if !IsAccountSchedulingThresholdReason(account.TempUnschedulableReason) {
+				continue
+			}
+			threshold, configured := resolveEffectiveAccountSchedulingThreshold(account, thresholds, account.Platform)
+			if configured && threshold < 100 && !EvaluateAccountSchedulingThreshold(account, thresholds, now).ShouldPause {
+				// A low-threshold policy still exists, but the cached snapshot cannot
+				// currently prove whether the old pause recovered or merely became
+				// stale. Preserve it until a fresh usage refresh can decide safely.
+				continue
+			}
+			reconciled++
+			if err := s.ReconcileAccountSchedulingThresholdPolicy(ctx, account); err != nil {
+				slog.Warn("account_scheduling_threshold_startup_account_failed", "account_id", account.ID, "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
 		}
 	}
+
+	if pager, ok := s.accountRepo.(AccountSchedulingThresholdPausePageRepository); ok {
+		afterID := int64(0)
+		for {
+			accounts, err := pager.ListAccountsWithSchedulingThresholdPause(ctx, afterID, accountSchedulingThresholdStartupPageSize)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return reconciled, firstErr
+			}
+			if len(accounts) == 0 {
+				break
+			}
+			reconcilePage(accounts)
+
+			nextAfterID := afterID
+			for i := range accounts {
+				if accounts[i].ID > nextAfterID {
+					nextAfterID = accounts[i].ID
+				}
+			}
+			if nextAfterID <= afterID {
+				return reconciled, fmt.Errorf("scheduling-threshold pause pagination did not advance after account %d", afterID)
+			}
+			afterID = nextAfterID
+			if len(accounts) < accountSchedulingThresholdStartupPageSize {
+				break
+			}
+		}
+		return reconciled, firstErr
+	}
+
+	accounts, err := s.accountRepo.ListActive(ctx)
+	if err != nil {
+		return reconciled, err
+	}
+	reconcilePage(accounts)
 	return reconciled, firstErr
 }
 
@@ -376,16 +447,35 @@ func (s *RateLimitService) markAccountSchedulingThresholdPaused(
 // by the generic account scheduling threshold. It intentionally leaves every
 // other temporary-unschedulable source untouched.
 func (s *RateLimitService) ReconcileAccountSchedulingThresholdPolicy(ctx context.Context, account *Account) error {
+	return s.reconcileAccountSchedulingThresholdPolicy(ctx, account, "")
+}
+
+// ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged is the only
+// recovery entry point for decisions made from a WHAM snapshot. It fails
+// closed unless the repository can compare both the structured pause reason
+// and the exact persisted quota generation.
+func (s *RateLimitService) ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(
+	ctx context.Context,
+	account *Account,
+	expectedWhamUpdatedAt string,
+) error {
+	expectedWhamUpdatedAt = strings.TrimSpace(expectedWhamUpdatedAt)
+	if expectedWhamUpdatedAt == "" {
+		return fmt.Errorf("WHAM snapshot generation is required for scheduling-threshold recovery")
+	}
+	return s.reconcileAccountSchedulingThresholdPolicy(ctx, account, expectedWhamUpdatedAt)
+}
+
+func (s *RateLimitService) reconcileAccountSchedulingThresholdPolicy(
+	ctx context.Context,
+	account *Account,
+	expectedWhamUpdatedAt string,
+) error {
 	if s == nil || s.settingService == nil || s.accountRepo == nil || account == nil || account.ID <= 0 {
 		return nil
 	}
 	if !IsAccountSchedulingThresholdReason(account.TempUnschedulableReason) {
 		return nil
-	}
-
-	repo, ok := s.accountRepo.(AccountSchedulingThresholdPauseRepository)
-	if !ok {
-		return fmt.Errorf("account repository does not support scheduling-threshold pause reconciliation")
 	}
 
 	now := time.Now().UTC()
@@ -409,13 +499,36 @@ func (s *RateLimitService) ReconcileAccountSchedulingThresholdPolicy(ctx context
 	}
 
 	expectedReason := account.TempUnschedulableReason
-	updated, err := repo.ReconcileAccountSchedulingThresholdPause(
-		ctx,
-		account.ID,
-		expectedReason,
-		nextUntil,
-		nextReason,
+	var (
+		updated bool
+		err     error
 	)
+	if expectedWhamUpdatedAt != "" {
+		repo, ok := s.accountRepo.(AccountSchedulingThresholdSnapshotPauseRepository)
+		if !ok {
+			return fmt.Errorf("account repository does not support WHAM-generation scheduling-threshold reconciliation")
+		}
+		updated, err = repo.ReconcileAccountSchedulingThresholdPauseIfSnapshotUnchanged(
+			ctx,
+			account.ID,
+			expectedReason,
+			expectedWhamUpdatedAt,
+			nextUntil,
+			nextReason,
+		)
+	} else {
+		repo, ok := s.accountRepo.(AccountSchedulingThresholdPauseRepository)
+		if !ok {
+			return fmt.Errorf("account repository does not support scheduling-threshold pause reconciliation")
+		}
+		updated, err = repo.ReconcileAccountSchedulingThresholdPause(
+			ctx,
+			account.ID,
+			expectedReason,
+			nextUntil,
+			nextReason,
+		)
+	}
 	if err != nil || !updated {
 		return err
 	}

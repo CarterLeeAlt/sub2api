@@ -181,7 +181,7 @@ func TestBuildCodexWhamWindowExtraUpdates_SevenDayOnly(t *testing.T) {
 	require.Nil(t, updates["codex_5h_used_percent"])
 	require.Equal(t, 92.0, updates["codex_7d_used_percent"])
 	require.Equal(t, 10080, updates["codex_7d_window_minutes"])
-	require.Equal(t, now.Format(time.RFC3339), updates[codexWhamUsageUpdatedAtKey])
+	require.Equal(t, formatCodexWhamSnapshotGeneration(now), updates[codexWhamUsageUpdatedAtKey])
 	require.Equal(t, codexWhamPresenceSchemaV1, updates[codexWhamPresenceSchemaKey])
 }
 
@@ -205,6 +205,18 @@ func TestBuildCodexWhamWindowExtraUpdates_BothWindows(t *testing.T) {
 	require.Equal(t, true, updates[codexWham7dWindowPresentKey])
 	require.Equal(t, 25.0, updates["codex_5h_used_percent"])
 	require.Equal(t, 80.0, updates["codex_7d_used_percent"])
+}
+
+func TestBuildCodexWhamWindowExtraUpdates_ExplicitNullIsFreshAuthoritativeAbsence(t *testing.T) {
+	now := time.Date(2026, 8, 17, 7, 0, 0, 123456789, time.UTC)
+	updates := buildCodexWhamWindowExtraUpdates(&OpenAIQuotaUsage{RateLimitPresent: true}, now, false)
+
+	require.Equal(t, false, updates[codexWham5hWindowPresentKey])
+	require.Equal(t, false, updates[codexWham7dWindowPresentKey])
+	require.Nil(t, updates["codex_5h_used_percent"])
+	require.Nil(t, updates["codex_7d_used_percent"])
+	require.Equal(t, now.Format(time.RFC3339), updates["codex_usage_updated_at"])
+	require.Equal(t, formatCodexWhamSnapshotGeneration(now), updates[codexWhamUsageUpdatedAtKey])
 }
 
 // ── Part C: ResetCredit 影子拒绝 ───────────────────────────────────────────
@@ -570,6 +582,7 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 		switch r.URL.Path {
 		case "/backend-api/wham/usage":
 			_ = json.NewEncoder(w).Encode(OpenAIQuotaUsage{
+				RateLimit:             &OpenAIRateLimit{},
 				RateLimitResetCredits: &OpenAIRateLimitResetCredits{AvailableCount: 2},
 			})
 		case "/backend-api/wham/rate-limit-reset-credits":
@@ -632,6 +645,7 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 		switch r.URL.Path {
 		case "/backend-api/wham/usage":
 			_ = json.NewEncoder(w).Encode(OpenAIQuotaUsage{
+				RateLimit:             &OpenAIRateLimit{},
 				RateLimitResetCredits: &OpenAIRateLimitResetCredits{AvailableCount: 1},
 			})
 		case "/backend-api/wham/rate-limit-reset-credits":
@@ -735,6 +749,55 @@ func TestResetCreditGetByIDError_FailsClosed(t *testing.T) {
 		"error reached prepareUpstreamCall config-check — guard did not fail-closed; got: %v", err)
 }
 
+func TestQueryUsageWindowsDistinguishesMissingAndExplicitNullRateLimit(t *testing.T) {
+	account := &Account{
+		ID: 190, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Credentials: map[string]any{"chatgpt_account_id": "org-rate-limit-presence"},
+	}
+	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
+		OpenAITokenCacheKey(account): "fake-token-presence",
+	}}
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
+
+	tests := []struct {
+		name      string
+		body      string
+		wantError bool
+	}{
+		{name: "missing rate_limit is incomplete", body: `{"plan_type":"pro"}`, wantError: true},
+		{name: "explicit null is authoritative absence", body: `{"plan_type":"pro","rate_limit":null}`},
+		{name: "object is accepted", body: `{"plan_type":"pro","rate_limit":{"allowed":true}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("content-type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+			usage, err := svc.QueryUsageWindows(context.Background(), account.ID)
+			if tt.wantError {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "omitted required rate_limit field")
+				require.Nil(t, usage)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, usage)
+			require.True(t, usage.RateLimitPresent)
+			if strings.Contains(tt.body, `"rate_limit":null`) {
+				require.Nil(t, usage.RateLimit)
+			} else {
+				require.NotNil(t, usage.RateLimit)
+			}
+		})
+	}
+}
+
 // TestQueryUsageShadowResolve_EndToEnd 是端到端补充：通过 httptest 服务真实 /wham/usage
 // 路径，验证影子账号的 QueryUsage 能成功拿到服务器响应（header 由母账号注入）。
 func TestQueryUsageShadowResolve_EndToEnd(t *testing.T) {
@@ -757,12 +820,12 @@ func TestQueryUsageShadowResolve_EndToEnd(t *testing.T) {
 	}}
 	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
-	// httptest server 记录收到的 chatgpt-account-id header，返回空 usage JSON
+	// httptest server 记录收到的 chatgpt-account-id header，返回显式无窗口 usage JSON
 	var capturedAccountID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedAccountID = r.Header.Get("chatgpt-account-id")
 		w.Header().Set("content-type", "application/json")
-		_ = json.NewEncoder(w).Encode(OpenAIQuotaUsage{})
+		_, _ = w.Write([]byte(`{"rate_limit":null}`))
 	}))
 	defer srv.Close()
 

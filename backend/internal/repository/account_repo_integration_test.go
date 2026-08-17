@@ -1455,7 +1455,7 @@ func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFr
 	account := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:     "acc-extra-neutral",
 		Platform: service.PlatformOpenAI,
-		Extra:    map[string]any{"codex_usage_updated_at": "old"},
+		Extra:    map[string]any{"codex_5h_window_minutes": 60},
 	})
 	cacheRecorder := &schedulerCacheRecorder{
 		accounts: map[int64]*service.Account{
@@ -1464,7 +1464,7 @@ func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFr
 				Platform: account.Platform,
 				Status:   service.StatusDisabled,
 				Extra: map[string]any{
-					"codex_usage_updated_at": "old",
+					"codex_5h_window_minutes": 60,
 				},
 			},
 		},
@@ -1472,17 +1472,15 @@ func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFr
 	s.repo.schedulerCache = cacheRecorder
 
 	updates := map[string]any{
-		"codex_usage_updated_at":     "2026-03-11T10:00:00Z",
-		"codex_5h_used_percent":      88.5,
-		"session_window_utilization": 0.42,
+		"codex_5h_window_minutes": 300,
+		"grok_billing_snapshot":   map[string]any{"usage_percent": 42.0},
 	}
 	s.Require().NoError(s.repo.UpdateExtra(s.ctx, account.ID, updates))
 
 	got, err := s.repo.GetByID(s.ctx, account.ID)
 	s.Require().NoError(err)
-	s.Require().Equal("2026-03-11T10:00:00Z", got.Extra["codex_usage_updated_at"])
-	s.Require().Equal(88.5, got.Extra["codex_5h_used_percent"])
-	s.Require().Equal(0.42, got.Extra["session_window_utilization"])
+	s.Require().Equal(float64(300), got.Extra["codex_5h_window_minutes"])
+	s.Require().NotNil(got.Extra["grok_billing_snapshot"])
 
 	var outboxCount int
 	s.Require().NoError(scanSingleRow(s.ctx, s.repo.sql, "SELECT COUNT(*) FROM scheduler_outbox", nil, &outboxCount))
@@ -1490,7 +1488,7 @@ func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFr
 	s.Require().Len(cacheRecorder.setAccounts, 1)
 	s.Require().NotNil(cacheRecorder.accounts[account.ID])
 	s.Require().Equal(service.StatusActive, cacheRecorder.accounts[account.ID].Status)
-	s.Require().Equal("2026-03-11T10:00:00Z", cacheRecorder.accounts[account.ID].Extra["codex_usage_updated_at"])
+	s.Require().Equal(float64(300), cacheRecorder.accounts[account.ID].Extra["codex_5h_window_minutes"])
 }
 
 func (s *AccountRepoSuite) TestUpdateExtra_ExhaustedCodexSnapshotSyncsSchedulerCache() {
@@ -1514,7 +1512,15 @@ func (s *AccountRepoSuite) TestUpdateExtra_ExhaustedCodexSnapshotSyncsSchedulerC
 	var count int
 	err = scanSingleRow(s.ctx, s.repo.sql, "SELECT COUNT(*) FROM scheduler_outbox", nil, &count)
 	s.Require().NoError(err)
-	s.Require().Equal(0, count)
+	s.Require().Equal(1, count)
+	var eventType string
+	err = scanSingleRow(s.ctx, s.repo.sql, "SELECT event_type FROM scheduler_outbox LIMIT 1", nil, &eventType)
+	s.Require().NoError(err)
+	s.Require().Equal(service.SchedulerOutboxEventAccountChanged, eventType)
+	var metadataOnly bool
+	err = scanSingleRow(s.ctx, s.repo.sql, "SELECT COALESCE((payload->>'metadata_only')::boolean, false) FROM scheduler_outbox LIMIT 1", nil, &metadataOnly)
+	s.Require().NoError(err)
+	s.Require().True(metadataOnly)
 	s.Require().Len(cacheRecorder.setAccounts, 1)
 	s.Require().Equal(account.ID, cacheRecorder.setAccounts[0].ID)
 	s.Require().Equal(service.StatusActive, cacheRecorder.setAccounts[0].Status)

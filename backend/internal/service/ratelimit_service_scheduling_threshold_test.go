@@ -15,16 +15,36 @@ import (
 
 type thresholdPauseReconcileRepoStub struct {
 	rateLimitAccountRepoStub
-	updated        bool
-	reconcileCalls int
-	expectedReason string
-	nextUntil      *time.Time
-	nextReason     string
-	activeAccounts []Account
+	updated               bool
+	reconcileCalls        int
+	expectedReason        string
+	expectedWhamUpdatedAt string
+	nextUntil             *time.Time
+	nextReason            string
+	activeAccounts        []Account
+	pausePageAfterIDs     []int64
+	listActiveCalls       int
 }
 
 func (r *thresholdPauseReconcileRepoStub) ListActive(context.Context) ([]Account, error) {
+	r.listActiveCalls++
 	return r.activeAccounts, nil
+}
+
+func (r *thresholdPauseReconcileRepoStub) ListAccountsWithSchedulingThresholdPause(_ context.Context, afterID int64, limit int) ([]Account, error) {
+	r.pausePageAfterIDs = append(r.pausePageAfterIDs, afterID)
+	page := make([]Account, 0, limit)
+	for i := range r.activeAccounts {
+		account := r.activeAccounts[i]
+		if account.ID <= afterID || !IsAccountSchedulingThresholdReason(account.TempUnschedulableReason) {
+			continue
+		}
+		page = append(page, account)
+		if len(page) == limit {
+			break
+		}
+	}
+	return page, nil
 }
 
 func (r *thresholdPauseReconcileRepoStub) ReconcileAccountSchedulingThresholdPause(
@@ -36,6 +56,22 @@ func (r *thresholdPauseReconcileRepoStub) ReconcileAccountSchedulingThresholdPau
 ) (bool, error) {
 	r.reconcileCalls++
 	r.expectedReason = expectedReason
+	r.nextUntil = cloneTimePtr(until)
+	r.nextReason = reason
+	return r.updated, nil
+}
+
+func (r *thresholdPauseReconcileRepoStub) ReconcileAccountSchedulingThresholdPauseIfSnapshotUnchanged(
+	_ context.Context,
+	_ int64,
+	expectedReason string,
+	expectedWhamUpdatedAt string,
+	until *time.Time,
+	reason string,
+) (bool, error) {
+	r.reconcileCalls++
+	r.expectedReason = expectedReason
+	r.expectedWhamUpdatedAt = expectedWhamUpdatedAt
 	r.nextUntil = cloneTimePtr(until)
 	r.nextReason = reason
 	return r.updated, nil
@@ -537,4 +573,110 @@ func TestRateLimitService_ReconcileActiveAccountSchedulingThresholdPolicies_Clea
 	require.Nil(t, repo.nextUntil)
 	require.Empty(t, repo.nextReason)
 	require.Equal(t, []int64{4001}, cache.deleted)
+	require.Zero(t, repo.listActiveCalls)
+}
+
+func TestRateLimitService_ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged_PreservesPauseWhenGenerationCASLoses(t *testing.T) {
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	settingsRepo := newMockSettingRepo()
+	settingsRepo.data[SettingKeyAccountSchedulingThresholds] = `{"openai":97}`
+
+	until := time.Now().UTC().Add(4 * time.Hour).Truncate(time.Second)
+	oldReason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform: PlatformOpenAI, Window: "5h", ThresholdPercent: 97, UsedPercent: 99, Until: until, Now: time.Now().UTC(),
+	})
+	account := &Account{
+		ID: 4101, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true,
+		Credentials:            map[string]any{accountSchedulingThresholdCredentialKey: 100},
+		TempUnschedulableUntil: &until, TempUnschedulableReason: oldReason,
+	}
+	repo := &thresholdPauseReconcileRepoStub{updated: false}
+	cache := &thresholdPauseCacheRecorder{}
+	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+	rl.SetSettingService(NewSettingService(settingsRepo, &config.Config{}))
+
+	err := rl.ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(
+		context.Background(), account, "2026-08-17T07:00:00.123456789Z",
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.reconcileCalls)
+	require.Equal(t, oldReason, repo.expectedReason)
+	require.Equal(t, "2026-08-17T07:00:00.123456789Z", repo.expectedWhamUpdatedAt)
+	require.NotNil(t, account.TempUnschedulableUntil)
+	require.Equal(t, oldReason, account.TempUnschedulableReason)
+	require.Empty(t, cache.deleted)
+}
+
+func TestRateLimitService_ReconcileActiveAccountSchedulingThresholdPolicies_PaginatesStructuredPauses(t *testing.T) {
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	settingsRepo := newMockSettingRepo()
+	settingsRepo.data[SettingKeyAccountSchedulingThresholds] = `{"openai":97}`
+
+	now := time.Now().UTC()
+	until := now.Add(4 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform: PlatformOpenAI, Window: "5h", ThresholdPercent: 97, UsedPercent: 99, Until: until, Now: now,
+	})
+	accounts := make([]Account, accountSchedulingThresholdStartupPageSize+1)
+	for i := range accounts {
+		accounts[i] = Account{
+			ID: int64(i + 1), Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true,
+			Credentials:            map[string]any{accountSchedulingThresholdCredentialKey: 100},
+			TempUnschedulableUntil: &until, TempUnschedulableReason: reason,
+		}
+	}
+	repo := &thresholdPauseReconcileRepoStub{updated: true, activeAccounts: accounts}
+	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	rl.SetSettingService(NewSettingService(settingsRepo, &config.Config{}))
+
+	count, err := rl.ReconcileActiveAccountSchedulingThresholdPolicies(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, len(accounts), count)
+	require.Equal(t, len(accounts), repo.reconcileCalls)
+	require.Equal(t, []int64{0, int64(accountSchedulingThresholdStartupPageSize)}, repo.pausePageAfterIDs)
+	require.Zero(t, repo.listActiveCalls)
+}
+
+type thresholdStartupRetryRepo struct {
+	rateLimitAccountRepoStub
+	calls     int
+	failUntil int
+	succeeded chan struct{}
+}
+
+func (r *thresholdStartupRetryRepo) ListAccountsWithSchedulingThresholdPause(context.Context, int64, int) ([]Account, error) {
+	r.calls++
+	if r.calls <= r.failUntil {
+		return nil, errors.New("temporary database failure")
+	}
+	select {
+	case <-r.succeeded:
+	default:
+		close(r.succeeded)
+	}
+	return nil, nil
+}
+
+func TestRateLimitService_StartAccountSchedulingThresholdReconciliation_RetriesInsideSingleWorker(t *testing.T) {
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	settingsRepo := newMockSettingRepo()
+	repo := &thresholdStartupRetryRepo{failUntil: 2, succeeded: make(chan struct{})}
+	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	rl.thresholdRetryBase = time.Millisecond
+	rl.SetSettingService(NewSettingService(settingsRepo, &config.Config{}))
+
+	rl.StartAccountSchedulingThresholdReconciliation()
+	rl.StartAccountSchedulingThresholdReconciliation()
+
+	select {
+	case <-repo.succeeded:
+	case <-time.After(time.Second):
+		t.Fatal("startup threshold reconciliation did not retry to success")
+	}
+	require.Equal(t, accountSchedulingThresholdStartupAttempts, repo.calls)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -84,9 +85,33 @@ type OpenAIQuotaUsage struct {
 	Email                 string                       `json:"email,omitempty"`
 	PlanType              string                       `json:"plan_type,omitempty"`
 	RateLimit             *OpenAIRateLimit             `json:"rate_limit,omitempty"`
+	RateLimitPresent      bool                         `json:"-"`
 	AdditionalRateLimits  []OpenAIAdditionalRateLimit  `json:"additional_rate_limits,omitempty"`
 	RateLimitResetCredits *OpenAIRateLimitResetCredits `json:"rate_limit_reset_credits,omitempty"`
 	FetchedAt             int64                        `json:"fetched_at"`
+}
+
+// openAIQuotaUsageWire keeps upstream field-presence decoding private to the
+// /wham/usage boundary. OpenAIQuotaUsage is embedded in public response DTOs,
+// so attaching UnmarshalJSON directly to it would consume sibling fields such
+// as cache_persisted when clients decode those outer responses.
+type openAIQuotaUsageWire struct {
+	Usage OpenAIQuotaUsage
+}
+
+func (w *openAIQuotaUsageWire) UnmarshalJSON(data []byte) error {
+	type openAIQuotaUsageAlias OpenAIQuotaUsage
+	var decoded openAIQuotaUsageAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, decoded.RateLimitPresent = fields["rate_limit"]
+	w.Usage = OpenAIQuotaUsage(decoded)
+	return nil
 }
 
 // OpenAIQuotaResetCredit captures the redeemed credit metadata returned by the
@@ -168,8 +193,9 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 	defer cancel()
 	agentIdentity := s.isAgentIdentityAccount(ctx, accountID)
 
-	var payload OpenAIQuotaUsage
+	var wirePayload openAIQuotaUsageWire
 	for recovered := false; ; {
+		wirePayload = openAIQuotaUsageWire{}
 		quotaHeaders, expectedTaskID, headerErr := s.buildCodexQuotaHeaders(callCtx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 		if headerErr != nil {
 			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr)
@@ -177,7 +203,7 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 		resp, err := client.R().
 			SetContext(callCtx).
 			SetHeaders(quotaHeaders).
-			SetSuccessResult(&payload).
+			SetSuccessResult(&wirePayload).
 			Get(chatGPTUsageURL)
 		if err != nil {
 			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_REQUEST_FAILED", "upstream request failed: %v", err)
@@ -196,6 +222,10 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 			return nil, infraerrors.Newf(mapUpstreamStatus(status), "OPENAI_QUOTA_UPSTREAM_ERROR", "upstream returned %d: %s", status, body)
 		}
 		break
+	}
+	payload := wirePayload.Usage
+	if !payload.RateLimitPresent {
+		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_UPSTREAM_INVALID_RESPONSE", "upstream response omitted required rate_limit field")
 	}
 
 	payload.FetchedAt = time.Now().Unix()
@@ -605,8 +635,12 @@ func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Ti
 	updates := map[string]any{
 		codexWham5hWindowPresentKey: false,
 		codexWham7dWindowPresentKey: false,
-		codexWhamUsageUpdatedAtKey:  now.Format(time.RFC3339),
-		codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
+		// This timestamp is also the quota-generation CAS token. Preserve
+		// sub-second precision so concurrent refreshes in the same second do
+		// not collapse into one indistinguishable generation.
+		codexWhamUsageUpdatedAtKey: formatCodexWhamSnapshotGeneration(now),
+		codexWhamPresenceSchemaKey: codexWhamPresenceSchemaV1,
+		"codex_usage_updated_at":   now.UTC().Format(time.RFC3339),
 	}
 	if rateLimit == nil {
 		clearAbsentCodexWindowExtra(updates, "5h")
@@ -673,7 +707,6 @@ func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Ti
 	if present, _ := updates[codexWham7dWindowPresentKey].(bool); !present {
 		clearAbsentCodexWindowExtra(updates, "7d")
 	}
-	updates["codex_usage_updated_at"] = now.Format(time.RFC3339)
 	return updates
 }
 

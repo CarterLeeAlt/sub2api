@@ -2,16 +2,20 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
 type accountUsageCodexProbeRepo struct {
 	stubOpenAIAccountRepo
-	updateExtraCh  chan map[string]any
-	rateLimitCh    chan time.Time
-	clearTempCalls int
+	updateExtraCh   chan map[string]any
+	updateExtraErr  error
+	snapshotApplied *bool
+	rateLimitCh     chan time.Time
+	clearTempCalls  int
 }
 
 func (r *accountUsageCodexProbeRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
@@ -22,7 +26,17 @@ func (r *accountUsageCodexProbeRepo) UpdateExtra(_ context.Context, _ int64, upd
 		}
 		r.updateExtraCh <- copied
 	}
-	return nil
+	return r.updateExtraErr
+}
+
+func (r *accountUsageCodexProbeRepo) UpdateOpenAICodexWhamSnapshotIfNewer(_ context.Context, _ int64, _ string, updates map[string]any) (bool, error) {
+	if err := r.UpdateExtra(context.Background(), 0, updates); err != nil {
+		return false, err
+	}
+	if r.snapshotApplied != nil {
+		return *r.snapshotApplied, nil
+	}
+	return true, nil
 }
 
 func (r *accountUsageCodexProbeRepo) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
@@ -38,11 +52,17 @@ func (r *accountUsageCodexProbeRepo) ClearTempUnschedulable(_ context.Context, _
 }
 
 type accountUsageThresholdReconciler struct {
-	calls int
+	calls                 int
+	expectedWhamUpdatedAt string
 }
 
 func (r *accountUsageThresholdReconciler) ReconcileAccountSchedulingThresholdPolicy(_ context.Context, account *Account) error {
+	return errors.New("reason-only reconciliation must not be used for WHAM recovery")
+}
+
+func (r *accountUsageThresholdReconciler) ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(_ context.Context, account *Account, expectedWhamUpdatedAt string) error {
 	r.calls++
+	r.expectedWhamUpdatedAt = expectedWhamUpdatedAt
 	account.TempUnschedulableUntil = nil
 	account.TempUnschedulableReason = ""
 	return nil
@@ -274,24 +294,48 @@ func TestAccountUsageService_PersistOpenAICodexProbeSnapshotOnlyUpdatesExtra(t *
 		rateLimitCh:   make(chan time.Time, 1),
 	}
 	svc := &AccountUsageService{accountRepo: repo}
-	svc.persistOpenAICodexProbeSnapshot(321, map[string]any{
+	persisted, err := svc.persistOpenAICodexProbeSnapshot(context.Background(), 321, map[string]any{
 		"codex_7d_used_percent": 100.0,
 		"codex_7d_reset_at":     time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339),
 	})
+	if err != nil {
+		t.Fatalf("persistOpenAICodexProbeSnapshot() error = %v", err)
+	}
+	if !persisted {
+		t.Fatal("persistOpenAICodexProbeSnapshot() persisted = false, want true")
+	}
 
 	select {
 	case updates := <-repo.updateExtraCh:
 		if got := updates["codex_7d_used_percent"]; got != 100.0 {
 			t.Fatalf("codex_7d_used_percent = %v, want 100", got)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("等待 codex 探测快照写入 extra 超时")
+	default:
+		t.Fatal("persistOpenAICodexProbeSnapshot returned before updating extra")
 	}
 
 	select {
 	case got := <-repo.rateLimitCh:
 		t.Fatalf("不应将探测快照写入运行时限流状态: %v", got)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestAccountUsageService_PersistOpenAICodexProbeSnapshotReturnsUpdateError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("database unavailable")
+	repo := &accountUsageCodexProbeRepo{updateExtraErr: wantErr}
+	svc := &AccountUsageService{accountRepo: repo}
+
+	persisted, err := svc.persistOpenAICodexProbeSnapshot(context.Background(), 322, map[string]any{
+		codexWhamUsageUpdatedAtKey: "2026-08-17T07:00:00.123456789Z",
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("persistOpenAICodexProbeSnapshot() error = %v, want %v", err, wantErr)
+	}
+	if persisted {
+		t.Fatal("persistOpenAICodexProbeSnapshot() persisted = true after repository error")
 	}
 }
 
@@ -354,11 +398,12 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 		TempUnschedulableUntil:  &until,
 		TempUnschedulableReason: reason,
 		Extra: map[string]any{
-			"codex_5h_used_percent":  0.0,
-			"codex_5h_reset_at":      now.Add(2 * time.Hour).Format(time.RFC3339),
-			"codex_7d_used_percent":  0.0,
-			"codex_7d_reset_at":      until.Format(time.RFC3339),
-			"codex_usage_updated_at": now.Format(time.RFC3339),
+			"codex_5h_used_percent":    0.0,
+			"codex_5h_reset_at":        now.Add(2 * time.Hour).Format(time.RFC3339),
+			"codex_7d_used_percent":    0.0,
+			"codex_7d_reset_at":        until.Format(time.RFC3339),
+			"codex_usage_updated_at":   now.Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey: "2026-08-17T07:00:00.123456789Z",
 		},
 	}
 
@@ -368,11 +413,147 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 	if reconciler.calls != 1 {
 		t.Fatalf("threshold reconciler calls = %d, want 1", reconciler.calls)
 	}
+	if reconciler.expectedWhamUpdatedAt != "2026-08-17T07:00:00.123456789Z" {
+		t.Fatalf("expected WHAM generation = %q", reconciler.expectedWhamUpdatedAt)
+	}
 	if repo.clearTempCalls != 0 {
 		t.Fatalf("legacy ClearTempUnschedulable calls = %d, want 0", repo.clearTempCalls)
 	}
 	if account.TempUnschedulableUntil != nil || account.TempUnschedulableReason != "" {
 		t.Fatalf("expected in-memory scheduling pause to be cleared, got until=%v reason=%q", account.TempUnschedulableUntil, account.TempUnschedulableReason)
+	}
+}
+
+func TestAccountUsageService_GetOpenAIUsageWithoutSnapshotReconcilerFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	until := now.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform: PlatformOpenAI, Window: "7d", ThresholdPercent: 90, UsedPercent: 95, Until: until, Now: now.Add(-time.Hour),
+	})
+	repo := &accountUsageCodexProbeRepo{}
+	svc := &AccountUsageService{accountRepo: repo}
+	account := &Account{
+		ID: 3212, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		TempUnschedulableUntil: &until, TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			"codex_7d_used_percent":    0.0,
+			"codex_7d_reset_at":        until.Format(time.RFC3339),
+			"codex_usage_updated_at":   now.Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey: "2026-08-17T07:00:00.987654321Z",
+		},
+	}
+
+	if _, err := svc.getOpenAIUsage(context.Background(), account, false); err != nil {
+		t.Fatalf("getOpenAIUsage() error = %v", err)
+	}
+	if repo.clearTempCalls != 0 {
+		t.Fatalf("legacy ClearTempUnschedulable calls = %d, want 0", repo.clearTempCalls)
+	}
+	if account.TempUnschedulableUntil == nil || account.TempUnschedulableReason == "" {
+		t.Fatal("recovery without a generation-aware reconciler must preserve the pause")
+	}
+}
+
+func TestAccountUsageService_GetOpenAIUsageMissingRateLimitDoesNotRecover(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	until := now.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform: PlatformOpenAI, Window: "7d", ThresholdPercent: 90, UsedPercent: 95, Until: until, Now: now.Add(-time.Hour),
+	})
+	account := Account{
+		ID: 3213, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Credentials:            map[string]any{"chatgpt_account_id": "org-incomplete-wham"},
+		TempUnschedulableUntil: &until, TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			"codex_7d_used_percent":    0.0,
+			"codex_7d_reset_at":        until.Format(time.RFC3339),
+			"codex_usage_updated_at":   now.Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey: "2026-08-17T07:00:00.111111111Z",
+			codexWhamPresenceSchemaKey: codexWhamPresenceSchemaV1,
+		},
+	}
+	repo := &accountUsageCodexProbeRepo{
+		stubOpenAIAccountRepo: stubOpenAIAccountRepo{accounts: []Account{account}},
+	}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(&account): "fake-token"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"plan_type":"pro"}`))
+	}))
+	defer server.Close()
+
+	reconciler := &accountUsageThresholdReconciler{}
+	svc := &AccountUsageService{
+		accountRepo:         repo,
+		openAIQuotaService:  NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokenCache, nil), newQuotaRedirectingFactory(server)),
+		thresholdReconciler: reconciler,
+	}
+
+	if _, err := svc.getOpenAIUsage(context.Background(), &account, true); err != nil {
+		t.Fatalf("getOpenAIUsage() error = %v", err)
+	}
+	if reconciler.calls != 0 {
+		t.Fatalf("threshold reconciler calls = %d after incomplete WHAM response, want 0", reconciler.calls)
+	}
+	if account.TempUnschedulableUntil == nil || account.TempUnschedulableReason == "" {
+		t.Fatal("incomplete WHAM response must preserve the existing threshold pause")
+	}
+}
+
+func TestAccountUsageService_GetOpenAIUsageStaleSnapshotWriteDoesNotRecover(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	until := now.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform: PlatformOpenAI, Window: "7d", ThresholdPercent: 90, UsedPercent: 95, Until: until, Now: now.Add(-time.Hour),
+	})
+	account := Account{
+		ID: 3214, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Credentials:            map[string]any{"chatgpt_account_id": "org-stale-wham"},
+		TempUnschedulableUntil: &until, TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			"codex_7d_used_percent":    0.0,
+			"codex_7d_reset_at":        until.Format(time.RFC3339),
+			"codex_usage_updated_at":   now.Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey: "2026-08-17T07:00:00.111111111Z",
+			codexWhamPresenceSchemaKey: codexWhamPresenceSchemaV1,
+		},
+	}
+	notApplied := false
+	repo := &accountUsageCodexProbeRepo{
+		stubOpenAIAccountRepo: stubOpenAIAccountRepo{accounts: []Account{account}},
+		snapshotApplied:       &notApplied,
+	}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(&account): "fake-token"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"rate_limit":null}`))
+	}))
+	defer server.Close()
+
+	reconciler := &accountUsageThresholdReconciler{}
+	svc := &AccountUsageService{
+		accountRepo:         repo,
+		openAIQuotaService:  NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokenCache, nil), newQuotaRedirectingFactory(server)),
+		thresholdReconciler: reconciler,
+	}
+
+	if _, err := svc.getOpenAIUsage(context.Background(), &account, true); err != nil {
+		t.Fatalf("getOpenAIUsage() error = %v", err)
+	}
+	if reconciler.calls != 0 {
+		t.Fatalf("threshold reconciler calls = %d after stale snapshot write, want 0", reconciler.calls)
+	}
+	if account.TempUnschedulableUntil == nil || account.TempUnschedulableReason == "" {
+		t.Fatal("out-of-order WHAM snapshot must not clear the existing threshold pause")
+	}
+	if got := codexWhamSnapshotGeneration(account.Extra); got != "2026-08-17T07:00:00.111111111Z" {
+		t.Fatalf("in-memory WHAM generation changed after rejected write: %q", got)
 	}
 }
 

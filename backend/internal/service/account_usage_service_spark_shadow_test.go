@@ -39,6 +39,13 @@ func (r *sparkShadowUsageTestRepo) UpdateExtra(_ context.Context, _ int64, updat
 	return nil
 }
 
+func (r *sparkShadowUsageTestRepo) UpdateOpenAICodexWhamSnapshotIfNewer(ctx context.Context, id int64, _ string, updates map[string]any) (bool, error) {
+	if err := r.UpdateExtra(ctx, id, updates); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows covers
 // two assertions required by Task 3.2:
 //
@@ -93,6 +100,9 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 		capturedAccountID = r.Header.Get("chatgpt-account-id")
 		w.Header().Set("content-type", "application/json")
 		resp := OpenAIQuotaUsage{
+			// Top-level rate_limit is a required /wham/usage envelope field even
+			// though Spark shadow scheduling reads codex_bengalfox below.
+			RateLimit: &OpenAIRateLimit{},
 			AdditionalRateLimits: []OpenAIAdditionalRateLimit{
 				{
 					MeteredFeature: "codex_bengalfox",
