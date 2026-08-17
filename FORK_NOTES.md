@@ -116,6 +116,7 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - 编辑阈值后立即重新评估已有的 `account_scheduling_threshold` 停调原因，并以 compare-and-swap 方式协调数据库、Redis、调度快照和运行时快速阻断；其他停调原因及模型级限流不受影响；
 - 进程启动时在数据库中筛选仍带结构化阈值停调原因的活动账号并按 ID 分页协调；单个 worker 最多执行三次独立超时的指数退避重试，避免启动瞬时故障被 `sync.Once` 永久固化；
 - WHAM 用量刷新按响应完成时间生成高精度 `codex_wham_usage_updated_at`，先同步、单调写入数据库和 scheduler outbox，再以“旧停调原因 + 精确 WHAM 代际”双重 CAS 恢复；持久化失败、旧响应晚到、代际变化或协调器缺失时保持原停调状态；
+- 升级后的固定纳秒 UTC WHAM 代际使用精确字符串顺序；升级前由本地时区写入的 RFC3339 历史代际按实际时间点比较，避免 `+08:00` 等历史值把后续正常刷新永久拒绝；
 - `/wham/usage` 的 HTTP 200 将 `rate_limit` 显式 `null` 视为权威无窗口，将字段完全缺失视为不完整响应；不完整响应保留上一份可靠快照且不参与本次恢复；
 - 调度列表使用的 `sched:meta:<id>` 精简快照保留账号阈值覆盖值、账号版本以及各平台阈值判断所需的窗口字段，避免账号覆盖为 `100` 时仍被精简快照按全局阈值反复停调；
 - Codex/Anthropic 调度判断依赖的额度字段与数据库更新原子写入耐久 outbox；事件沿用 `account_changed` 并携带 `metadata_only=true`，新 worker 只刷新账号元数据、不重建分组 bucket，旧 worker 则安全执行完整刷新，支持滚动升级；
@@ -141,7 +142,7 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - `frontend/src/views/admin/AccountsView.vue`
 - `frontend/src/views/admin/__tests__/AccountsView.usageWindowsHint.spec.ts`
 
-相关提交：[`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557)、[`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6)、[`c9c28fc8a`](https://github.com/CarterLeeAlt/sub2api/commit/c9c28fc8a1aef9705a162d39181ec17c2e8aa91b)、[`36ad5b5ee`](https://github.com/CarterLeeAlt/sub2api/commit/36ad5b5eec735c90dee5bfa52ac8870b835091ff)、[`7b233dec2`](https://github.com/CarterLeeAlt/sub2api/commit/7b233dec29d4b8902ea6de4ebb75be0864bab94e)、[`e7d474548`](https://github.com/CarterLeeAlt/sub2api/commit/e7d47454859c0ff3b618a2497f8e6246df6c1cf3)。
+相关提交：[`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557)、[`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6)、[`c9c28fc8a`](https://github.com/CarterLeeAlt/sub2api/commit/c9c28fc8a1aef9705a162d39181ec17c2e8aa91b)、[`36ad5b5ee`](https://github.com/CarterLeeAlt/sub2api/commit/36ad5b5eec735c90dee5bfa52ac8870b835091ff)、[`7b233dec2`](https://github.com/CarterLeeAlt/sub2api/commit/7b233dec29d4b8902ea6de4ebb75be0864bab94e)、[`e7d474548`](https://github.com/CarterLeeAlt/sub2api/commit/e7d47454859c0ff3b618a2497f8e6246df6c1cf3)、[`27e6582ca`](https://github.com/CarterLeeAlt/sub2api/commit/27e6582ca07c99fe6686267f5b56c32663f64ad3)。
 
 验证：后端完整单元测试 `go test -tags unit ./... -count=1`、静态检查 `go vet ./...` 和服务端离线构建均通过。
 
@@ -326,6 +327,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 24 | [`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6) | 修复 | 统一 Codex 账号级停调阈值优先级，并协调编辑阈值后的既有停调状态。 |
 | 25 | [`992b51eb7`](https://github.com/CarterLeeAlt/sub2api/commit/992b51eb7d601bcb2fb490f185b45722d08dfcaa) | 修复 | 为同一 Codex 请求预计算并共享起始时间，消除头、普通 JSON 和 raw 透传路径之间的 1 毫秒竞态。 |
 | 26 | [`e7d474548`](https://github.com/CarterLeeAlt/sub2api/commit/e7d47454859c0ff3b618a2497f8e6246df6c1cf3) | 修复 | 以同步单调 WHAM 快照、额度代际 CAS、耐久调度元数据事件和启动重试收紧 Codex 阈值恢复。 |
+| 27 | [`27e6582ca`](https://github.com/CarterLeeAlt/sub2api/commit/27e6582ca07c99fe6686267f5b56c32663f64ad3) | 修复 | WHAM 代际 CAS 兼容升级前带本地时区偏移的 RFC3339 快照，避免正常额度刷新被历史值阻塞。 |
 
 ## 下次同步检查清单
 
