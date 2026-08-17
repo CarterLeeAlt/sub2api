@@ -64,9 +64,40 @@ var schedulerNeutralExtraKeyPrefixes = []string{
 }
 
 var schedulerNeutralExtraKeys = map[string]struct{}{
-	"codex_usage_updated_at":     {},
-	"grok_billing_snapshot":      {},
-	"session_window_utilization": {},
+	"grok_billing_snapshot": {},
+}
+
+// schedulerMetadataExtraKeys are read directly from sched:meta on the hot
+// path. Their DB write and a metadata-only outbox event must commit together so
+// a transient Redis failure has a durable retry source without rebuilding
+// every group bucket on frequent usage refreshes.
+var schedulerMetadataExtraKeys = map[string]struct{}{
+	"codex_5h_used_percent":        {},
+	"codex_5h_reset_after_seconds": {},
+	"codex_5h_reset_at":            {},
+	"codex_7d_used_percent":        {},
+	"codex_7d_reset_after_seconds": {},
+	"codex_7d_reset_at":            {},
+	"codex_usage_updated_at":       {},
+	"codex_wham_usage_updated_at":  {},
+	"codex_wham_presence_schema":   {},
+	"codex_wham_5h_window_present": {},
+	"codex_wham_7d_window_present": {},
+	"session_window_utilization":   {},
+	"passive_usage_7d_utilization": {},
+	"passive_usage_7d_reset":       {},
+}
+
+type schedulerExtraUpdateOutboxKind uint8
+
+const (
+	schedulerExtraUpdateOutboxNone schedulerExtraUpdateOutboxKind = iota
+	schedulerExtraUpdateOutboxMetadata
+	schedulerExtraUpdateOutboxAccount
+)
+
+func schedulerMetadataOnlyOutboxPayload() map[string]any {
+	return map[string]any{service.SchedulerOutboxPayloadMetadataOnly: true}
 }
 
 const postgresParameterBatchSize = 50000
@@ -1151,6 +1182,36 @@ func (r *accountRepository) ListActive(ctx context.Context) ([]service.Account, 
 	accounts, err := r.client.Account.Query().
 		Where(dbaccount.StatusEQ(service.StatusActive)).
 		Order(dbent.Asc(dbaccount.FieldPriority)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.accountsToService(ctx, accounts)
+}
+
+// ListAccountsWithSchedulingThresholdPause keeps startup reconciliation
+// bounded by filtering the structured pause source in PostgreSQL and walking
+// the result set by account id. The generated reason payload always contains
+// this compact JSON fragment even when optional detail fields differ.
+func (r *accountRepository) ListAccountsWithSchedulingThresholdPause(ctx context.Context, afterID int64, limit int) ([]service.Account, error) {
+	if afterID < 0 {
+		afterID = 0
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	accounts, err := r.client.Account.Query().
+		Where(
+			dbaccount.StatusEQ(service.StatusActive),
+			dbaccount.IDGT(afterID),
+			dbaccount.TempUnschedulableReasonHasPrefix(`{"source":"`+service.AccountSchedulingThresholdReasonSource+`"`),
+		).
+		Order(dbent.Asc(dbaccount.FieldID)).
+		Limit(limit).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -2381,6 +2442,51 @@ func (r *accountRepository) ReconcileAccountSchedulingThresholdPause(
 	return true, nil
 }
 
+// ReconcileAccountSchedulingThresholdPauseIfSnapshotUnchanged extends the
+// reason CAS with the exact authoritative WHAM snapshot timestamp used by the
+// recovery decision. A newer quota write therefore makes an older recovery a
+// no-op even when the structured pause reason itself has not changed.
+func (r *accountRepository) ReconcileAccountSchedulingThresholdPauseIfSnapshotUnchanged(
+	ctx context.Context,
+	id int64,
+	expectedReason string,
+	expectedWhamUpdatedAt string,
+	until *time.Time,
+	reason string,
+) (bool, error) {
+	var untilValue any
+	var reasonValue any
+	if until != nil {
+		untilValue = until.UTC()
+		reasonValue = reason
+	}
+
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET temp_unschedulable_until = $1,
+				temp_unschedulable_reason = $2,
+				updated_at = NOW()
+			WHERE id = $3
+				AND deleted_at IS NULL
+				AND temp_unschedulable_reason = $4
+				AND extra->>'codex_wham_usage_updated_at' = $5
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $6, updated.id, NULL, NULL FROM updated
+	`, untilValue, reasonValue, id, expectedReason, expectedWhamUpdatedAt, service.SchedulerOutboxEventAccountChanged)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		return false, err
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
+}
+
 func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 	ctx context.Context,
 	id int64,
@@ -2606,6 +2712,93 @@ func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now ti
 	return int64(len(accountIDs)), nil
 }
 
+// UpdateOpenAICodexWhamSnapshotIfNewer atomically rejects an out-of-order WHAM
+// write and commits the metadata retry event with an accepted snapshot. New
+// generations use a fixed-width UTC timestamp, so lexical order is temporal
+// order; the length-20 branch accepts legacy second-precision RFC3339 values
+// from before the generation CAS was introduced.
+func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
+	ctx context.Context,
+	id int64,
+	expectedWhamUpdatedAt string,
+	updates map[string]any,
+) (bool, error) {
+	const whamUpdatedAtKey = "codex_wham_usage_updated_at"
+	expectedWhamUpdatedAt = strings.TrimSpace(expectedWhamUpdatedAt)
+	if id <= 0 || expectedWhamUpdatedAt == "" || len(updates) == 0 {
+		return false, nil
+	}
+	if _, err := time.Parse(time.RFC3339Nano, expectedWhamUpdatedAt); err != nil {
+		return false, err
+	}
+	actual, ok := updates[whamUpdatedAtKey].(string)
+	if !ok || strings.TrimSpace(actual) != expectedWhamUpdatedAt {
+		return false, errors.New("WHAM snapshot generation does not match update payload")
+	}
+	payload, err := json.Marshal(updates)
+	if err != nil {
+		return false, err
+	}
+
+	baseCtx := ctx
+	contextTx := dbent.TxFromContext(ctx)
+	client := clientFromContext(ctx, r.client)
+	var tx *dbent.Tx
+	if contextTx == nil {
+		if r.client == nil {
+			return false, errors.New("account repository client is unavailable")
+		}
+		tx, err = r.client.Tx(ctx)
+		if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+			return false, err
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			ctx = dbent.NewTxContext(ctx, tx)
+			client = tx.Client()
+		}
+	}
+
+	result, err := client.ExecContext(ctx, `
+		UPDATE accounts
+		SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb,
+			updated_at = NOW()
+		WHERE id = $2
+			AND deleted_at IS NULL
+			AND (
+				COALESCE(extra->>'codex_wham_usage_updated_at', '') = ''
+				OR (
+					char_length(extra->>'codex_wham_usage_updated_at') = 20
+					AND right(extra->>'codex_wham_usage_updated_at', 1) = 'Z'
+					AND left(extra->>'codex_wham_usage_updated_at', 19) <= left($3, 19)
+				)
+				OR extra->>'codex_wham_usage_updated_at' <= $3
+			)
+	`, string(payload), id, expectedWhamUpdatedAt)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, schedulerMetadataOnlyOutboxPayload()); err != nil {
+		return false, err
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+	}
+	if contextTx == nil {
+		r.syncSchedulerAccountSnapshot(baseCtx, id)
+	}
+	return true, nil
+}
+
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	if len(updates) == 0 {
 		return nil
@@ -2618,7 +2811,15 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	}
 
 	clearProbeSnapshot := upstreamBillingProbeExplicitlyDisabled(updates) || upstreamBillingProbeSnapshotClearRequested(updates)
-	durableSchedulerChange := shouldEnqueueSchedulerOutboxForExtraUpdates(updates) || clearProbeSnapshot
+	outboxKind := schedulerOutboxKindForExtraUpdates(updates)
+	if clearProbeSnapshot {
+		outboxKind = schedulerExtraUpdateOutboxAccount
+	}
+	durableSchedulerChange := outboxKind != schedulerExtraUpdateOutboxNone
+	var outboxPayload any
+	if outboxKind == schedulerExtraUpdateOutboxMetadata {
+		outboxPayload = schedulerMetadataOnlyOutboxPayload()
+	}
 	baseCtx := ctx
 	contextTx := dbent.TxFromContext(ctx)
 	client := clientFromContext(ctx, r.client)
@@ -2657,7 +2858,7 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 		return service.ErrAccountNotFound
 	}
 	if durableSchedulerChange {
-		if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, outboxPayload); err != nil {
 			return err
 		}
 		if tx != nil {
@@ -2833,21 +3034,42 @@ func lockAndMatchProbeProxyIdentity(ctx context.Context, client *dbent.Client, a
 }
 
 func shouldEnqueueSchedulerOutboxForExtraUpdates(updates map[string]any) bool {
-	if len(updates) == 0 {
-		return false
-	}
+	return schedulerOutboxKindForExtraUpdates(updates) != schedulerExtraUpdateOutboxNone
+}
+
+func schedulerOutboxKindForExtraUpdates(updates map[string]any) schedulerExtraUpdateOutboxKind {
+	metadataChanged := false
 	for key := range updates {
+		if isSchedulerMetadataExtraKey(key) {
+			metadataChanged = true
+			continue
+		}
 		if isSchedulerNeutralExtraKey(key) {
 			continue
 		}
-		return true
+		return schedulerExtraUpdateOutboxAccount
 	}
-	return false
+	if metadataChanged {
+		return schedulerExtraUpdateOutboxMetadata
+	}
+	return schedulerExtraUpdateOutboxNone
+}
+
+func isSchedulerMetadataExtraKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	_, ok := schedulerMetadataExtraKeys[key]
+	return ok
 }
 
 func isSchedulerNeutralExtraKey(key string) bool {
 	key = strings.TrimSpace(key)
 	if key == "" {
+		return false
+	}
+	if isSchedulerMetadataExtraKey(key) {
 		return false
 	}
 	if _, ok := schedulerNeutralExtraKeys[key]; ok {

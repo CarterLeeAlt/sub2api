@@ -473,6 +473,9 @@ func (s *SchedulerSnapshotService) handleOutboxEvent(ctx context.Context, event 
 	case SchedulerOutboxEventAccountGroupsChanged:
 		return s.handleAccountEvent(ctx, event.AccountID, event.Payload, seen)
 	case SchedulerOutboxEventAccountChanged:
+		if metadataOnly, _ := event.Payload[SchedulerOutboxPayloadMetadataOnly].(bool); metadataOnly {
+			return s.handleAccountMetadataEvent(ctx, event.AccountID)
+		}
 		return s.handleAccountEvent(ctx, event.AccountID, event.Payload, seen)
 	case SchedulerOutboxEventGroupChanged:
 		return s.handleGroupEvent(ctx, event.GroupID, seen)
@@ -481,6 +484,24 @@ func (s *SchedulerSnapshotService) handleOutboxEvent(ctx context.Context, event 
 	default:
 		return nil
 	}
+}
+
+// handleAccountMetadataEvent durably retries the narrow sched:meta refresh
+// used by usage/quota snapshots. It intentionally does not rebuild group
+// buckets because these fields affect hot-path account evaluation, not bucket
+// membership or ordering.
+func (s *SchedulerSnapshotService) handleAccountMetadataEvent(ctx context.Context, accountID *int64) error {
+	if accountID == nil || *accountID <= 0 || s.accountRepo == nil || s.cache == nil {
+		return nil
+	}
+	account, err := s.accountRepo.GetByID(ctx, *accountID)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return s.cache.DeleteAccount(ctx, *accountID)
+		}
+		return err
+	}
+	return s.cache.SetAccount(ctx, account)
 }
 
 func (s *SchedulerSnapshotService) handleLastUsedEvent(ctx context.Context, payload map[string]any) error {

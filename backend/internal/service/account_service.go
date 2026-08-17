@@ -139,6 +139,41 @@ type AccountSchedulingThresholdPauseRepository interface {
 	) (bool, error)
 }
 
+// AccountSchedulingThresholdSnapshotPauseRepository adds the quota generation
+// to a threshold-pause reconciliation CAS. Recovery decisions based on a WHAM
+// snapshot must use this interface so an older usage response cannot clear a
+// pause after a newer snapshot has already been persisted.
+type AccountSchedulingThresholdSnapshotPauseRepository interface {
+	ReconcileAccountSchedulingThresholdPauseIfSnapshotUnchanged(
+		ctx context.Context,
+		accountID int64,
+		expectedReason string,
+		expectedWhamUpdatedAt string,
+		until *time.Time,
+		reason string,
+	) (bool, error)
+}
+
+// AccountSchedulingThresholdPausePageRepository lists only active accounts
+// that still carry a structured scheduling-threshold pause. It is deliberately
+// separate from AccountRepository so lightweight repositories can retain their
+// existing surface while production startup reconciliation stays paginated.
+type AccountSchedulingThresholdPausePageRepository interface {
+	ListAccountsWithSchedulingThresholdPause(ctx context.Context, afterID int64, limit int) ([]Account, error)
+}
+
+// OpenAICodexWhamSnapshotRepository persists an authoritative WHAM snapshot
+// only while its observation timestamp is not older than the currently stored
+// generation. This closes the out-of-order write half of quota recovery races.
+type OpenAICodexWhamSnapshotRepository interface {
+	UpdateOpenAICodexWhamSnapshotIfNewer(
+		ctx context.Context,
+		accountID int64,
+		expectedWhamUpdatedAt string,
+		updates map[string]any,
+	) (bool, error)
+}
+
 // AccountSchedulingThresholdPauseWriter persists a newly-triggered threshold
 // pause only while the account row is still the exact version that was
 // evaluated. In particular, a concurrent account-threshold override, usage

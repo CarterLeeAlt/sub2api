@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -161,7 +162,16 @@ func TestQueryUsageResetCreditCountPrecedence(t *testing.T) {
 				w.Header().Set("content-type", "application/json")
 				switch r.URL.Path {
 				case "/backend-api/wham/usage":
-					_, _ = w.Write([]byte(tt.usageBody))
+					var usagePayload map[string]any
+					if err := json.Unmarshal([]byte(tt.usageBody), &usagePayload); err != nil {
+						http.Error(w, "invalid test fixture", http.StatusInternalServerError)
+						return
+					}
+					if usagePayload == nil {
+						usagePayload = make(map[string]any)
+					}
+					usagePayload["rate_limit"] = nil
+					_ = json.NewEncoder(w).Encode(usagePayload)
 				case "/backend-api/wham/rate-limit-reset-credits":
 					detailCalls++
 					_, _ = w.Write([]byte(tt.detailBody))
