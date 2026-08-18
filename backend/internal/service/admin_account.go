@@ -516,27 +516,30 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		}
 	}
 
-	// OAuth 账号：创建后异步设置隐私。
-	// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
-	if account.Type == AccountTypeOAuth {
+	// OAuth 账号：创建后异步设置隐私。使用独立后台上下文，避免 HTTP
+	// 请求结束或客户端断开后取消隐私设置请求。
+	if account.Type == AccountTypeOAuth && !input.SkipAutomaticPrivacySetup {
+		privacyAccount := *account
+		privacyAccount.Extra = maps.Clone(account.Extra)
 		switch account.Platform {
 		case PlatformOpenAI:
 			go func() {
 				defer func() {
 					if r := recover(); r != nil {
-						slog.Error("create_account_openai_privacy_panic", "account_id", account.ID, "recover", r)
+						slog.Error("create_account_openai_privacy_panic", "account_id", privacyAccount.ID, "recover", r)
 					}
 				}()
-				s.EnsureOpenAIPrivacy(context.Background(), account)
+				mode := s.EnsureOpenAIPrivacy(context.Background(), &privacyAccount)
+				slog.Info("create_account_openai_privacy_done", "account_id", privacyAccount.ID, "mode", mode)
 			}()
 		case PlatformAntigravity:
 			go func() {
 				defer func() {
 					if r := recover(); r != nil {
-						slog.Error("create_account_antigravity_privacy_panic", "account_id", account.ID, "recover", r)
+						slog.Error("create_account_antigravity_privacy_panic", "account_id", privacyAccount.ID, "recover", r)
 					}
 				}()
-				s.EnsureAntigravityPrivacy(context.Background(), account)
+				s.EnsureAntigravityPrivacy(context.Background(), &privacyAccount)
 			}()
 		}
 	}
@@ -1586,7 +1589,14 @@ func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Acc
 		return ""
 	}
 
-	_ = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{"privacy_mode": mode})
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{"privacy_mode": mode}); err != nil {
+		logger.LegacyPrintf("service.admin", "update_openai_privacy_mode_failed: account_id=%d err=%v", account.ID, err)
+		return mode
+	}
+	if account.Extra == nil {
+		account.Extra = make(map[string]any)
+	}
+	account.Extra["privacy_mode"] = mode
 	return mode
 }
 
