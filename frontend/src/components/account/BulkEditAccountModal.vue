@@ -36,7 +36,7 @@
         v-if="allOpenAIPassthroughCapable"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
               id="bulk-edit-openai-passthrough-label"
@@ -87,7 +87,7 @@
         v-if="allOpenAIOAuthOnly"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
               id="bulk-edit-openai-flatten-namespaces-label"
@@ -135,7 +135,7 @@
 
       <!-- Base URL (API Key only) -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-base-url-label"
             class="input-label mb-0"
@@ -173,7 +173,7 @@
 
       <!-- Model restriction -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-model-restriction-label"
             class="input-label mb-0"
@@ -404,7 +404,7 @@
 
       <!-- Custom error codes -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div>
             <label
               id="bulk-edit-custom-error-codes-label"
@@ -502,7 +502,7 @@
 
       <!-- Intercept warmup requests (Anthropic only) -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
               id="bulk-edit-intercept-warmup-label"
@@ -544,7 +544,7 @@
 
       <!-- Header Override (anthropic/openai apikey only) -->
       <div v-if="allHeaderOverrideCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
               id="bulk-edit-header-override-label"
@@ -607,7 +607,7 @@
 
       <!-- Proxy -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-proxy-label"
             class="input-label mb-0"
@@ -635,7 +635,7 @@
       <!-- Concurrency & Priority -->
       <div class="grid grid-cols-2 gap-4 border-t border-gray-200 pt-4 dark:border-dark-600 lg:grid-cols-4">
         <div>
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <label
               id="bulk-edit-concurrency-label"
               class="input-label mb-0"
@@ -664,7 +664,7 @@
           />
         </div>
         <div>
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <label
               id="bulk-edit-load-factor-label"
               class="input-label mb-0"
@@ -694,7 +694,7 @@
           <p class="input-hint">{{ t('admin.accounts.loadFactorHint') }}</p>
         </div>
         <div>
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <label
               id="bulk-edit-priority-label"
               class="input-label mb-0"
@@ -722,7 +722,7 @@
           />
         </div>
         <div>
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <label
               id="bulk-edit-rate-multiplier-label"
               class="input-label mb-0"
@@ -763,7 +763,7 @@
 
       <!-- Status -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-status-label"
             class="input-label mb-0"
@@ -790,7 +790,7 @@
 
       <!-- OpenAI OAuth WS mode -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-openai-ws-mode-label"
             class="input-label mb-0"
@@ -827,7 +827,7 @@
 
       <!-- OpenAI OAuth Codex CLI only -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-openai-codex-cli-only-label"
             class="input-label mb-0"
@@ -871,7 +871,7 @@
 
       <!-- OpenAI OAuth: Codex app-server -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-openai-codex-app-server-label"
             class="input-label mb-0"
@@ -915,7 +915,7 @@
 
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintMode') }}</label>
           <input
             v-model="enableCodexFingerprintMode"
@@ -933,7 +933,7 @@
 
       <!-- Upstream billing auto probe (any API-key platform) -->
       <div v-if="allBillingProbeCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
               id="bulk-edit-upstream-billing-auto-probe-label"
@@ -972,7 +972,7 @@
 
       <!-- OpenAI API Key WS mode -->
       <div v-if="allOpenAIAPIKey" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-openai-apikey-ws-mode-label"
             class="input-label mb-0"
@@ -1009,7 +1009,7 @@
 
       <!-- OpenAI Compact mode -->
       <div v-if="allOpenAIPassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
               id="bulk-edit-openai-compact-mode-label"
@@ -1045,7 +1045,7 @@
 
       <!-- OpenAI Compact model mapping -->
       <div v-if="allOpenAIPassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
               id="bulk-edit-openai-compact-model-mapping-label"
@@ -1113,7 +1113,7 @@
 
       <!-- RPM Limit (仅全部为 Anthropic OAuth/SetupToken 时显示) -->
       <div v-if="allAnthropicOAuthOrSetupToken" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-rpm-limit-label"
             class="input-label mb-0"
@@ -1136,7 +1136,7 @@
           role="group"
           aria-labelledby="bulk-edit-rpm-limit-label"
         >
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <span class="text-sm text-gray-700 dark:text-gray-300">{{ t('admin.accounts.quotaControl.rpmLimit.hint') }}</span>
             <button
               type="button"
@@ -1239,7 +1239,7 @@
 
       <!-- Groups -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <label
             id="bulk-edit-groups-label"
             class="input-label mb-0"

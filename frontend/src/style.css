@@ -72,6 +72,19 @@
 }
 
 @layer components {
+  /* Account modal setting rows keep descriptive copy away from fixed-width controls. */
+  .account-setting-row {
+    @apply gap-4;
+  }
+
+  .account-setting-row > :first-child {
+    @apply min-w-0 flex-1;
+  }
+
+  .account-setting-row > :last-child {
+    @apply shrink-0;
+  }
+
   /* ============ 按钮样式 ============ */
   .btn {
     @apply inline-flex items-center justify-center gap-2;

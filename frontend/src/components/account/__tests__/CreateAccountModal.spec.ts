@@ -182,6 +182,15 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     )
   })
 
+  it('enables the official Codex client restriction by default for new OpenAI OAuth accounts', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+
+    expect(wrapper.get('[data-testid="create-openai-codex-cli-only-toggle"]').attributes('aria-checked')).toBe(
+      'true'
+    )
+  })
+
   it('enables upstream billing probes by default for new OpenAI API key accounts', async () => {
     await submitApiKeyAccount('openai')
 
