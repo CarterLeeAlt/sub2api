@@ -645,22 +645,10 @@ func (r *opsRepository) BatchInsertSystemLogs(ctx context.Context, inputs []*ser
 	if err != nil {
 		return 0, err
 	}
-	stmt, err := tx.PrepareContext(ctx, pq.CopyIn(
-		"ops_system_logs",
-		"created_at",
-		"host",
-		"level",
-		"component",
-		"message",
-		"request_id",
-		"client_request_id",
-		"user_id",
-		"api_key_id",
-		"account_id",
-		"platform",
-		"model",
-		"extra",
-	))
+	stmt, err := tx.PrepareContext(ctx, `COPY ops_system_logs (
+		created_at, host, level, component, message, request_id, client_request_id,
+		user_id, api_key_id, account_id, platform, model, extra
+	) FROM STDIN`)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, err
