@@ -32,7 +32,9 @@ func shouldSkipOpenAIPrivacyEnsure(extra map[string]any) bool {
 	}
 	mode, _ := raw.(string)
 	mode = strings.TrimSpace(mode)
-	return mode != PrivacyModeFailed && mode != PrivacyModeCFBlocked
+	// Only a confirmed success is terminal. Unknown or legacy values must be
+	// retried so a newly created account cannot silently remain unprotected.
+	return mode == PrivacyModeTrainingOff
 }
 
 // disableOpenAITraining calls ChatGPT settings API to turn off "Improve the model for everyone".

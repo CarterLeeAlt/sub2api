@@ -204,6 +204,19 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 - `frontend/src/components/account/__tests__/CreateAccountModal.spec.ts`
 - `frontend/src/style.css`
 
+### CUSTOM-012：新建 OpenAI OAuth 账号隐私设置收敛（`active`）
+
+新建 OpenAI OAuth 账号只执行一次关闭训练数据共享：换码阶段已经确认 `training_off` 时创建阶段直接复用结果；否则单个创建接口同步尝试并在响应中返回结果，批量创建显式调度后台任务，其他内部创建入口由服务层后台兜底。调用方接管时会关闭服务层自动任务，避免并发重复请求。未知、失败或历史状态会重试；数据库写入失败时不把内存账号伪装成已设置。
+
+主要文件：
+
+- `backend/internal/service/admin_account.go`
+- `backend/internal/service/openai_privacy_service.go`
+- `backend/internal/service/openai_privacy_retry_test.go`
+- `backend/internal/handler/admin/account_handler.go`
+
+验证：隐私重试、单次触发、持久化失败和创建响应回归测试通过竞态检测；`internal/service` 全量单元测试及带 `unit` 标签的全后端包编译通过。
+
 ## 已被上游吸收
 
 ### OpenAI 调度阈值百分比语义（`upstreamed`）
@@ -365,7 +378,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 ## 下次同步检查清单
 
 1. 获取 `upstream/main`，先比较当前共同祖先和上游新增提交，不直接覆盖本地分支。
-2. 检查 `CUSTOM-001` 至 `CUSTOM-008` 的主要文件是否被上游修改。
+2. 检查 `CUSTOM-001` 至 `CUSTOM-012` 的主要文件是否被上游修改。
 3. 如果上游已经提供等价功能，比较行为和测试后将对应条目标记为 `upstreamed`；不要长期维护重复生产代码。
 4. 对测试冲突按覆盖行为判断，不按来源机械选择；保留覆盖更完整且与当前实现一致的测试。
 5. 不恢复 `retired` 的一次性工作流。

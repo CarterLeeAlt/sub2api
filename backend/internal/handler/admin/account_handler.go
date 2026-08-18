@@ -847,31 +847,32 @@ func (h *AccountHandler) Create(c *gin.Context) {
 
 	result, err := executeAdminIdempotent(c, "admin.accounts.create", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
 		account, execErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
-			Name:                  req.Name,
-			Notes:                 req.Notes,
-			Platform:              req.Platform,
-			Type:                  req.Type,
-			Credentials:           req.Credentials,
-			Extra:                 req.Extra,
-			ProxyID:               req.ProxyID,
-			Concurrency:           req.Concurrency,
-			Priority:              req.Priority,
-			RateMultiplier:        req.RateMultiplier,
-			LoadFactor:            req.LoadFactor,
-			GroupIDs:              req.GroupIDs,
-			ExpiresAt:             req.ExpiresAt,
-			AutoPauseOnExpired:    req.AutoPauseOnExpired,
-			ProbeEnabled:          req.ProbeEnabled,
-			SkipMixedChannelCheck: skipCheck,
+			Name:                      req.Name,
+			Notes:                     req.Notes,
+			Platform:                  req.Platform,
+			Type:                      req.Type,
+			Credentials:               req.Credentials,
+			Extra:                     req.Extra,
+			ProxyID:                   req.ProxyID,
+			Concurrency:               req.Concurrency,
+			Priority:                  req.Priority,
+			RateMultiplier:            req.RateMultiplier,
+			LoadFactor:                req.LoadFactor,
+			GroupIDs:                  req.GroupIDs,
+			ExpiresAt:                 req.ExpiresAt,
+			AutoPauseOnExpired:        req.AutoPauseOnExpired,
+			ProbeEnabled:              req.ProbeEnabled,
+			SkipMixedChannelCheck:     skipCheck,
+			SkipAutomaticPrivacySetup: true,
 		})
 		if execErr != nil {
 			return nil, execErr
 		}
 		createdAccount = account
-		// Antigravity OAuth: 新账号直接设置隐私
+		// The general create endpoint owns one synchronous privacy attempt so the
+		// response already contains the resulting status.
 		h.adminService.ForceAntigravityPrivacy(ctx, account)
-		// OpenAI OAuth: 新账号直接设置隐私
-		h.adminService.ForceOpenAIPrivacy(ctx, account)
+		h.adminService.EnsureOpenAIPrivacy(context.Background(), account)
 		return h.buildAccountResponseWithRuntime(ctx, account), nil
 	})
 	if err != nil {
@@ -1901,20 +1902,21 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 			skipCheck := item.ConfirmMixedChannelRisk != nil && *item.ConfirmMixedChannelRisk
 
 			account, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
-				Name:                  item.Name,
-				Notes:                 item.Notes,
-				Platform:              item.Platform,
-				Type:                  item.Type,
-				Credentials:           item.Credentials,
-				Extra:                 item.Extra,
-				ProxyID:               item.ProxyID,
-				Concurrency:           item.Concurrency,
-				Priority:              item.Priority,
-				RateMultiplier:        item.RateMultiplier,
-				GroupIDs:              item.GroupIDs,
-				ExpiresAt:             item.ExpiresAt,
-				AutoPauseOnExpired:    item.AutoPauseOnExpired,
-				SkipMixedChannelCheck: skipCheck,
+				Name:                      item.Name,
+				Notes:                     item.Notes,
+				Platform:                  item.Platform,
+				Type:                      item.Type,
+				Credentials:               item.Credentials,
+				Extra:                     item.Extra,
+				ProxyID:                   item.ProxyID,
+				Concurrency:               item.Concurrency,
+				Priority:                  item.Priority,
+				RateMultiplier:            item.RateMultiplier,
+				GroupIDs:                  item.GroupIDs,
+				ExpiresAt:                 item.ExpiresAt,
+				AutoPauseOnExpired:        item.AutoPauseOnExpired,
+				SkipMixedChannelCheck:     skipCheck,
+				SkipAutomaticPrivacySetup: true,
 			})
 			if err != nil {
 				failed++
@@ -1971,7 +1973,7 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 				}()
 				bgCtx := context.Background()
 				for _, acc := range accounts {
-					adminSvc.ForceOpenAIPrivacy(bgCtx, acc)
+					adminSvc.EnsureOpenAIPrivacy(bgCtx, acc)
 				}
 			}()
 		}

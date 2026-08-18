@@ -378,6 +378,9 @@ type CreateAccountInput struct {
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
 	// This should only be set when the caller has explicitly confirmed the risk.
 	SkipMixedChannelCheck bool
+	// SkipAutomaticPrivacySetup lets callers that explicitly schedule privacy
+	// setup avoid racing the service-level fallback.
+	SkipAutomaticPrivacySetup bool
 }
 
 // ShadowOptions is the input for CreateShadow.
