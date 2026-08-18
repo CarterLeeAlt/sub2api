@@ -217,6 +217,16 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 
 验证：隐私重试、单次触发、持久化失败和创建响应回归测试通过竞态检测；`internal/service` 全量单元测试及带 `unit` 标签的全后端包编译通过。
 
+### CUSTOM-013：Grok Retry-After 整秒边界测试稳定性（`active`）
+
+Grok 429 测试按请求执行前后的时间窗口验证 `Retry-After`，并显式容纳额度快照 RFC3339 整秒序列化造成的最多一秒截断。断言仍要求恢复时间对应 45 秒退避，但不再因测试恰好跨越整秒边界而误报失败；生产限流行为不变。
+
+主要文件：
+
+- `backend/internal/service/account_test_service_grok_test.go`
+
+验证：该 Grok 429 回归用例连续重复运行通过，`internal/service` 全量单元测试通过。
+
 ## 已被上游吸收
 
 ### OpenAI 调度阈值百分比语义（`upstreamed`）
@@ -378,7 +388,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 ## 下次同步检查清单
 
 1. 获取 `upstream/main`，先比较当前共同祖先和上游新增提交，不直接覆盖本地分支。
-2. 检查 `CUSTOM-001` 至 `CUSTOM-012` 的主要文件是否被上游修改。
+2. 检查 `CUSTOM-001` 至 `CUSTOM-013` 的主要文件是否被上游修改。
 3. 如果上游已经提供等价功能，比较行为和测试后将对应条目标记为 `upstreamed`；不要长期维护重复生产代码。
 4. 对测试冲突按覆盖行为判断，不按来源机械选择；保留覆盖更完整且与当前实现一致的测试。
 5. 不恢复 `retired` 的一次性工作流。
