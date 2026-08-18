@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`baeac1f3d`](https://github.com/Wei-Shaw/sub2api/commit/baeac1f3de21d37b129405f092ef86c24b3f203d) |
-| 最近一次上游合并提交 | [`78fe75aa0`](https://github.com/CarterLeeAlt/sub2api/commit/78fe75aa0d5d14f6634ac9bd521ab640ad019248) |
+| 当前已同步上游节点 | [`49504adc9`](https://github.com/Wei-Shaw/sub2api/commit/49504adc98d2b6d539491e865a340e644548979e)（`v0.1.178`） |
+| 最近一次上游合并提交 | 本次同步的 merge commit（哈希见下方提交索引） |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -249,6 +249,26 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 合并后的补充修正包括：Docker Go 构建镜像对齐 `backend/go.mod` 的 `1.26.6`、分组汇总集成测试固定数据库时区，以及账号恢复和账号级 Codex 停调阈值的状态协调。这些后续提交均列入下方提交索引和对应 `CUSTOM` 条目。
 
+### 2026-08-19：同步至上游 `49504adc9`
+
+合并提交：本次同步的 merge commit（哈希见下方提交索引）。
+
+本次同步将上游版本推进到 `v0.1.178`。上游新增了国产供应商一等支持（Kimi、智谱、DeepSeek 的模式/协议、额度与余额探测）、channel monitor 配额模式、国产渠道时段定价、Team linked 错误处理、远程账号选择器以及相应迁移、后端和前端测试。当前合并保留 fork 的 OAuth manifest 模型同步、动态生图主模型、手动 Docker 更新策略、调度阈值与 WHAM 恢复协调、字体和界面定制。
+
+本次有 3 处文本冲突，按功能逐段合并：
+
+- `backend/internal/service/openai_codex_fingerprint.go`：保留上游持久化 `codex_fingerprint_seed`、账号代际保护、prompt cache 处理和显式模式门控；保留本地头部/JSON/raw 载体一致性测试，并统一使用一次生成的 `turnStartedAtUnixMs`。
+- `backend/internal/service/ratelimit_service.go`：保留 fork 的通用调度阈值、WHAM 快照与 CAS 恢复状态，同时接入上游 Team linked 和 CN provider 分支。
+- `frontend/src/style.css`：保留 fork 的 Inter/Noto Sans SC 字体和合成策略，同时接入上游 light/dark `color-scheme` 设置。
+
+语义复核补充修正：
+
+- 创建账号的国产模型同步预览现在携带 `account_mode` 和 `api_protocol`，后端写入临时账号凭据后再构造模型列表请求。上游把国产账号的原生 Anthropic 路径定义为 `/v1/messages`，模型同步仍统一使用对应模式的 OpenAI 兼容 `/v1/models`；因此不会把 `/anthropic/v1/models` 当作已支持能力。新增 handler 回归覆盖智谱 coding + anthropic 配置的最终 URL。
+- 编辑旧 DeepSeek 账号时将历史 `coding` 值归一化为 `payg`，并在保存路径再次强制归一化；新增回归测试。
+- 指纹测试显式声明需要 seed 的 session/full 模式；CN 并发配额探测 fake 使用互斥保护；Grok 模型同步测试更新为匹配上游 switch 实现的源码断言，行为未改变。
+
+验证结论（均使用工作区声明的工具链）：后端 Go 1.26.6 的 `internal/service` 全量 unit 测试通过（242.003s），`internal/repository` 全量 unit 测试通过（8.058s），预览 handler 及协议定向测试通过，带 `unit` 标签的全后端包空测试编译通过；前端 5 个受影响测试文件 83 项通过，`vue-tsc --noEmit`、定向 ESLint 和 Vite 生产构建通过。构建仅保留既有 Browserslist、动态导入和大 chunk 警告。
+
 ### 2026-08-13：同步至上游 `fbfdcef81`
 
 合并提交：[`5306cbe37`](https://github.com/CarterLeeAlt/sub2api/commit/5306cbe374b0ffffe19d66690baf21851d0d8959)。
@@ -340,6 +360,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 25 | [`992b51eb7`](https://github.com/CarterLeeAlt/sub2api/commit/992b51eb7d601bcb2fb490f185b45722d08dfcaa) | 修复 | 为同一 Codex 请求预计算并共享起始时间，消除头、普通 JSON 和 raw 透传路径之间的 1 毫秒竞态。 |
 | 26 | [`e7d474548`](https://github.com/CarterLeeAlt/sub2api/commit/e7d47454859c0ff3b618a2497f8e6246df6c1cf3) | 修复 | 以同步单调 WHAM 快照、额度代际 CAS、耐久调度元数据事件和启动重试收紧 Codex 阈值恢复。 |
 | 27 | [`27e6582ca`](https://github.com/CarterLeeAlt/sub2api/commit/27e6582ca07c99fe6686267f5b56c32663f64ad3) | 修复 | WHAM 代际 CAS 兼容升级前带本地时区偏移的 RFC3339 快照，避免正常额度刷新被历史值阻塞。 |
+| 28 | 本次同步的 merge commit | 上游同步 | 合并上游 `49504adc9`，保留 Codex 指纹/调度阈值/界面定制，接入 CN provider、channel monitor 配额模式、时段定价和 Team linked 错误处理，并补齐国产模型同步预览的协议元数据。 |
 
 ## 下次同步检查清单
 
