@@ -395,7 +395,7 @@ describe('admin UsageView distribution metric toggles', () => {
   })
 })
 
-describe('admin UsageView request ID column visibility', () => {
+describe('admin UsageView column visibility', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.mocked(localStorage.getItem).mockReset().mockReturnValue(null)
@@ -413,7 +413,7 @@ describe('admin UsageView request ID column visibility', () => {
     vi.useRealTimers()
   })
 
-  it('keeps request ID hidden by default and allows enabling it from column settings', async () => {
+  it('shows reasoning effort by default, keeps request ID hidden, and allows enabling it from column settings', async () => {
     const wrapper = mount(UsageView, {
       global: {
         stubs: {
@@ -440,6 +440,9 @@ describe('admin UsageView request ID column visibility', () => {
     await wrapper.vm.$nextTick()
 
     const usageTable = wrapper.findComponent(UsageTableStub)
+    expect(usageTable.props('columns')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'reasoning_effort', label: 'usage.reasoningEffort' })]),
+    )
     expect(usageTable.props('columns')).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ key: 'request_id' })]),
     )
@@ -454,7 +457,49 @@ describe('admin UsageView request ID column visibility', () => {
     )
     expect(localStorage.setItem).toHaveBeenCalledWith(
       'usage-hidden-columns-version',
-      'request-id-hidden-by-default',
+      'reasoning-effort-visible-by-default',
+    )
+  })
+
+  it('migrates saved default columns so reasoning effort becomes visible', async () => {
+    vi.mocked(localStorage.getItem).mockImplementation((key: string) => {
+      if (key === 'usage-hidden-columns') return JSON.stringify(['reasoning_effort', 'request_id', 'user_agent'])
+      if (key === 'usage-hidden-columns-version') return 'request-id-hidden-by-default'
+      return null
+    })
+
+    const wrapper = mount(UsageView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          UsageStatsCards: true,
+          UsageFilters: UsageFiltersStub,
+          UsageTable: UsageTableStub,
+          UsageExportProgress: true,
+          UsageCleanupDialog: true,
+          UserBalanceHistoryModal: true,
+          AuditLogModal: true,
+          Pagination: true,
+          Select: true,
+          DateRangePicker: true,
+          Icon: true,
+          TokenUsageTrend: true,
+          ModelDistributionChart: true,
+          GroupDistributionChart: true,
+          EndpointDistributionChart: true,
+          UserTokenRanking: true,
+        },
+      },
+    })
+    await wrapper.vm.$nextTick()
+
+    const usageTable = wrapper.findComponent(UsageTableStub)
+    expect(usageTable.props('columns')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'reasoning_effort' })]),
+    )
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'usage-hidden-columns-version',
+      'reasoning-effort-visible-by-default',
     )
   })
 })
