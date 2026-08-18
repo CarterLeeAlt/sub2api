@@ -266,7 +266,7 @@
 
         <!-- Pool Mode Section -->
         <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.poolMode') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -330,7 +330,7 @@
 
         <!-- Custom Error Codes Section -->
         <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.customErrorCodes') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -433,7 +433,7 @@
         v-if="account.platform === 'grok' && account.type === 'oauth'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between gap-4">
+        <div class="account-setting-row flex items-center justify-between gap-4">
           <div class="min-w-0">
             <label class="input-label mb-0">{{ t('admin.accounts.grokClientToolCache.title') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -453,7 +453,7 @@
         v-if="account.platform === 'grok' && account.type === 'oauth'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.grokCustomBaseUrl.title') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -491,7 +491,7 @@
 
       <!-- Header Override Section (anthropic/openai apikey + grok apikey/oauth) -->
       <div v-if="headerOverrideCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.headerOverride.title') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1048,7 +1048,7 @@
 
         <!-- Pool Mode Section for Bedrock -->
         <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.poolMode') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1229,7 +1229,7 @@
 
       <!-- Temp Unschedulable Rules -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.tempUnschedulable.title') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1279,7 +1279,7 @@
               :key="getTempUnschedRuleKey(rule)"
               class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
             >
-              <div class="mb-2 flex items-center justify-between">
+              <div class="mb-2 account-setting-row flex items-center justify-between">
                 <span class="text-xs font-medium text-gray-500 dark:text-gray-400">
                   {{ t('admin.accounts.tempUnschedulable.ruleIndex', { index: index + 1 }) }}
                 </span>
@@ -1381,7 +1381,7 @@
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
         data-testid="account-scheduling-threshold-section"
       >
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.accountSchedulingThresholdOverride') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1426,7 +1426,7 @@
         v-if="account?.platform === 'anthropic' || account?.platform === 'antigravity'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{
               t('admin.accounts.interceptWarmupRequests')
@@ -1507,7 +1507,7 @@
           </p>
           <div
             v-if="account?.type === 'apikey'"
-            class="mt-3 flex items-center justify-between gap-3"
+            class="mt-3 account-setting-row flex items-center justify-between gap-3"
           >
             <div class="min-w-0">
               <p class="text-xs font-medium text-gray-700 dark:text-gray-200">
@@ -1537,7 +1537,7 @@
         v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.oauthPassthrough') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1567,7 +1567,7 @@
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.flattenNamespaces') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1658,7 +1658,7 @@
         v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.wsMode') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1679,7 +1679,7 @@
         v-if="account?.platform === 'openai' && account?.type === 'apikey'"
         class="space-y-4 border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between gap-4">
+        <div class="account-setting-row flex items-center justify-between gap-4">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.responsesMode') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1732,7 +1732,7 @@
 
       <div
         v-if="account?.type === 'apikey'"
-        class="flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
+        class="account-setting-row flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div>
           <label class="input-label mb-0">{{ t('admin.accounts.upstreamBilling.autoProbe') }}</label>
@@ -1759,7 +1759,7 @@
         v-if="account?.platform === 'anthropic' && account?.type === 'apikey'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.anthropic.apiKeyPassthrough') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1788,7 +1788,7 @@
         v-if="account?.platform === 'anthropic' && account?.type === 'apikey'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between gap-4">
+        <div class="account-setting-row flex items-center justify-between gap-4">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.anthropic.apiKeyAuthScheme') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1807,7 +1807,7 @@
         v-if="account?.platform === 'anthropic' && account?.type === 'apikey' && webSearchGlobalEnabled"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.anthropic.webSearchEmulation') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1930,7 +1930,7 @@
         v-if="account?.platform === 'openai' && !isSparkShadow && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between gap-4">
+        <div class="account-setting-row flex items-center justify-between gap-4">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.longContextBilling') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1962,7 +1962,7 @@
         v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.codexCLIOnly') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1987,7 +1987,7 @@
         </div>
         <div
           v-if="codexCLIOnlyEnabled"
-          class="mt-4 flex items-center justify-between border-l-2 border-gray-200 pl-4 dark:border-dark-600"
+          class="mt-4 account-setting-row flex items-center justify-between border-l-2 border-gray-200 pl-4 dark:border-dark-600"
         >
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.codexCLIOnlyAppServer') }}</label>
@@ -2018,7 +2018,7 @@
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between gap-4">
+        <div class="account-setting-row flex items-center justify-between gap-4">
           <div class="min-w-0">
             <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintMode') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2036,7 +2036,7 @@
         v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
-        <div class="flex items-center justify-between gap-4">
+        <div class="account-setting-row flex items-center justify-between gap-4">
           <div class="min-w-0">
             <label class="input-label mb-0">{{ t('admin.accounts.openai.planType') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2053,7 +2053,7 @@
         v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.compactMode') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2108,7 +2108,7 @@
       </div>
 
       <div>
-        <div class="flex items-center justify-between">
+        <div class="account-setting-row flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{
               t('admin.accounts.autoPauseOnExpired')
@@ -2147,7 +2147,7 @@
           {{ t('admin.accounts.autoPauseManagedByAccountThresholdHint') }}
         </p>
         <div class="space-y-2">
-          <div class="flex items-center justify-between">
+          <div class="account-setting-row flex items-center justify-between">
             <label class="input-label mb-0">{{ t('admin.accounts.autoPause5hDisabled') }}</label>
             <button
               type="button"
@@ -2185,7 +2185,7 @@
           <p class="input-hint">{{ t('admin.accounts.autoPauseThresholdHint') }}</p>
         </div>
         <div class="space-y-2">
-          <div class="flex items-center justify-between">
+          <div class="account-setting-row flex items-center justify-between">
             <label class="input-label mb-0">{{ t('admin.accounts.autoPause7dDisabled') }}</label>
             <button
               type="button"
@@ -2238,7 +2238,7 @@
 
         <!-- Window Cost Limit -->
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.windowCost.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2298,7 +2298,7 @@
 
         <!-- Session Limit -->
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.sessionLimit.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2355,7 +2355,7 @@
 
         <!-- RPM Limit -->
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.rpmLimit.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2468,7 +2468,7 @@
 
         <!-- TLS Fingerprint -->
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="flex items-center justify-between">
+          <div class="account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.tlsFingerprint.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2503,7 +2503,7 @@
 
         <!-- Session ID Masking -->
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="flex items-center justify-between">
+          <div class="account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.sessionIdMasking.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2530,7 +2530,7 @@
 
         <!-- Cache TTL Override -->
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="flex items-center justify-between">
+          <div class="account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.cacheTTLOverride.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2570,7 +2570,7 @@
 
         <!-- Custom Base URL Relay -->
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="flex items-center justify-between">
+          <div class="account-setting-row flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.customBaseUrl.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">

@@ -192,6 +192,18 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 
 相关提交：[`96bf166d5`](https://github.com/CarterLeeAlt/sub2api/commit/96bf166d5f416b3e7aa586a71c0a0fcecf73ca1e)。
 
+### CUSTOM-011：Codex 官方客户端默认策略与账号设置行间距（`active`）
+
+新建 OpenAI OAuth/Setup Token 账号时，账号编辑表单默认开启“仅允许 Codex 官方客户端”；已有账号编辑仍按已保存的 `extra.codex_cli_only` 值回填，不会静默覆盖历史配置。创建、编辑和批量编辑弹窗的设置行统一使用 `account-setting-row`，让左侧说明文本可收缩换行、右侧开关/选择器保持固定宽度并留出间距，避免长说明贴近控件。
+
+主要文件：
+
+- `frontend/src/components/account/CreateAccountModal.vue`
+- `frontend/src/components/account/EditAccountModal.vue`
+- `frontend/src/components/account/BulkEditAccountModal.vue`
+- `frontend/src/components/account/__tests__/CreateAccountModal.spec.ts`
+- `frontend/src/style.css`
+
 ## 已被上游吸收
 
 ### OpenAI 调度阈值百分比语义（`upstreamed`）
