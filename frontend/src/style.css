@@ -12,6 +12,11 @@
     font-family: 'Inter', 'Noto Sans SC', sans-serif;
     font-weight: 400;
     font-synthesis: none;
+    color-scheme: light;
+  }
+
+  .dark {
+    color-scheme: dark;
   }
 
   body {

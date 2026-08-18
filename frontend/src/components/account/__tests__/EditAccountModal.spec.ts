@@ -279,6 +279,22 @@ function buildGrokAPIKeyAccount() {
   } as any
 }
 
+function buildDeepSeekLegacyCodingAccount() {
+  return {
+    ...buildAccount(),
+    id: 7,
+    name: 'DeepSeek legacy coding account',
+    platform: 'deepseek',
+    credentials: {
+      api_key: 'sk-deepseek',
+      account_mode: 'coding',
+      api_protocol: 'chat_completions',
+      base_url: 'https://api.deepseek.com'
+    },
+    credentials_status: { has_api_key: true }
+  } as any
+}
+
 function buildOpenAISetupTokenAccount() {
   return {
     ...buildAccount(),
@@ -1225,5 +1241,19 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty(
       'antigravity_project_id'
     )
+  })
+
+  it('normalizes legacy DeepSeek coding mode to payg when editing', async () => {
+    const account = buildDeepSeekLegacyCodingAccount()
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.account_mode).toBe('payg')
   })
 })

@@ -84,6 +84,17 @@ const OAuthAuthorizationFlowStub = defineComponent({
   `,
 })
 
+const ModelWhitelistSelectorStub = defineComponent({
+  name: 'ModelWhitelistSelector',
+  props: {
+    syncCredentials: {
+      type: Object,
+      default: undefined
+    }
+  },
+  template: '<pre data-testid="sync-preview-credentials">{{ JSON.stringify(syncCredentials) }}</pre>'
+})
+
 function mountModal() {
   return mount(CreateAccountModal, {
     props: { show: true, proxies: [], groups: [] },
@@ -98,7 +109,7 @@ function mountModal() {
         ProxySelector: true,
         ProxyAdBanner: true,
         GroupSelector: true,
-        ModelWhitelistSelector: true,
+        ModelWhitelistSelector: ModelWhitelistSelectorStub,
         QuotaLimitCard: true,
       },
     },
@@ -271,6 +282,23 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await submitApiKeyAccount('anthropic', false, true)
 
     expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(false)
+  })
+
+  it('passes CN account mode and protocol to the upstream model preview', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Kimi')
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.apiProtocol.anthropic')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Kimi account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-kimi')
+
+    const preview = JSON.parse(wrapper.get('[data-testid="sync-preview-credentials"]').text())
+    expect(preview).toMatchObject({
+      platform: 'kimi',
+      type: 'apikey',
+      account_mode: 'payg',
+      api_protocol: 'anthropic',
+      api_key: 'sk-kimi'
+    })
   })
 
   it('antigravity upstream 创建默认携带上游倍率探测开关', async () => {
