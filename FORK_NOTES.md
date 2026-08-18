@@ -12,7 +12,7 @@
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
 | 当前已同步上游节点 | [`49504adc9`](https://github.com/Wei-Shaw/sub2api/commit/49504adc98d2b6d539491e865a340e644548979e)（`v0.1.178`） |
-| 最近一次上游合并提交 | 本次同步的 merge commit（哈希见下方提交索引） |
+| 最近一次上游合并提交 | [`8acf06e2b`](https://github.com/CarterLeeAlt/sub2api/commit/8acf06e2b834cf7c5c1eafb8fa235e7d6c352745) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -251,7 +251,7 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ### 2026-08-19：同步至上游 `49504adc9`
 
-合并提交：本次同步的 merge commit（哈希见下方提交索引）。
+合并提交：[`8acf06e2b`](https://github.com/CarterLeeAlt/sub2api/commit/8acf06e2b834cf7c5c1eafb8fa235e7d6c352745)。
 
 本次同步将上游版本推进到 `v0.1.178`。上游新增了国产供应商一等支持（Kimi、智谱、DeepSeek 的模式/协议、额度与余额探测）、channel monitor 配额模式、国产渠道时段定价、Team linked 错误处理、远程账号选择器以及相应迁移、后端和前端测试。当前合并保留 fork 的 OAuth manifest 模型同步、动态生图主模型、手动 Docker 更新策略、调度阈值与 WHAM 恢复协调、字体和界面定制。
 
@@ -360,7 +360,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 25 | [`992b51eb7`](https://github.com/CarterLeeAlt/sub2api/commit/992b51eb7d601bcb2fb490f185b45722d08dfcaa) | 修复 | 为同一 Codex 请求预计算并共享起始时间，消除头、普通 JSON 和 raw 透传路径之间的 1 毫秒竞态。 |
 | 26 | [`e7d474548`](https://github.com/CarterLeeAlt/sub2api/commit/e7d47454859c0ff3b618a2497f8e6246df6c1cf3) | 修复 | 以同步单调 WHAM 快照、额度代际 CAS、耐久调度元数据事件和启动重试收紧 Codex 阈值恢复。 |
 | 27 | [`27e6582ca`](https://github.com/CarterLeeAlt/sub2api/commit/27e6582ca07c99fe6686267f5b56c32663f64ad3) | 修复 | WHAM 代际 CAS 兼容升级前带本地时区偏移的 RFC3339 快照，避免正常额度刷新被历史值阻塞。 |
-| 28 | 本次同步的 merge commit | 上游同步 | 合并上游 `49504adc9`，保留 Codex 指纹/调度阈值/界面定制，接入 CN provider、channel monitor 配额模式、时段定价和 Team linked 错误处理，并补齐国产模型同步预览的协议元数据。 |
+| 28 | [`8acf06e2b`](https://github.com/CarterLeeAlt/sub2api/commit/8acf06e2b834cf7c5c1eafb8fa235e7d6c352745) | 上游同步 | 合并上游 `49504adc9`，保留 Codex 指纹/调度阈值/界面定制，接入 CN provider、channel monitor 配额模式、时段定价和 Team linked 错误处理，并补齐国产模型同步预览的协议元数据。 |
 
 ## 下次同步检查清单
 
