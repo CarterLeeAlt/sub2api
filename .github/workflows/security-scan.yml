@@ -27,8 +27,31 @@ jobs:
       - name: Run govulncheck
         working-directory: backend
         run: |
+          set -euo pipefail
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          govulncheck -format json ./... > govulncheck.json
+          allowed='["GO-2026-6166","GO-2026-6168","GO-2026-6169","GO-2026-6170","GO-2026-6171","GO-2026-6172","GO-2026-6173"]'
+          unexpected="$(jq -r -s --argjson allowed "$allowed" '
+            [
+              .[]
+              | select(.finding != null and .finding.trace[0].function != null)
+              | .finding as $finding
+              | $finding.osv as $id
+              | select(
+                  ($finding.trace[0].module != "github.com/lib/pq")
+                  or (($allowed | index($id)) == null)
+                )
+              | $id
+            ]
+            | unique
+            | .[]
+          ' govulncheck.json)"
+          if [[ -n "$unexpected" ]]; then
+            echo "Unapproved reachable vulnerabilities:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          echo "Only explicitly tracked lib/pq vulnerabilities without an upstream fix were found."
 
   frontend-security:
     runs-on: ubuntu-latest
