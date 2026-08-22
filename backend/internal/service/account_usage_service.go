@@ -595,6 +595,8 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 			wasSchedulingThresholdPaused := account.Platform == PlatformOpenAI &&
 				account.TempUnschedulableUntil != nil &&
 				IsAccountSchedulingThresholdReason(account.TempUnschedulableReason)
+			_, _, wasCodexQuota429 := parseOpenAICodexQuota429State(account.Extra)
+			wasCodexQuota429 = wasCodexQuota429 && account.RateLimitResetAt != nil
 			var usage *UsageInfo
 			var usageErr error
 			if supportsAnthropicPassiveUsage(account) {
@@ -610,7 +612,8 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 				return nil
 			}
 			usageByAccount[id] = usage
-			if wasSchedulingThresholdPaused && account.TempUnschedulableUntil == nil {
+			if (wasSchedulingThresholdPaused && account.TempUnschedulableUntil == nil) ||
+				(wasCodexQuota429 && account.RateLimitResetAt == nil) {
 				recoveredAccountIDs = append(recoveredAccountIDs, id)
 			}
 			return nil
@@ -834,6 +837,24 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		default:
 			if err := reconciler.ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(ctx, account, expectedWhamUpdatedAt); err != nil {
 				slog.Warn("openai_scheduling_threshold_recovery_reconcile_failed", "account_id", account.ID, "error", err)
+			}
+		}
+	}
+	if allowThresholdRecovery && account.RateLimitedAt != nil && account.RateLimitResetAt != nil {
+		if _, _, quota429 := parseOpenAICodexQuota429State(account.Extra); quota429 {
+			expectedWhamUpdatedAt := codexWhamSnapshotGeneration(account.Extra)
+			reconciler, ok := s.thresholdReconciler.(OpenAICodexQuotaRateLimitSnapshotReconciler)
+			switch {
+			case s.thresholdReconciler == nil:
+				slog.Warn("openai_codex_quota_429_recovery_skipped", "account_id", account.ID, "reason", "rate-limit reconciler is not configured")
+			case !ok:
+				slog.Warn("openai_codex_quota_429_recovery_skipped", "account_id", account.ID, "reason", "reconciler does not support WHAM generation CAS")
+			case expectedWhamUpdatedAt == "":
+				slog.Warn("openai_codex_quota_429_recovery_skipped", "account_id", account.ID, "reason", "authoritative WHAM snapshot generation is missing")
+			default:
+				if err := reconciler.ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(ctx, account, expectedWhamUpdatedAt); err != nil {
+					slog.Warn("openai_codex_quota_429_recovery_failed", "account_id", account.ID, "error", err)
+				}
 			}
 		}
 	}

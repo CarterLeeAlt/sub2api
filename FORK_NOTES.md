@@ -118,6 +118,9 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - WHAM 用量刷新按响应完成时间生成高精度 `codex_wham_usage_updated_at`，先同步、单调写入数据库和 scheduler outbox，再以“旧停调原因 + 精确 WHAM 代际”双重 CAS 恢复；持久化失败、旧响应晚到、代际变化或协调器缺失时保持原停调状态；
 - 升级后的固定纳秒 UTC WHAM 代际使用精确字符串顺序；升级前由本地时区写入的 RFC3339 历史代际按实际时间点比较，避免 `+08:00` 等历史值把后续正常刷新永久拒绝；
 - `/wham/usage` 的 HTTP 200 将 `rate_limit` 显式 `null` 视为权威无窗口，将字段完全缺失视为不完整响应；不完整响应保留上一份可靠快照且不参与本次恢复；
+- OpenAI OAuth 的上游配额 429 会把响应头可定位的来源窗口（或明确 `usage_limit_reached` 响应体）、观测代际和当时有效阈值与账号级限流时间原子记录；普通并发/秒级 429 会移除该来源标记，避免后续额度刷新误清其他限流；
+- 官方 Web 在 Sub2API 外部重置额度后，只有晚于该 429 的权威 WHAM 快照确认来源窗口低于账号当前有效阈值、且其他窗口也不再触发当前阈值时，才通过“精确 429 代际 + 精确 WHAM 代际 + 来源标记”的 CAS 提前解除账号级 429；恢复不要求上游 `reset_at` 后移，因此兼容同一周期内的官方手动重置；
+- 升级前没有来源标记的历史 429 保持 fail-closed，不根据旧快照百分比猜测来源；这类存量状态需显式清除一次速率限制或由成功账号测试恢复，避免误清并发型及其他非配额 429；
 - 调度列表使用的 `sched:meta:<id>` 精简快照保留账号阈值覆盖值、账号版本以及各平台阈值判断所需的窗口字段，避免账号覆盖为 `100` 时仍被精简快照按全局阈值反复停调；
 - Codex/Anthropic 调度判断依赖的额度字段与数据库更新原子写入耐久 outbox；事件沿用 `account_changed` 并携带 `metadata_only=true`，新 worker 只刷新账号元数据、不重建分组 bucket，旧 worker 则安全执行完整刷新，支持滚动升级；
 - 新增阈值停调写入会重新读取当前账号、重新评估并以 `updated_at` compare-and-swap 原子写入数据库和 scheduler outbox；CAS 成功后才发布 Redis/运行时阻断，账号保存与调度写入竞态不再复活旧阈值状态；
@@ -132,6 +135,7 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - `backend/internal/service/account_scheduling_threshold_eval.go`
 - `backend/internal/service/account_usage_service.go`
 - `backend/internal/service/openai_quota_service.go`
+- `backend/internal/service/openai_codex_rate_limit_state.go`
 - `backend/internal/service/openai_gateway_scheduling.go`
 - `backend/internal/service/ratelimit_service.go`
 - `backend/internal/service/scheduler_events.go`

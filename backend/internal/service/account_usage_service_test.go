@@ -54,6 +54,8 @@ func (r *accountUsageCodexProbeRepo) ClearTempUnschedulable(_ context.Context, _
 type accountUsageThresholdReconciler struct {
 	calls                 int
 	expectedWhamUpdatedAt string
+	quota429Calls         int
+	quota429WhamUpdatedAt string
 }
 
 func (r *accountUsageThresholdReconciler) ReconcileAccountSchedulingThresholdPolicy(_ context.Context, account *Account) error {
@@ -65,6 +67,15 @@ func (r *accountUsageThresholdReconciler) ReconcileAccountSchedulingThresholdPol
 	r.expectedWhamUpdatedAt = expectedWhamUpdatedAt
 	account.TempUnschedulableUntil = nil
 	account.TempUnschedulableReason = ""
+	return nil
+}
+
+func (r *accountUsageThresholdReconciler) ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(_ context.Context, account *Account, expectedWhamUpdatedAt string) error {
+	r.quota429Calls++
+	r.quota429WhamUpdatedAt = expectedWhamUpdatedAt
+	account.RateLimitedAt = nil
+	account.RateLimitResetAt = nil
+	delete(account.Extra, OpenAICodexRateLimitStateExtraKey)
 	return nil
 }
 
@@ -421,6 +432,54 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 	}
 	if account.TempUnschedulableUntil != nil || account.TempUnschedulableReason != "" {
 		t.Fatalf("expected in-memory scheduling pause to be cleared, got until=%v reason=%q", account.TempUnschedulableUntil, account.TempUnschedulableReason)
+	}
+}
+
+func TestAccountUsageService_GetOpenAIUsageReconcilesRecoverableQuota429(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	observedAt := now.Add(-time.Minute)
+	resetAt := now.Add(4 * time.Hour)
+	whamGeneration := formatCodexWhamSnapshotGeneration(now)
+	repo := &accountUsageCodexProbeRepo{}
+	reconciler := &accountUsageThresholdReconciler{}
+	svc := &AccountUsageService{accountRepo: repo, thresholdReconciler: reconciler}
+	account := &Account{
+		ID:               3213,
+		Platform:         PlatformOpenAI,
+		Type:             AccountTypeOAuth,
+		RateLimitedAt:    &observedAt,
+		RateLimitResetAt: &resetAt,
+		Extra: map[string]any{
+			OpenAICodexRateLimitStateExtraKey: OpenAICodexRateLimitState{
+				Version:          openAICodexRateLimitStateVersion,
+				Source:           openAICodexQuota429Source,
+				Window:           "5h",
+				ObservedAt:       observedAt.Format(time.RFC3339Nano),
+				ResetAt:          resetAt.Format(time.RFC3339Nano),
+				UsedPercent:      100,
+				ThresholdPercent: 95,
+			},
+			codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
+			codexWham5hWindowPresentKey: true,
+			codexWham7dWindowPresentKey: false,
+			codexWhamUsageUpdatedAtKey:  whamGeneration,
+			"codex_usage_updated_at":    now.Format(time.RFC3339),
+			"codex_5h_used_percent":     0.0,
+			"codex_5h_reset_at":         resetAt.Format(time.RFC3339Nano),
+		},
+	}
+
+	_, err := svc.getOpenAIUsage(context.Background(), account, false)
+	if err != nil {
+		t.Fatalf("getOpenAIUsage() error = %v", err)
+	}
+	if reconciler.quota429Calls != 1 || reconciler.quota429WhamUpdatedAt != whamGeneration {
+		t.Fatalf("quota 429 reconciliation = (%d, %q), want (1, %q)", reconciler.quota429Calls, reconciler.quota429WhamUpdatedAt, whamGeneration)
+	}
+	if account.RateLimitResetAt != nil {
+		t.Fatalf("expected recovered quota 429 to clear in-memory state, got %v", account.RateLimitResetAt)
 	}
 }
 

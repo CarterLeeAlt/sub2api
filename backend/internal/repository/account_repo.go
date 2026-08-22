@@ -2217,16 +2217,53 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 
 func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetRateLimitedAt(now).
-		SetRateLimitResetAt(resetAt).
-		Save(ctx)
+	_, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET rate_limited_at = $1,
+				rate_limit_reset_at = $2,
+				extra = COALESCE(extra, '{}'::jsonb) - $3,
+				updated_at = NOW()
+			WHERE id = $4 AND deleted_at IS NULL
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $5, updated.id, NULL, NULL FROM updated
+	`, now, resetAt, service.OpenAICodexRateLimitStateExtraKey, id, service.SchedulerOutboxEventAccountChanged)
 	if err != nil {
 		return err
 	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue rate limit failed: account=%d err=%v", id, err)
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return nil
+}
+
+// SetOpenAICodexQuotaRateLimited stores the rate-limit timestamps and their
+// quota-window provenance in one statement. A generic later 429 removes this
+// marker through SetRateLimited, so WHAM recovery cannot clear another source.
+func (r *accountRepository) SetOpenAICodexQuotaRateLimited(ctx context.Context, id int64, resetAt time.Time, stateJSON string) error {
+	if !json.Valid([]byte(stateJSON)) {
+		return errors.New("invalid OpenAI Codex rate-limit state")
+	}
+	now := time.Now()
+	_, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET rate_limited_at = $1,
+				rate_limit_reset_at = $2,
+				extra = jsonb_set(COALESCE(extra, '{}'::jsonb), ARRAY[$3]::text[], $4::jsonb, TRUE),
+				updated_at = NOW()
+			WHERE id = $5
+				AND deleted_at IS NULL
+				AND platform = $6
+				AND type = $7
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $8, updated.id, NULL, NULL FROM updated
+	`, now, resetAt, service.OpenAICodexRateLimitStateExtraKey, stateJSON, id,
+		service.PlatformOpenAI, service.AccountTypeOAuth, service.SchedulerOutboxEventAccountChanged)
+	if err != nil {
+		return err
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
 	return nil
@@ -2585,20 +2622,73 @@ func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64
 }
 
 func (r *accountRepository) ClearRateLimit(ctx context.Context, id int64) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		ClearRateLimitedAt().
-		ClearRateLimitResetAt().
-		ClearOverloadUntil().
-		Save(ctx)
+	_, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET rate_limited_at = NULL,
+				rate_limit_reset_at = NULL,
+				overload_until = NULL,
+				extra = COALESCE(extra, '{}'::jsonb) - $1,
+				updated_at = NOW()
+			WHERE id = $2 AND deleted_at IS NULL
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $3, updated.id, NULL, NULL FROM updated
+	`, service.OpenAICodexRateLimitStateExtraKey, id, service.SchedulerOutboxEventAccountChanged)
 	if err != nil {
 		return err
 	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue clear rate limit failed: account=%d err=%v", id, err)
-	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
 	return nil
+}
+
+// ClearOpenAICodexQuotaRateLimitIfSnapshotUnchanged clears only the exact
+// quota-derived 429 generation observed by a newer authoritative WHAM snapshot.
+func (r *accountRepository) ClearOpenAICodexQuotaRateLimitIfSnapshotUnchanged(
+	ctx context.Context,
+	id int64,
+	observedLimitedAt time.Time,
+	observedResetAt time.Time,
+	expectedStateJSON string,
+	expectedWhamUpdatedAt string,
+) (bool, error) {
+	if !json.Valid([]byte(expectedStateJSON)) || strings.TrimSpace(expectedWhamUpdatedAt) == "" {
+		return false, nil
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET rate_limited_at = NULL,
+				rate_limit_reset_at = NULL,
+				extra = COALESCE(extra, '{}'::jsonb) - $1,
+				updated_at = NOW()
+			WHERE id = $2
+				AND deleted_at IS NULL
+				AND platform = $3
+				AND type = $4
+				AND rate_limited_at = $5
+				AND rate_limit_reset_at = $6
+				AND extra->$1 = $7::jsonb
+				AND extra->>'codex_wham_usage_updated_at' = $8
+				AND (overload_until IS NULL OR overload_until <= NOW())
+				AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until <= NOW())
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $9, updated.id, NULL, NULL FROM updated
+	`, service.OpenAICodexRateLimitStateExtraKey, id, service.PlatformOpenAI, service.AccountTypeOAuth,
+		observedLimitedAt.UTC(), observedResetAt.UTC(), expectedStateJSON, expectedWhamUpdatedAt,
+		service.SchedulerOutboxEventAccountChanged)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		return false, err
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
 }
 
 func (r *accountRepository) ClearAntigravityQuotaScopes(ctx context.Context, id int64) error {
