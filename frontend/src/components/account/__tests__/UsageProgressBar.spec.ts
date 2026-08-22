@@ -144,10 +144,10 @@ describe('UsageProgressBar', () => {
       }
     })
 
-    expect(wrapper.text()).toContain('14% rem. / 5d 12h')
+    expect(wrapper.text()).toContain('14% left / 5d 12h')
     expect(wrapper.get('.h-1\\.5 > div').attributes('style')).toContain('width: 14%')
     expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-amber-500')
-    expect(wrapper.get('.text-amber-600').text()).toBe('14% rem.')
+    expect(wrapper.get('.text-amber-600').text()).toBe('14% left')
   })
 
   it('Codex 剩余模式在剩余量充足时显示对应的绿色条宽', () => {
@@ -160,10 +160,10 @@ describe('UsageProgressBar', () => {
       }
     })
 
-    expect(wrapper.text()).toContain('60% rem.')
+    expect(wrapper.text()).toContain('60% left')
     expect(wrapper.get('.h-1\\.5 > div').attributes('style')).toContain('width: 60%')
     expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-green-500')
-    expect(wrapper.get('.text-gray-600').text()).toBe('60% rem.')
+    expect(wrapper.get('.text-gray-600').text()).toBe('60% left')
   })
 
   it('Codex 剩余模式沿用原有反向阈值，20% 仍为黄色', () => {
@@ -176,9 +176,9 @@ describe('UsageProgressBar', () => {
       }
     })
 
-    expect(wrapper.text()).toContain('20% rem.')
+    expect(wrapper.text()).toContain('20% left')
     expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-amber-500')
-    expect(wrapper.get('.text-amber-600').text()).toBe('20% rem.')
+    expect(wrapper.get('.text-amber-600').text()).toBe('20% left')
   })
 
   it('默认利用率模式仍把超限显示为满格红色', () => {
