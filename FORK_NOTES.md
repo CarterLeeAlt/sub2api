@@ -11,7 +11,7 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`49504adc9`](https://github.com/Wei-Shaw/sub2api/commit/49504adc98d2b6d539491e865a340e644548979e)（`v0.1.178`） |
+| 当前已同步上游节点 | [`67380eafd`](https://github.com/Wei-Shaw/sub2api/commit/67380eafd5ae2eaa8db910ae738199c3dac62e37)（最近发布标签为 `v0.1.179`，该节点位于标签之后） |
 | 最近一次上游合并提交 | [`8acf06e2b`](https://github.com/CarterLeeAlt/sub2api/commit/8acf06e2b834cf7c5c1eafb8fa235e7d6c352745) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
@@ -263,6 +263,16 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-08-22：同步至上游 `67380eafd`
+
+- 从共同祖先 `49504adc9` 合入上游主线 164 个提交；上游最近发布标签为 `v0.1.179`，目标节点还包含该标签之后的修复。
+- `ratelimit_service.go`：同时保留本地调度阈值恢复的启动协调/重试状态和上游 OpenAI API Key 健康缓存。
+- `scheduler_snapshot_bulk_event_test.go`：同时保留本地 metadata-only 账户刷新覆盖和上游国产平台批量事件重建范围覆盖。
+- `CreateAccountModal.vue` 及测试：国产平台自适应协议的预览 URL 使用 chat-completions 专用地址，同时保留 `account_mode`、`api_protocol`、Grok 占位符、分组选择器和模型同步凭据预览。
+- `openai_images_test.go`：上游 429 同账号重试窗口测试改用进程内 Codex manifest 服务，隔离本地动态生图主模型选择的预取网络耗时，不修改生产重试期限。
+- 接入上游迁移 `226_add_usage_log_effective_model_indexes_notx.sql`、`227_composite_routes_add_cn_providers.sql` 和 `228_channel_pricing_multipliers.sql`；部署时继续依赖现有迁移器顺序执行。
+- 合并提交：待本次 merge commit 生成后补录。本地验证通过 Go 全量 unit/integration、前端 lint/typecheck、17 个关键及冲突专项 Vitest 文件（290 项）、Vite 生产构建和带 `embed` 的后端编译；Windows Go 1.26.6 的 `go vet` 在 `go/types` facts 导入阶段发生工具链访问冲突，未产生代码诊断，最终静态检查以 GitHub Actions 的 Linux `golangci-lint` 为准。
 
 ### 2026-08-16：同步至上游 `baeac1f3d`
 
