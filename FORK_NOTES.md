@@ -123,6 +123,7 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - 新增阈值停调写入会重新读取当前账号、重新评估并以 `updated_at` compare-and-swap 原子写入数据库和 scheduler outbox；CAS 成功后才发布 Redis/运行时阻断，账号保存与调度写入竞态不再复活旧阈值状态；
 - 账户编辑界面启用通用覆盖时禁用旧版 Codex 配额自动暂停控件，明确显示优先级；覆盖启用控件与同页其他布尔项统一使用开关样式。
 - 同一账号的后台用量/状态刷新不再重置已打开的编辑表单；账号保存会使保存前发出的批量用量请求失效，迟到的 `account_updates` 不再回滚刚保存的阈值开关或账号对象。
+- Codex/OpenAI 账户列表的剩余额度统一显示为 `x% left`，不再使用旧缩写；百分比、颜色和重置时间语义不变。
 
 主要文件：
 
@@ -139,12 +140,14 @@ Codex/OpenAI 账户的通用平台阈值 `credentials.account_scheduling_thresho
 - `backend/cmd/server/wire_gen.go`
 - `frontend/src/components/account/EditAccountModal.vue`
 - `frontend/src/components/account/__tests__/EditAccountModal.spec.ts`
+- `frontend/src/components/account/UsageProgressBar.vue`
+- `frontend/src/components/account/__tests__/UsageProgressBar.spec.ts`
 - `frontend/src/views/admin/AccountsView.vue`
 - `frontend/src/views/admin/__tests__/AccountsView.usageWindowsHint.spec.ts`
 
-相关提交：[`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557)、[`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6)、[`c9c28fc8a`](https://github.com/CarterLeeAlt/sub2api/commit/c9c28fc8a1aef9705a162d39181ec17c2e8aa91b)、[`36ad5b5ee`](https://github.com/CarterLeeAlt/sub2api/commit/36ad5b5eec735c90dee5bfa52ac8870b835091ff)、[`7b233dec2`](https://github.com/CarterLeeAlt/sub2api/commit/7b233dec29d4b8902ea6de4ebb75be0864bab94e)、[`e7d474548`](https://github.com/CarterLeeAlt/sub2api/commit/e7d47454859c0ff3b618a2497f8e6246df6c1cf3)、[`27e6582ca`](https://github.com/CarterLeeAlt/sub2api/commit/27e6582ca07c99fe6686267f5b56c32663f64ad3)。
+相关提交：[`23eab2e32`](https://github.com/CarterLeeAlt/sub2api/commit/23eab2e32c5a8db90feb385a0f9ce30abc426557)、[`be0367c37`](https://github.com/CarterLeeAlt/sub2api/commit/be0367c37c9ab566eb5ee5517d1508b5dc9e71b6)、[`c9c28fc8a`](https://github.com/CarterLeeAlt/sub2api/commit/c9c28fc8a1aef9705a162d39181ec17c2e8aa91b)、[`36ad5b5ee`](https://github.com/CarterLeeAlt/sub2api/commit/36ad5b5eec735c90dee5bfa52ac8870b835091ff)、[`7b233dec2`](https://github.com/CarterLeeAlt/sub2api/commit/7b233dec29d4b8902ea6de4ebb75be0864bab94e)、[`e7d474548`](https://github.com/CarterLeeAlt/sub2api/commit/e7d47454859c0ff3b618a2497f8e6246df6c1cf3)、[`27e6582ca`](https://github.com/CarterLeeAlt/sub2api/commit/27e6582ca07c99fe6686267f5b56c32663f64ad3)、[`e8dbe8f0e`](https://github.com/CarterLeeAlt/sub2api/commit/e8dbe8f0e542ed5d894a20c950eafb9a94d9eff5)。
 
-验证：后端完整单元测试 `go test -tags unit ./... -count=1`、静态检查 `go vet ./...` 和服务端离线构建均通过。
+验证：既有后端行为曾通过完整单元测试 `go test -tags unit ./... -count=1`、静态检查 `go vet ./...` 和服务端离线构建；本次 `x% left` 文案调整按任务要求未运行本地测试，仅完成旧字样全仓检索和 `git diff --check`。
 
 ### CUSTOM-007：Codex 指纹请求起始时间一致性（`active`）
 
@@ -395,6 +398,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 27 | [`27e6582ca`](https://github.com/CarterLeeAlt/sub2api/commit/27e6582ca07c99fe6686267f5b56c32663f64ad3) | 修复 | WHAM 代际 CAS 兼容升级前带本地时区偏移的 RFC3339 快照，避免正常额度刷新被历史值阻塞。 |
 | 28 | [`8acf06e2b`](https://github.com/CarterLeeAlt/sub2api/commit/8acf06e2b834cf7c5c1eafb8fa235e7d6c352745) | 上游同步 | 合并上游 `49504adc9`，保留 Codex 指纹/调度阈值/界面定制，接入 CN provider、channel monitor 配额模式、时段定价和 Team linked 错误处理，并补齐国产模型同步预览的协议元数据。 |
 | 29 | [`962d56ec7`](https://github.com/CarterLeeAlt/sub2api/commit/962d56ec7f816d04ef39cae1a10fdb605b3252f3) | 上游同步 | 合并上游 `67380eafd`（最近发布标签 `v0.1.179` 之后），保留 OAuth 动态模型/生图、Codex 指纹与调度阈值恢复，组合国产平台自适应协议和账户弹窗覆盖，并隔离生图 429 测试的 manifest 预取。 |
+| 30 | [`e8dbe8f0e`](https://github.com/CarterLeeAlt/sub2api/commit/e8dbe8f0e542ed5d894a20c950eafb9a94d9eff5) | 界面 | 将 Codex/OpenAI 剩余额度文案统一为 `x% left`，并同步组件断言。 |
 
 ## 下次同步检查清单
 
