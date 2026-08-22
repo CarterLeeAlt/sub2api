@@ -44,7 +44,7 @@
 
       <!-- Codex-style remaining quota display -->
       <span v-if="displayRemaining" class="shrink-0 whitespace-nowrap text-[10px] font-medium">
-        <span :class="textClass">{{ displayPercent }} rem.</span>
+        <span :class="textClass">{{ displayPercent }} left</span>
         <span v-if="shouldShowResetTime" class="text-gray-400"> / {{ formatResetTime }}</span>
       </span>
 
