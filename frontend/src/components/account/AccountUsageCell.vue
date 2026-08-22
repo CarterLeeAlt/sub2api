@@ -1356,13 +1356,18 @@ const syncManagedUsageState = () => {
 }
 
 const refreshAccountStateAfterUsage = async () => {
-  // Only rows that were visibly paused need a follow-up account fetch. The
-  // backend may clear a threshold pause while returning a fresh usage snapshot;
-  // emit the authoritative row so the parent can update the status badge.
-  if (!props.account.temp_unschedulable_until) return
+  const quota429State = props.account.extra?.openai_codex_rate_limit_state as
+    | Record<string, unknown>
+    | undefined
+  const hasRecoverableQuota429 = Boolean(
+    props.account.rate_limit_reset_at && quota429State?.source === 'openai_codex_quota_429'
+  )
+  // Only state sources that this usage refresh can recover need a canonical
+  // row follow-up. Generic 429s keep their existing behavior.
+  if (!props.account.temp_unschedulable_until && !hasRecoverableQuota429) return
   try {
     const updated = await adminAPI.accounts.getById(props.account.id)
-    if (!updated.temp_unschedulable_until) {
+    if (!updated.temp_unschedulable_until && !updated.rate_limit_reset_at) {
       emit('account-updated', updated)
     }
   } catch (e) {

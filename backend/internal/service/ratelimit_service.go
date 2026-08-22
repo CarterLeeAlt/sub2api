@@ -64,6 +64,16 @@ type AccountSchedulingThresholdSnapshotPolicyReconciler interface {
 	) error
 }
 
+// OpenAICodexQuotaRateLimitSnapshotReconciler coordinates recovery of a
+// quota-derived OpenAI 429 against one exact authoritative WHAM generation.
+type OpenAICodexQuotaRateLimitSnapshotReconciler interface {
+	ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(
+		ctx context.Context,
+		account *Account,
+		expectedWhamUpdatedAt string,
+	) error
+}
+
 // SuccessfulTestRecoveryResult 表示测试成功后恢复了哪些运行时状态。
 type SuccessfulTestRecoveryResult struct {
 	ClearedError     bool
@@ -561,6 +571,116 @@ func (s *RateLimitService) reconcileAccountSchedulingThresholdPolicy(
 	if nextUntil != nil {
 		s.notifyAccountSchedulingBlocked(account, *nextUntil, AccountSchedulingThresholdReasonSource)
 	}
+	return nil
+}
+
+func (s *RateLimitService) openAICodex429RecoveryThreshold(ctx context.Context, account *Account) int {
+	thresholds := map[string]int(nil)
+	if s != nil && s.settingService != nil {
+		thresholds = s.settingService.GetAccountSchedulingThresholds(ctx)
+	}
+	return openAICodex429RecoveryThreshold(account, thresholds)
+}
+
+func openAICodex429RecoveryThreshold(account *Account, thresholds map[string]int) int {
+	if threshold, ok := resolveEffectiveAccountSchedulingThreshold(account, thresholds, PlatformOpenAI); ok {
+		return threshold
+	}
+	return 100
+}
+
+func (s *RateLimitService) openAICodexQuota429Recovered(ctx context.Context, account *Account, state *OpenAICodexRateLimitState, now time.Time) bool {
+	if account == nil || state == nil || !openAICodexSnapshotIdentityTrusted(account) {
+		return false
+	}
+	thresholds := map[string]int(nil)
+	if s.settingService != nil {
+		thresholds = s.settingService.GetAccountSchedulingThresholds(ctx)
+	}
+	recoveryThreshold := openAICodex429RecoveryThreshold(account, thresholds)
+	windows := []string{state.Window}
+	if state.Window == "all" {
+		windows = []string{"5h", "7d"}
+	}
+	for _, window := range windows {
+		present, known := codexWhamWindowPresence(account.Extra, window)
+		if !known {
+			return false
+		}
+		if !present {
+			continue
+		}
+		usedPercent, ok := resolveAccountExtraNumber(account.Extra, "codex_"+window+"_used_percent")
+		if !ok || usedPercent < 0 || usedPercent >= float64(recoveryThreshold) {
+			return false
+		}
+	}
+
+	decision := EvaluateAccountSchedulingThreshold(account, thresholds, now)
+	return !validAccountSchedulingThresholdPause(decision, now)
+}
+
+// ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged clears an account-level
+// quota 429 only after a newer authoritative WHAM snapshot proves that its
+// recorded window is below the current effective threshold and no current
+// scheduling threshold requires a pause.
+func (s *RateLimitService) ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(
+	ctx context.Context,
+	account *Account,
+	expectedWhamUpdatedAt string,
+) error {
+	if s == nil || s.accountRepo == nil || account == nil || account.ID <= 0 || !account.IsOpenAIOAuth() || account.IsShadow() {
+		return nil
+	}
+	canonical, err := s.accountRepo.GetByID(ctx, account.ID)
+	if err != nil {
+		return fmt.Errorf("reload OpenAI account before quota 429 recovery: %w", err)
+	}
+	if canonical == nil || !canonical.IsOpenAIOAuth() || canonical.IsShadow() || canonical.RateLimitedAt == nil || canonical.RateLimitResetAt == nil {
+		return nil
+	}
+	state, stateJSON, ok := parseOpenAICodexQuota429State(canonical.Extra)
+	if !ok {
+		return nil
+	}
+	expectedWhamUpdatedAt = strings.TrimSpace(expectedWhamUpdatedAt)
+	if expectedWhamUpdatedAt == "" || codexWhamSnapshotGeneration(canonical.Extra) != expectedWhamUpdatedAt {
+		return nil
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, state.ObservedAt)
+	if err != nil {
+		return nil
+	}
+	whamObservedAt, err := time.Parse(time.RFC3339Nano, expectedWhamUpdatedAt)
+	if err != nil || !whamObservedAt.After(observedAt) {
+		return nil
+	}
+	now := time.Now().UTC()
+	if !s.openAICodexQuota429Recovered(ctx, canonical, state, now) {
+		return nil
+	}
+
+	repo, ok := s.accountRepo.(OpenAICodexQuotaRateLimitRecoveryRepository)
+	if !ok {
+		return fmt.Errorf("account repository does not support OpenAI Codex quota 429 recovery")
+	}
+	cleared, err := repo.ClearOpenAICodexQuotaRateLimitIfSnapshotUnchanged(
+		ctx,
+		canonical.ID,
+		*canonical.RateLimitedAt,
+		*canonical.RateLimitResetAt,
+		stateJSON,
+		expectedWhamUpdatedAt,
+	)
+	if err != nil || !cleared {
+		return err
+	}
+
+	account.RateLimitedAt = nil
+	account.RateLimitResetAt = nil
+	delete(account.Extra, OpenAICodexRateLimitStateExtraKey)
+	s.notifyAccountSchedulingBlockCleared(account.ID)
+	slog.Info("openai_codex_quota_429_recovered", "account_id", account.ID, "window", state.Window, "wham_generation", expectedWhamUpdatedAt)
 	return nil
 }
 
@@ -1453,13 +1573,32 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	if account.Platform == PlatformOpenAI {
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
 		s.persistOpenAICodexSnapshot(ctx, account, headers)
-		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
-			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
-			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+		threshold := s.openAICodex429RecoveryThreshold(ctx, account)
+		if decision := calculateOpenAI429ResetDecision(headers, threshold); decision != nil {
+			s.notifyAccountSchedulingBlocked(account, decision.resetAt, "429")
+			var err error
+			quotaWindowConfirmed := decision.window != "" && (decision.usedPercent >= 100 || isOpenAIUsageLimitReached(responseBody))
+			if quotaWindowConfirmed && account.IsOpenAIOAuth() {
+				if writer, ok := s.accountRepo.(OpenAICodexQuotaRateLimitWriter); ok {
+					stateJSON := buildOpenAICodexQuota429State(
+						decision.window,
+						decision.observedAt,
+						decision.resetAt,
+						decision.usedPercent,
+						threshold,
+					)
+					err = writer.SetOpenAICodexQuotaRateLimited(ctx, account.ID, decision.resetAt, stateJSON)
+				} else {
+					err = s.accountRepo.SetRateLimited(ctx, account.ID, decision.resetAt)
+				}
+			} else {
+				err = s.accountRepo.SetRateLimited(ctx, account.ID, decision.resetAt)
+			}
+			if err != nil {
 				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 				return
 			}
-			slog.Info("openai_account_rate_limited", "account_id", account.ID, "reset_at", *resetAt)
+			slog.Info("openai_account_rate_limited", "account_id", account.ID, "reset_at", decision.resetAt, "window", decision.window)
 			return
 		}
 	}
@@ -1497,7 +1636,19 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			if resetAt := parseOpenAIRateLimitResetTime(responseBody); resetAt != nil {
 				resetTime := time.Unix(*resetAt, 0)
 				s.notifyAccountSchedulingBlocked(account, resetTime, "429")
-				if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime); err != nil {
+				var err error
+				if account.IsOpenAIOAuth() && isOpenAIUsageLimitReached(responseBody) {
+					if writer, ok := s.accountRepo.(OpenAICodexQuotaRateLimitWriter); ok {
+						threshold := s.openAICodex429RecoveryThreshold(ctx, account)
+						stateJSON := buildOpenAICodexQuota429State("all", time.Now(), resetTime, 0, threshold)
+						err = writer.SetOpenAICodexQuotaRateLimited(ctx, account.ID, resetTime, stateJSON)
+					} else {
+						err = s.accountRepo.SetRateLimited(ctx, account.ID, resetTime)
+					}
+				} else {
+					err = s.accountRepo.SetRateLimited(ctx, account.ID, resetTime)
+				}
+				if err != nil {
 					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 					return
 				}
@@ -1608,7 +1759,14 @@ func clampRateLimit429CooldownSeconds(seconds int) int {
 
 // calculateOpenAI429ResetTime 从 OpenAI 429 响应头计算正确的重置时间
 // 返回 nil 表示无法从响应头中确定重置时间
-func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
+type openAI429ResetDecision struct {
+	resetAt     time.Time
+	observedAt  time.Time
+	window      string
+	usedPercent float64
+}
+
+func calculateOpenAI429ResetDecision(headers http.Header, recoveryThreshold int) *openAI429ResetDecision {
 	snapshot := ParseCodexRateLimitHeaders(headers)
 	if snapshot == nil {
 		return nil
@@ -1620,6 +1778,9 @@ func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 	}
 
 	now := time.Now()
+	if recoveryThreshold < 1 || recoveryThreshold > 100 {
+		recoveryThreshold = 100
+	}
 
 	// 判断哪个限制被触发（used_percent >= 100）
 	is7dExhausted := normalized.Used7dPercent != nil && *normalized.Used7dPercent >= 100
@@ -1629,12 +1790,12 @@ func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 	if is7dExhausted && normalized.Reset7dSeconds != nil {
 		resetAt := now.Add(time.Duration(*normalized.Reset7dSeconds) * time.Second)
 		slog.Info("openai_429_7d_limit_exhausted", "reset_after_seconds", *normalized.Reset7dSeconds, "reset_at", resetAt)
-		return &resetAt
+		return &openAI429ResetDecision{resetAt: resetAt, observedAt: now, window: "7d", usedPercent: *normalized.Used7dPercent}
 	}
 	if is5hExhausted && normalized.Reset5hSeconds != nil {
 		resetAt := now.Add(time.Duration(*normalized.Reset5hSeconds) * time.Second)
 		slog.Info("openai_429_5h_limit_exhausted", "reset_after_seconds", *normalized.Reset5hSeconds, "reset_at", resetAt)
-		return &resetAt
+		return &openAI429ResetDecision{resetAt: resetAt, observedAt: now, window: "5h", usedPercent: *normalized.Used5hPercent}
 	}
 
 	// 都未达到100%但收到429，使用较长的重置时间
@@ -1646,12 +1807,45 @@ func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 		maxResetSecs = *normalized.Reset5hSeconds
 	}
 	if maxResetSecs > 0 {
+		var quotaWindow string
+		var quotaWindowResetSecs int
+		var quotaWindowUsedPercent float64
+		if normalized.Reset7dSeconds != nil && normalized.Used7dPercent != nil && *normalized.Used7dPercent >= float64(recoveryThreshold) {
+			quotaWindow = "7d"
+			quotaWindowResetSecs = *normalized.Reset7dSeconds
+			quotaWindowUsedPercent = *normalized.Used7dPercent
+		}
+		if normalized.Reset5hSeconds != nil && normalized.Used5hPercent != nil &&
+			*normalized.Used5hPercent >= float64(recoveryThreshold) && *normalized.Reset5hSeconds > quotaWindowResetSecs {
+			quotaWindow = "5h"
+			quotaWindowUsedPercent = *normalized.Used5hPercent
+		}
 		resetAt := now.Add(time.Duration(maxResetSecs) * time.Second)
 		slog.Info("openai_429_using_max_reset", "max_reset_seconds", maxResetSecs, "reset_at", resetAt)
-		return &resetAt
+		return &openAI429ResetDecision{resetAt: resetAt, observedAt: now, window: quotaWindow, usedPercent: quotaWindowUsedPercent}
 	}
 
 	return nil
+}
+
+func isOpenAIUsageLimitReached(body []byte) bool {
+	var parsed struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(parsed.Error.Type), "usage_limit_reached")
+}
+
+func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
+	decision := calculateOpenAI429ResetDecision(headers, 100)
+	if decision == nil {
+		return nil
+	}
+	return &decision.resetAt
 }
 
 func (s *RateLimitService) calculateOpenAI429ResetTime(headers http.Header) *time.Time {

@@ -3,14 +3,16 @@ import { flushPromises, mount } from '@vue/test-utils'
 import AccountUsageCell from '../AccountUsageCell.vue'
 import type { Account } from '@/types'
 
-const { getUsage } = vi.hoisted(() => ({
-  getUsage: vi.fn()
+const { getUsage, getById } = vi.hoisted(() => ({
+  getUsage: vi.fn(),
+  getById: vi.fn()
 }))
 
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
-      getUsage
+      getUsage,
+      getById
     }
   }
 }))
@@ -57,6 +59,7 @@ function makeAccount(overrides: Partial<Account>): Account {
 describe('AccountUsageCell', () => {
   beforeEach(() => {
     getUsage.mockReset()
+    getById.mockReset()
     Object.defineProperty(window, 'matchMedia', {
       writable: true,
       value: vi.fn().mockImplementation(() => ({
@@ -590,7 +593,6 @@ describe('AccountUsageCell', () => {
 	    }
 	  }
 	})
-
 		const wrapper = mount(AccountUsageCell, {
 		  props: {
 		    account: makeAccount({
@@ -620,6 +622,47 @@ describe('AccountUsageCell', () => {
   expect(getUsage).toHaveBeenCalledWith(2004)
   expect(wrapper.text()).toContain('5h|100|106540000')
   expect(wrapper.text()).toContain('7d|100|106540000')
+  })
+
+  it('OpenAI OAuth 用量刷新解除配额 429 后同步账号行状态', async () => {
+    const account = makeAccount({
+      id: 2005,
+      platform: 'openai',
+      type: 'oauth',
+      rate_limited_at: '2026-03-07T10:00:00Z',
+      rate_limit_reset_at: '2099-03-07T12:00:00Z',
+      extra: {
+        openai_codex_rate_limit_state: {
+          version: 1,
+          source: 'openai_codex_quota_429',
+          window: '5h'
+        }
+      }
+    })
+    const recovered = makeAccount({
+      ...account,
+      rate_limited_at: null,
+      rate_limit_reset_at: null
+    })
+    getUsage.mockResolvedValue({
+      five_hour: { utilization: 0, resets_at: null, remaining_seconds: 0 },
+      seven_day: { utilization: 0, resets_at: null, remaining_seconds: 0 }
+    })
+    getById.mockResolvedValue(recovered)
+
+    const wrapper = mount(AccountUsageCell, {
+      props: { account },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(getById).toHaveBeenCalledWith(account.id)
+    expect(wrapper.emitted<Account[]>('account-updated')?.[0]?.[0]?.rate_limit_reset_at).toBeNull()
   })
 
   it('Key 账号会展示 today stats 徽章并带 A/U 提示', async () => {

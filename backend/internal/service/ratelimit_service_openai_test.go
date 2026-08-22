@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -150,6 +151,8 @@ func TestCalculateOpenAI429ResetTime_ReversedWindowOrder(t *testing.T) {
 type openAI429SnapshotRepo struct {
 	mockAccountRepoForGemini
 	rateLimitedID      int64
+	quotaStateJSON     string
+	quotaResetAt       time.Time
 	updatedExtra       map[string]any
 	bulkUpdatedIDs     []int64
 	bulkUpdatedPayload AccountBulkUpdate
@@ -157,6 +160,13 @@ type openAI429SnapshotRepo struct {
 
 func (r *openAI429SnapshotRepo) SetRateLimited(_ context.Context, id int64, _ time.Time) error {
 	r.rateLimitedID = id
+	return nil
+}
+
+func (r *openAI429SnapshotRepo) SetOpenAICodexQuotaRateLimited(_ context.Context, id int64, resetAt time.Time, stateJSON string) error {
+	r.rateLimitedID = id
+	r.quotaResetAt = resetAt
+	r.quotaStateJSON = stateJSON
 	return nil
 }
 
@@ -198,6 +208,198 @@ func TestHandle429_OpenAIPersistsCodexSnapshotImmediately(t *testing.T) {
 	if got := repo.updatedExtra["codex_7d_used_percent"]; got != 100.0 {
 		t.Fatalf("codex_7d_used_percent = %v, want 100", got)
 	}
+	state, _, ok := parseOpenAICodexQuota429State(map[string]any{OpenAICodexRateLimitStateExtraKey: json.RawMessage(repo.quotaStateJSON)})
+	require.True(t, ok)
+	require.Equal(t, "7d", state.Window)
+	require.Equal(t, 100, state.ThresholdPercent)
+}
+
+func TestHandle429_OpenAIQuotaProvenanceUsesEffectiveThreshold(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "20")
+	headers.Set("x-codex-primary-reset-after-seconds", "500000")
+	headers.Set("x-codex-primary-window-minutes", "10080")
+	headers.Set("x-codex-secondary-used-percent", "96")
+	headers.Set("x-codex-secondary-reset-after-seconds", "3600")
+	headers.Set("x-codex-secondary-window-minutes", "300")
+
+	repo := &openAI429SnapshotRepo{}
+	svc := NewRateLimitService(repo, nil, nil, nil, nil)
+	account := &Account{
+		ID:          125,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{accountSchedulingThresholdCredentialKey: 95},
+	}
+	svc.handle429(context.Background(), account, headers, []byte(`{"error":{"type":"usage_limit_reached"}}`))
+
+	state, _, ok := parseOpenAICodexQuota429State(map[string]any{OpenAICodexRateLimitStateExtraKey: json.RawMessage(repo.quotaStateJSON)})
+	require.True(t, ok)
+	require.Equal(t, "5h", state.Window)
+	require.Equal(t, 96.0, state.UsedPercent)
+	require.Equal(t, 95, state.ThresholdPercent)
+	require.WithinDuration(t, time.Now().Add(500000*time.Second), repo.quotaResetAt, time.Second)
+}
+
+func TestHandle429_OpenAINonQuota429DoesNotGetRecoverableProvenance(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "20")
+	headers.Set("x-codex-primary-reset-after-seconds", "500000")
+	headers.Set("x-codex-primary-window-minutes", "10080")
+	headers.Set("x-codex-secondary-used-percent", "96")
+	headers.Set("x-codex-secondary-reset-after-seconds", "3600")
+	headers.Set("x-codex-secondary-window-minutes", "300")
+
+	repo := &openAI429SnapshotRepo{}
+	svc := NewRateLimitService(repo, nil, nil, nil, nil)
+	account := &Account{
+		ID:          126,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{accountSchedulingThresholdCredentialKey: 95},
+	}
+	svc.handle429(context.Background(), account, headers, []byte(`{"error":{"type":"rate_limit_exceeded"}}`))
+
+	require.Equal(t, account.ID, repo.rateLimitedID)
+	require.Empty(t, repo.quotaStateJSON)
+}
+
+type openAIQuota429RecoveryRepo struct {
+	openAI429SnapshotRepo
+	clearCalls            int
+	clearResult           bool
+	expectedWhamUpdatedAt string
+}
+
+func (r *openAIQuota429RecoveryRepo) ClearOpenAICodexQuotaRateLimitIfSnapshotUnchanged(
+	_ context.Context,
+	_ int64,
+	_ time.Time,
+	_ time.Time,
+	_ string,
+	expectedWhamUpdatedAt string,
+) (bool, error) {
+	r.clearCalls++
+	r.expectedWhamUpdatedAt = expectedWhamUpdatedAt
+	return r.clearResult, nil
+}
+
+func quota429RecoveryAccount(t *testing.T, threshold int, usedPercent float64) (*Account, string) {
+	t.Helper()
+	now := time.Now().UTC()
+	observedAt := now.Add(-time.Minute)
+	resetAt := now.Add(4 * time.Hour)
+	stateJSON := buildOpenAICodexQuota429State("5h", observedAt, resetAt, 100, threshold)
+	var state any
+	require.NoError(t, json.Unmarshal([]byte(stateJSON), &state))
+	whamGeneration := formatCodexWhamSnapshotGeneration(now)
+	return &Account{
+		ID:               127,
+		Platform:         PlatformOpenAI,
+		Type:             AccountTypeOAuth,
+		Credentials:      map[string]any{accountSchedulingThresholdCredentialKey: threshold},
+		RateLimitedAt:    &observedAt,
+		RateLimitResetAt: &resetAt,
+		Extra: map[string]any{
+			OpenAICodexRateLimitStateExtraKey: state,
+			codexWhamPresenceSchemaKey:        codexWhamPresenceSchemaV1,
+			codexWham5hWindowPresentKey:       true,
+			codexWham7dWindowPresentKey:       false,
+			codexWhamUsageUpdatedAtKey:        whamGeneration,
+			"codex_usage_updated_at":          now.Format(time.RFC3339),
+			"codex_5h_used_percent":           usedPercent,
+			"codex_5h_reset_at":               resetAt.Format(time.RFC3339Nano),
+		},
+	}, whamGeneration
+}
+
+func TestReconcileOpenAICodexQuota429UsesCurrentEffectiveThreshold(t *testing.T) {
+	tests := []struct {
+		name        string
+		threshold   int
+		usedPercent float64
+		wantClear   bool
+	}{
+		{name: "below 90", threshold: 90, usedPercent: 89, wantClear: true},
+		{name: "at 90", threshold: 90, usedPercent: 90, wantClear: false},
+		{name: "below 95", threshold: 95, usedPercent: 94, wantClear: true},
+		{name: "above 95", threshold: 95, usedPercent: 96, wantClear: false},
+		{name: "below 97", threshold: 97, usedPercent: 96, wantClear: true},
+		{name: "at quota boundary when proactive pause disabled", threshold: 100, usedPercent: 100, wantClear: false},
+		{name: "recovered when proactive pause disabled", threshold: 100, usedPercent: 0, wantClear: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &openAIQuota429RecoveryRepo{clearResult: true}
+			svc := NewRateLimitService(repo, nil, nil, nil, nil)
+			account, whamGeneration := quota429RecoveryAccount(t, tt.threshold, tt.usedPercent)
+			repo.accountsByID = map[int64]*Account{account.ID: account}
+
+			require.NoError(t, svc.ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(context.Background(), account, whamGeneration))
+			if tt.wantClear {
+				require.Equal(t, 1, repo.clearCalls)
+				require.Nil(t, account.RateLimitResetAt)
+				require.NotContains(t, account.Extra, OpenAICodexRateLimitStateExtraKey)
+			} else {
+				require.Zero(t, repo.clearCalls)
+				require.NotNil(t, account.RateLimitResetAt)
+			}
+		})
+	}
+}
+
+func TestReconcileOpenAICodexQuota429RequiresNewerAuthoritativeWhamGeneration(t *testing.T) {
+	repo := &openAIQuota429RecoveryRepo{clearResult: true}
+	svc := NewRateLimitService(repo, nil, nil, nil, nil)
+	account, _ := quota429RecoveryAccount(t, 95, 0)
+	repo.accountsByID = map[int64]*Account{account.ID: account}
+	state, _, ok := parseOpenAICodexQuota429State(account.Extra)
+	require.True(t, ok)
+	account.Extra[codexWhamUsageUpdatedAtKey] = state.ObservedAt
+
+	require.NoError(t, svc.ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(context.Background(), account, state.ObservedAt))
+	require.Zero(t, repo.clearCalls)
+	require.NotNil(t, account.RateLimitResetAt)
+}
+
+func TestReconcileOpenAICodexQuota429ReloadsCurrentAccountThreshold(t *testing.T) {
+	repo := &openAIQuota429RecoveryRepo{clearResult: true}
+	svc := NewRateLimitService(repo, nil, nil, nil, nil)
+	stale, whamGeneration := quota429RecoveryAccount(t, 97, 96)
+	canonical := *stale
+	canonical.Credentials = map[string]any{accountSchedulingThresholdCredentialKey: 95}
+	repo.accountsByID = map[int64]*Account{canonical.ID: &canonical}
+
+	require.NoError(t, svc.ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(context.Background(), stale, whamGeneration))
+	require.Zero(t, repo.clearCalls)
+	require.NotNil(t, stale.RateLimitResetAt)
+}
+
+func TestOpenAICodexQuota429UnknownWindowRequiresAllWhamWindowsRecovered(t *testing.T) {
+	now := time.Now().UTC()
+	state := &OpenAICodexRateLimitState{Window: "all"}
+	account := &Account{
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{accountSchedulingThresholdCredentialKey: 95},
+		Extra: map[string]any{
+			codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
+			codexWham5hWindowPresentKey: true,
+			codexWham7dWindowPresentKey: true,
+			codexWhamUsageUpdatedAtKey:  formatCodexWhamSnapshotGeneration(now),
+			"codex_usage_updated_at":    now.Format(time.RFC3339),
+			"codex_5h_used_percent":     0.0,
+			"codex_5h_reset_at":         now.Add(time.Hour).Format(time.RFC3339Nano),
+			"codex_7d_used_percent":     96.0,
+			"codex_7d_reset_at":         now.Add(24 * time.Hour).Format(time.RFC3339Nano),
+		},
+	}
+	svc := &RateLimitService{}
+
+	require.False(t, svc.openAICodexQuota429Recovered(context.Background(), account, state, now))
+	account.Extra["codex_7d_used_percent"] = 94.0
+	require.True(t, svc.openAICodexQuota429Recovered(context.Background(), account, state, now))
 }
 
 func TestHandle429_OpenAISyncsObservedPlanType(t *testing.T) {
@@ -217,6 +419,9 @@ func TestHandle429_OpenAISyncsObservedPlanType(t *testing.T) {
 	require.Equal(t, "free", repo.bulkUpdatedPayload.Credentials["plan_type"])
 	require.Equal(t, "free", account.Credentials["plan_type"])
 	require.Equal(t, account.ID, repo.rateLimitedID)
+	state, _, ok := parseOpenAICodexQuota429State(map[string]any{OpenAICodexRateLimitStateExtraKey: json.RawMessage(repo.quotaStateJSON)})
+	require.True(t, ok)
+	require.Equal(t, "all", state.Window)
 }
 
 // TestHandle429_SkipsSparkShadow 外审第8轮 P1:spark 影子的限流状态只由 QueryUsage(/wham/usage

@@ -174,6 +174,25 @@ type OpenAICodexWhamSnapshotRepository interface {
 	) (bool, error)
 }
 
+// OpenAICodexQuotaRateLimitWriter atomically stores an account-level quota 429
+// together with its structured Codex window provenance.
+type OpenAICodexQuotaRateLimitWriter interface {
+	SetOpenAICodexQuotaRateLimited(ctx context.Context, accountID int64, resetAt time.Time, stateJSON string) error
+}
+
+// OpenAICodexQuotaRateLimitRecoveryRepository clears only the exact quota 429
+// generation and WHAM snapshot used by the recovery decision.
+type OpenAICodexQuotaRateLimitRecoveryRepository interface {
+	ClearOpenAICodexQuotaRateLimitIfSnapshotUnchanged(
+		ctx context.Context,
+		accountID int64,
+		observedLimitedAt time.Time,
+		observedResetAt time.Time,
+		expectedStateJSON string,
+		expectedWhamUpdatedAt string,
+	) (bool, error)
+}
+
 // AccountSchedulingThresholdPauseWriter persists a newly-triggered threshold
 // pause only while the account row is still the exact version that was
 // evaluated. In particular, a concurrent account-threshold override, usage
