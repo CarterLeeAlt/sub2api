@@ -129,7 +129,7 @@ const usesRemainingSemantics = computed(() => {
 // Progress bar color based on the displayed utilization
 const barClass = computed(() => {
   if (props.displayRemaining) {
-    if (displayedUtilization.value <= 0) {
+    if (displayedUtilization.value <= 10) {
       return 'bg-red-500'
     } else if (displayedUtilization.value <= 20) {
       return 'bg-amber-500'
@@ -156,7 +156,7 @@ const barClass = computed(() => {
 // Text color based on the displayed utilization
 const textClass = computed(() => {
   if (props.displayRemaining) {
-    if (displayedUtilization.value <= 0) {
+    if (displayedUtilization.value <= 10) {
       return 'text-red-600 dark:text-red-400'
     } else if (displayedUtilization.value <= 20) {
       return 'text-amber-600 dark:text-amber-400'

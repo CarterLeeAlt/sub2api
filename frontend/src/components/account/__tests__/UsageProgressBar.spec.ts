@@ -181,6 +181,27 @@ describe('UsageProgressBar', () => {
     expect(wrapper.get('.text-amber-600').text()).toBe('20% left')
   })
 
+  it('Codex 剩余模式在 10% 及以下显示红色', async () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '7d',
+        utilization: 90,
+        displayRemaining: true,
+        color: 'emerald'
+      }
+    })
+
+    expect(wrapper.text()).toContain('10% left')
+    expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-red-500')
+    expect(wrapper.get('.text-red-600').text()).toBe('10% left')
+
+    await wrapper.setProps({ utilization: 89 })
+
+    expect(wrapper.text()).toContain('11% left')
+    expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-amber-500')
+    expect(wrapper.get('.text-amber-600').text()).toBe('11% left')
+  })
+
   it('默认利用率模式仍把超限显示为满格红色', () => {
     const wrapper = mount(UsageProgressBar, {
       props: {
