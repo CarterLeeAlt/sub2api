@@ -715,7 +715,8 @@ func TestCacheResetCreditsSnapshot(t *testing.T) {
 		err := svc.CacheResetCreditsSnapshot(ctx, 100, &OpenAIRateLimitResetCredits{AvailableCount: 1})
 
 		require.NoError(t, err)
-		snapshot := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+		snapshot, ok := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+		require.True(t, ok)
 		require.Equal(t, 1, snapshot.AvailableCount)
 		require.Empty(t, snapshot.Credits)
 		require.NotEmpty(t, snapshot.FetchedAt)
@@ -731,7 +732,8 @@ func TestCacheResetCreditsSnapshot(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		snapshot := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+		snapshot, ok := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+		require.True(t, ok)
 		require.Equal(t, 2, snapshot.AvailableCount)
 		require.Empty(t, snapshot.Credits)
 	})
