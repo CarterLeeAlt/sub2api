@@ -4548,7 +4548,6 @@ const handleSubmit = async () => {
     appStore.showError(t('admin.accounts.pleaseSelectStatus'))
     return
   }
-
   const updatePayload: Record<string, unknown> = { ...form }
   try {
     // 后端期望 proxy_id: 0 表示清除代理，而不是 null
@@ -5112,7 +5111,6 @@ const handleSubmit = async () => {
 		} else {
 			delete newExtra.auto_pause_7d_disabled
 		}
-
 		delete newExtra.codex_image_generation_bridge_enabled
       switch (codexImageToolMode.value) {
         case 'enabled':

@@ -778,11 +778,22 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	if shouldRefreshSnapshot && s.shouldProbeOpenAICodexSnapshot(account.ID, now, force) {
 		var updates map[string]any
 		if s.openAIQuotaService != nil {
-			if quotaUsage, err := s.openAIQuotaService.QueryUsageWindows(ctx, account.ID); err == nil {
+			var quotaUsage *OpenAIQuotaUsage
+			var err error
+			if account.IsShadow() {
+				quotaUsage, err = s.openAIQuotaService.QueryUsage(ctx, account.ID)
+			} else {
+				quotaUsage, err = s.openAIQuotaService.QueryUsageWindows(ctx, account.ID)
+			}
+			if err == nil {
 				// Order concurrent observations by response completion, not request
 				// start. A request that started earlier but returned later must not
 				// be discarded merely because the upstream call took longer.
-				updates = buildCodexWhamWindowExtraUpdates(quotaUsage, time.Now(), account.IsShadow())
+				if account.IsShadow() {
+					updates = buildCodexSparkWindowExtraUpdates(quotaUsage, time.Now())
+				} else {
+					updates = buildCodexWhamWindowExtraUpdates(quotaUsage, time.Now(), false)
+				}
 			} else {
 				allowThresholdRecovery = false
 				slog.Warn("openai_codex_wham_snapshot_refresh_failed", "account_id", account.ID, "error", err)
