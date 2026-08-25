@@ -486,8 +486,9 @@ export default {
         resetAccountRecoveryFailed: '窗口已重置，但账号状态恢复失败，请手动恢复账号状态。',
         resetAccountRefreshFailed: '窗口、账号状态和重置次数缓存已更新，但无法加载最新账号显示。',
         refreshCachePersistFailed: '已显示实时次数，但缓存更新失败，仍保留上次成功值。',
-        updatedAt: '更新于 {time}',
-        stale: '数据陈旧',
+        refreshCountUnavailable: '未能获取当前重置次数，请稍后重试。',
+        updatedAt: '重置检查更新于 {time}',
+        stale: '重置次数信息已过期，等待刷新',
         confirmTitle: '确认重置周限',
         confirmMessage: '将消耗 1 次重置次数立即恢复当前窗口，剩余 {count} 次。此操作不可撤销，确定继续吗？'
       },

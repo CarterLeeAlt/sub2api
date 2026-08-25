@@ -118,12 +118,14 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
         codex_reset_credit_snapshot: {
           available_count: 1,
           credits: [{ expires_at: PAST_EXPIRY }],
+          fetched_at: FRESH_FETCHED_AT,
         },
       },
     })
     const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
 
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count0')
     const btn = resetButton(wrapper)
     expect(btn.attributes('disabled')).toBeDefined()
     expect(btn.attributes('title')).toBe('admin.accounts.openaiQuotaReset.resetTooltipNoCredits')
@@ -149,7 +151,28 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     wrapper.unmount()
   })
 
-  it('超过 30 分钟仍显示最后成功值、更新时间并标记陈旧', () => {
+  it('新鲜快照明确返回零次时显示有业务含义的零,但不点亮重置入口', () => {
+    const account = makeAccount({
+      parent_account_id: null,
+      extra: {
+        codex_reset_credit_snapshot: {
+          available_count: 0,
+          fetched_at: FRESH_FETCHED_AT,
+        },
+      },
+    })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count0')
+    expect(wrapper.find('[data-testid="reset-credit-cache-stale"]').exists()).toBe(false)
+    expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(resetButton(wrapper).attributes('title')).toBe(
+      'admin.accounts.openaiQuotaReset.resetTooltipNoCredits'
+    )
+    wrapper.unmount()
+  })
+
+  it('超过 30 分钟只显示更新时间和明确的过期状态,不显示旧值或允许重置', () => {
     const account = makeAccount({
       parent_account_id: null,
       extra: {
@@ -162,12 +185,16 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     })
     const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
 
-    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count1')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.count1')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
     expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.updatedAt:')
     expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').text()).toBe(
       'admin.accounts.openaiQuotaReset.stale'
     )
-    expect(resetButton(wrapper).attributes('disabled')).toBeUndefined()
+    expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(resetButton(wrapper).attributes('title')).toBe(
+      'admin.accounts.openaiQuotaReset.resetTooltipNeedQuery'
+    )
     wrapper.unmount()
   })
 
@@ -183,9 +210,11 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     })
     const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
 
-    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count1')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.count1')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
     expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.updatedAt:')
+    expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
@@ -230,6 +259,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
             { expires_at: PAST_EXPIRY },
             { expires_at: FUTURE_EXPIRY_EARLY },
           ],
+          fetched_at: FRESH_FETCHED_AT,
         },
       },
     })
@@ -319,7 +349,53 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
 
     expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count2')
     expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.refreshCachePersistFailed')
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.updatedAt:')
+    expect(wrapper.find('[data-testid="reset-credit-cache-stale"]').exists()).toBe(false)
     expect(resetButton(wrapper).attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('查询失败后不再显示此前的新鲜次数或到期明细', async () => {
+    vi.mocked(refreshOpenAIQuota).mockRejectedValue(new Error('query failed'))
+    const account = makeAccount({
+      parent_account_id: null,
+      extra: {
+        codex_reset_credit_snapshot: {
+          available_count: 1,
+          credits: [{ expires_at: FUTURE_EXPIRY_EARLY }],
+          fetched_at: FRESH_FETCHED_AT,
+        },
+      },
+    })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count1')
+
+    await wrapper.findAll('button')[0].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.count1')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
+    expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').exists()).toBe(true)
+    expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('query failed')
+    wrapper.unmount()
+  })
+
+  it('查询响应缺少重置次数字段时保持未知,不得把字段缺失显示为零', async () => {
+    vi.mocked(refreshOpenAIQuota).mockResolvedValue({
+      fetched_at: 1770000000,
+      cache_persisted: false,
+    })
+    const account = makeAccount({ parent_account_id: null })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+
+    await wrapper.findAll('button')[0].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.count0')
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.refreshCountUnavailable')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.refreshCachePersistFailed')
+    expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
@@ -349,6 +425,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
         codex_reset_credit_snapshot: {
           available_count: 1,
           credits: [{ expires_at: FUTURE_EXPIRY_EARLY }],
+          fetched_at: FRESH_FETCHED_AT,
         },
       },
     })
@@ -388,6 +465,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
         codex_reset_credit_snapshot: {
           available_count: 1,
           credits: [{ expires_at: FUTURE_EXPIRY_EARLY }],
+          fetched_at: FRESH_FETCHED_AT,
         },
       },
     })
@@ -398,9 +476,10 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     await flushPromises()
 
     expect(refreshOpenAIQuota).not.toHaveBeenCalled()
-    // 次数未知(隐藏)但仍展示已持久化的到期明细,重置入口保持禁用直到重新查询。
+    // 次数和同代到期明细都未知,重置入口保持禁用直到重新查询。
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.count1')
-    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.expiresAt:')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
+    expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.resetCacheRefreshFailed')
     expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
     expect(wrapper.emitted('account-updated')).toEqual([[recoveredAccount]])
@@ -421,6 +500,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
         codex_reset_credit_snapshot: {
           available_count: 1,
           credits: [{ expires_at: FUTURE_EXPIRY_EARLY }],
+          fetched_at: FRESH_FETCHED_AT,
         },
       },
     })
