@@ -8,6 +8,9 @@ import (
 )
 
 type openAIRateLimitResetCreditDetailPayload struct {
+	ID             string `json:"id,omitempty"`
+	CreditID       string `json:"credit_id,omitempty"`
+	CreditIDCamel  string `json:"creditId,omitempty"`
 	ExpiresAt      string `json:"expires_at,omitempty"`
 	ExpiresAtCamel string `json:"expiresAt,omitempty"`
 	ResetType      string `json:"reset_type,omitempty"`
