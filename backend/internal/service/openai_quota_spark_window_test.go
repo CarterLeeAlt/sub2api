@@ -60,6 +60,22 @@ func (r *stubQuotaAccountRepo) UpdateExtra(_ context.Context, id int64, updates 
 	return nil
 }
 
+func (r *stubQuotaAccountRepo) UpdateOpenAIResetCreditSnapshotIfNewer(
+	_ context.Context,
+	id int64,
+	_ string,
+	snapshot *OpenAIResetCreditSnapshot,
+) (bool, error) {
+	if r.extraUpdateErr != nil {
+		return false, r.extraUpdateErr
+	}
+	if r.extraUpdates == nil {
+		r.extraUpdates = make(map[int64]map[string]any)
+	}
+	r.extraUpdates[id] = map[string]any{openaiQuotaResetCreditsKey: snapshot}
+	return true, nil
+}
+
 // stubQuotaTokenCache 实现 OpenAITokenCache，返回预设静态 token。
 type stubQuotaTokenCache struct {
 	tokens map[string]string
@@ -609,13 +625,12 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 		{ExpiresAt: "2026-07-04T04:05:06Z"},
 	}, usage.RateLimitResetCredits.Credits)
 	require.NoError(t, svc.CacheResetCreditsSnapshot(ctx, 100, usage.RateLimitResetCredits))
-	require.Equal(t, &OpenAIRateLimitResetCredits{
-		AvailableCount: 2,
-		Credits: []OpenAIRateLimitResetCreditDetail{
-			{ExpiresAt: "2026-07-03T04:05:06Z"},
-			{ExpiresAt: "2026-07-04T04:05:06Z"},
-		},
-	}, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
+	snapshot, ok := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+	require.True(t, ok)
+	require.Equal(t, 2, snapshot.AvailableCount)
+	require.Equal(t, usage.RateLimitResetCredits.Credits, snapshot.Credits)
+	_, err = time.Parse(time.RFC3339Nano, snapshot.FetchedAt)
+	require.NoError(t, err)
 
 	encoded, err := json.Marshal(usage)
 	require.NoError(t, err)
@@ -667,10 +682,14 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 	require.Equal(t, 1, detailCalls)
 	require.Empty(t, usage.RateLimitResetCredits.Credits)
 
-	// A count without expiration details must not be persisted (the reader could
-	// never age it out), and the previous snapshot must survive untouched.
-	require.Error(t, svc.CacheResetCreditsSnapshot(ctx, 100, usage.RateLimitResetCredits))
-	require.Empty(t, repo.extraUpdates)
+	// Count-only responses remain useful and must be cached without inventing an
+	// expiration timestamp.
+	require.NoError(t, svc.CacheResetCreditsSnapshot(ctx, 100, usage.RateLimitResetCredits))
+	snapshot, ok := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+	require.True(t, ok)
+	require.Equal(t, 1, snapshot.AvailableCount)
+	require.Empty(t, snapshot.Credits)
+	require.NotEmpty(t, snapshot.FetchedAt)
 }
 
 func TestCacheResetCreditsSnapshot(t *testing.T) {
@@ -682,20 +701,27 @@ func TestCacheResetCreditsSnapshot(t *testing.T) {
 		credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
 
 		require.NoError(t, svc.CacheResetCreditsSnapshot(ctx, 100, credits))
-		require.Equal(t, credits, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
+		snapshot, ok := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+		require.True(t, ok)
+		require.Zero(t, snapshot.AvailableCount)
+		require.Empty(t, snapshot.Credits)
+		require.NotEmpty(t, snapshot.FetchedAt)
 	})
 
-	t.Run("missing expiration list preserves the cache", func(t *testing.T) {
+	t.Run("missing expiration list preserves count and fetch time", func(t *testing.T) {
 		repo := &stubQuotaAccountRepo{}
 		svc := &OpenAIQuotaService{accountRepo: repo}
 
 		err := svc.CacheResetCreditsSnapshot(ctx, 100, &OpenAIRateLimitResetCredits{AvailableCount: 1})
 
-		require.Error(t, err)
-		require.Empty(t, repo.extraUpdates)
+		require.NoError(t, err)
+		snapshot := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+		require.Equal(t, 1, snapshot.AvailableCount)
+		require.Empty(t, snapshot.Credits)
+		require.NotEmpty(t, snapshot.FetchedAt)
 	})
 
-	t.Run("empty expiration list with a positive count preserves the cache", func(t *testing.T) {
+	t.Run("empty expiration list with a positive count is cached", func(t *testing.T) {
 		repo := &stubQuotaAccountRepo{}
 		svc := &OpenAIQuotaService{accountRepo: repo}
 
@@ -704,8 +730,10 @@ func TestCacheResetCreditsSnapshot(t *testing.T) {
 			Credits:        []OpenAIRateLimitResetCreditDetail{},
 		})
 
-		require.Error(t, err)
-		require.Empty(t, repo.extraUpdates)
+		require.NoError(t, err)
+		snapshot := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+		require.Equal(t, 2, snapshot.AvailableCount)
+		require.Empty(t, snapshot.Credits)
 	})
 
 	t.Run("nil snapshot preserves the cache", func(t *testing.T) {

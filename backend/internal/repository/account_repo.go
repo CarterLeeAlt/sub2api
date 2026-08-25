@@ -2933,6 +2933,63 @@ func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 	return true, nil
 }
 
+// UpdateOpenAIResetCreditSnapshotIfNewer atomically persists the independent
+// reset-credit observation generation. Legacy snapshots without fetched_at are
+// accepted and upgraded by the next successful refresh.
+func (r *accountRepository) UpdateOpenAIResetCreditSnapshotIfNewer(
+	ctx context.Context,
+	id int64,
+	expectedFetchedAt string,
+	snapshot *service.OpenAIResetCreditSnapshot,
+) (bool, error) {
+	expectedFetchedAt = strings.TrimSpace(expectedFetchedAt)
+	if id <= 0 || expectedFetchedAt == "" || snapshot == nil {
+		return false, nil
+	}
+	if _, err := time.Parse(time.RFC3339Nano, expectedFetchedAt); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(snapshot.FetchedAt) != expectedFetchedAt {
+		return false, errors.New("reset-credit snapshot generation does not match payload")
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return false, err
+	}
+
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET extra = jsonb_set(
+			COALESCE(extra, '{}'::jsonb),
+			'{codex_reset_credit_snapshot}',
+			$1::jsonb,
+			true
+		),
+			updated_at = NOW()
+		WHERE id = $2
+			AND deleted_at IS NULL
+			AND (
+				COALESCE(extra->'codex_reset_credit_snapshot'->>'fetched_at', '') = ''
+				OR CASE
+					WHEN extra->'codex_reset_credit_snapshot'->>'fetched_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$'
+						AND $3 ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$'
+						THEN extra->'codex_reset_credit_snapshot'->>'fetched_at' < $3
+					WHEN extra->'codex_reset_credit_snapshot'->>'fetched_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+						THEN (extra->'codex_reset_credit_snapshot'->>'fetched_at')::timestamptz < $3::timestamptz
+					ELSE TRUE
+				END
+			)
+	`, string(payload), id, expectedFetchedAt)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	updates = stripCodexFingerprintSeedFromExtraUpdate(updates)
 	if len(updates) == 0 {

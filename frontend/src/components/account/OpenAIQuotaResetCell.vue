@@ -63,6 +63,26 @@
       </button>
     </div>
 
+    <div
+      v-if="cachedData"
+      class="flex flex-wrap items-center gap-1 text-[10px] text-gray-500 dark:text-gray-400"
+      data-testid="reset-credit-cache-status"
+    >
+      <span
+        v-if="cachedSnapshotFetchedAt"
+        :title="formatResetCreditExpiry(cachedSnapshotFetchedAt, 'full')"
+      >
+        {{ t('admin.accounts.openaiQuotaReset.updatedAt', { time: formatResetCreditExpiry(cachedSnapshotFetchedAt, 'short') }) }}
+      </span>
+      <span
+        v-if="cachedSnapshotStale"
+        class="rounded bg-amber-50 px-1 py-0.5 font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+        data-testid="reset-credit-cache-stale"
+      >
+        {{ t('admin.accounts.openaiQuotaReset.stale') }}
+      </span>
+    </div>
+
     <div v-if="primaryResetCreditExpiry" class="space-y-1">
       <div class="flex flex-wrap items-center gap-1">
         <span
@@ -171,19 +191,28 @@ const resetMessage = ref<string | null>(null)
 const resetWarning = ref<string | null>(null)
 const showResetConfirm = ref(false)
 const showResetCreditDetails = ref(false)
+const cachedSnapshotFetchedAt = ref<string | null>(null)
+const cachedSnapshotStale = ref(false)
 
-// Rehydrate the card from the persisted snapshot. Credits that already expired
-// are dropped and the count is clamped to what remains: the snapshot has no
-// freshness signal, so an unfiltered read would offer to consume credits that no
-// longer exist. A snapshot claiming credits with no usable expiration left is
-// treated as absent, which keeps the reset button gated on a live query.
-const readCachedResetCredits = (account: Account): OpenAIQuotaUsage | null => {
+const resetCreditCacheStaleAfterMs = 30 * 60 * 1000
+
+type CachedResetCredits = {
+  usage: OpenAIQuotaUsage
+  fetchedAt: string | null
+  stale: boolean
+}
+
+// Rehydrate the last successful snapshot. When expiration details are present,
+// expired entries are removed and the count is clamped to the remaining list.
+// A count-only response remains displayable and does not invent expirations.
+const readCachedResetCredits = (account: Account): CachedResetCredits | null => {
   const cached = account.extra?.codex_reset_credit_snapshot
   if (!cached || typeof cached !== 'object' || Array.isArray(cached)) return null
 
-  const { available_count: count, credits: rawCredits } = cached as {
+  const { available_count: count, credits: rawCredits, fetched_at: rawFetchedAt } = cached as {
     available_count?: unknown
     credits?: unknown
+    fetched_at?: unknown
   }
   if (typeof count !== 'number' || !Number.isFinite(count)) return null
 
@@ -201,21 +230,51 @@ const readCachedResetCredits = (account: Account): OpenAIQuotaUsage | null => {
       credits.push({ expires_at: expiresAt })
     }
   }
-  const availableCount = Math.min(Math.max(count, 0), credits.length)
-  // A snapshot that claimed credits but has none left is no longer informative;
-  // report "unknown" so the operator re-queries instead of trusting it.
-  if (count > 0 && availableCount <= 0) return null
-  return {
-    fetched_at: 0,
-    rate_limit_reset_credits: {
-      available_count: availableCount,
-      credits
+  const hasExpirationDetails = Array.isArray(rawCredits) && rawCredits.length > 0
+  const availableCount = hasExpirationDetails
+    ? Math.min(Math.max(count, 0), credits.length)
+    : Math.max(count, 0)
+
+  let fetchedAt: string | null = null
+  let stale = true
+  if (typeof rawFetchedAt === 'string' && rawFetchedAt.trim() !== '') {
+    const parsed = new Date(rawFetchedAt).getTime()
+    if (!Number.isNaN(parsed)) {
+      fetchedAt = rawFetchedAt
+      stale = now - parsed > resetCreditCacheStaleAfterMs
     }
+  }
+  return {
+    usage: {
+      fetched_at: fetchedAt ? Math.floor(new Date(fetchedAt).getTime() / 1000) : 0,
+      rate_limit_reset_credits: {
+        available_count: availableCount,
+        credits
+      }
+    },
+    fetchedAt,
+    stale
   }
 }
 
-cachedData.value = readCachedResetCredits(props.account)
-data.value = cachedData.value
+const hydrateCachedResetCredits = (account: Account) => {
+  const cached = readCachedResetCredits(account)
+  cachedData.value = cached?.usage ?? null
+  data.value = cachedData.value
+  cachedSnapshotFetchedAt.value = cached?.fetchedAt ?? null
+  cachedSnapshotStale.value = cached?.stale ?? false
+}
+
+const markCacheFreshFromUsage = (usage: OpenAIQuotaUsage) => {
+  if (typeof usage.fetched_at !== 'number' || !Number.isFinite(usage.fetched_at) || usage.fetched_at <= 0) {
+    cachedSnapshotFetchedAt.value = null
+  } else {
+    cachedSnapshotFetchedAt.value = new Date(usage.fetched_at * 1000).toISOString()
+  }
+  cachedSnapshotStale.value = false
+}
+
+hydrateCachedResetCredits(props.account)
 
 // 影子账号的额度查询会 resolve 到母账号,但影子本身不支持重置(后端返回 409);
 // 重置必须在母账号上进行。前端据此禁用影子的重置入口(外审 F6)。
@@ -335,6 +394,7 @@ const handleQuery = async () => {
     data.value = result
     if (result.cache_persisted) {
       cachedData.value = result
+      markCacheFreshFromUsage(result)
     } else {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.refreshCachePersistFailed')
     }
@@ -371,6 +431,7 @@ const confirmReset = async () => {
     if (result.cache_refreshed && result.quota) {
       data.value = result.quota
       cachedData.value = result.quota
+      markCacheFreshFromUsage(result.quota)
     } else {
       // A credit was consumed but the post-reset count could not be read back.
       // Whatever we still hold is one generation stale, so report the count as
@@ -398,19 +459,22 @@ const confirmReset = async () => {
 }
 
 watch(
-  () => props.account.id,
-  () => {
-    // Account row may be reused across paginated lists; reset local state.
-    cachedData.value = readCachedResetCredits(props.account)
-    data.value = cachedData.value
-    error.value = null
-    resetMessage.value = null
-    resetWarning.value = null
-    loading.value = false
-    resetting.value = false
-    showResetConfirm.value = false
-    showResetCreditDetails.value = false
-  }
+  [() => props.account.id, () => props.account.extra?.codex_reset_credit_snapshot],
+  ([accountID], [previousAccountID]) => {
+    // Background refreshes replace or mutate Extra on the same row. Rehydrate
+    // the quota card for both account changes and same-account snapshot changes.
+    hydrateCachedResetCredits(props.account)
+    if (accountID !== previousAccountID) {
+      error.value = null
+      resetMessage.value = null
+      resetWarning.value = null
+      loading.value = false
+      resetting.value = false
+      showResetConfirm.value = false
+      showResetCreditDetails.value = false
+    }
+  },
+  { deep: true }
 )
 
 watch(

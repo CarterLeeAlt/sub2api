@@ -174,6 +174,19 @@ type OpenAICodexWhamSnapshotRepository interface {
 	) (bool, error)
 }
 
+// OpenAIResetCreditSnapshotRepository persists the read-only reset-credit
+// snapshot only when the incoming observation is not older than the stored
+// generation. It is deliberately independent from the WHAM window CAS because
+// manual refreshes and background refreshes can complete in different orders.
+type OpenAIResetCreditSnapshotRepository interface {
+	UpdateOpenAIResetCreditSnapshotIfNewer(
+		ctx context.Context,
+		accountID int64,
+		expectedFetchedAt string,
+		snapshot *OpenAIResetCreditSnapshot,
+	) (bool, error)
+}
+
 // OpenAICodexQuotaRateLimitWriter atomically stores an account-level quota 429
 // together with its structured Codex window provenance.
 type OpenAICodexQuotaRateLimitWriter interface {

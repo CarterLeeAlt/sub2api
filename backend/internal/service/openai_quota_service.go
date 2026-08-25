@@ -76,6 +76,14 @@ type OpenAIRateLimitResetCredits struct {
 	Credits        []OpenAIRateLimitResetCreditDetail `json:"credits,omitempty"`
 }
 
+// OpenAIResetCreditSnapshot is persisted in accounts.extra. FetchedAt is an
+// RFC3339Nano response-completion timestamp used as the independent CAS token.
+type OpenAIResetCreditSnapshot struct {
+	AvailableCount int                                `json:"available_count"`
+	Credits        []OpenAIRateLimitResetCreditDetail `json:"credits,omitempty"`
+	FetchedAt      string                             `json:"fetched_at"`
+}
+
 // OpenAIQuotaUsage is the typed projection of /wham/usage we expose to the UI.
 // Fields not relevant to the quota card are intentionally omitted to keep the
 // surface narrow; full upstream payload preservation is unnecessary.
@@ -256,23 +264,33 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 // (for a spark shadow that is the shadow row, even though the credits belong to
 // its parent) because it is a per-row display cache: each row caches exactly
 // what its own card renders, and shadows cannot consume credits anyway.
-//
-// Missing expiration details leave the old cache intact:
-// a snapshot claiming N>0 available credits without their expiration timestamps
-// cannot be aged out by readers, so it would keep showing (and offering to
-// consume) credits that already expired. Callers must treat this rejection as a
-// partial success — the upstream read itself is still valid.
 func (s *OpenAIQuotaService) CacheResetCreditsSnapshot(ctx context.Context, accountID int64, credits *OpenAIRateLimitResetCredits) error {
-	if credits == nil || (credits.AvailableCount > 0 && len(credits.Credits) == 0) {
+	return s.cacheResetCreditsSnapshotAt(ctx, accountID, credits, time.Now())
+}
+
+func (s *OpenAIQuotaService) cacheResetCreditsSnapshotAt(ctx context.Context, accountID int64, credits *OpenAIRateLimitResetCredits, observedAt time.Time) error {
+	if credits == nil {
 		return infraerrors.New(
 			http.StatusBadGateway,
 			"OPENAI_QUOTA_RESET_CREDITS_REFRESH_FAILED",
-			"failed to refresh reset-credit expiration details; cached data was preserved",
+			"failed to refresh reset-credit details; cached data was preserved",
 		)
 	}
-	if err := s.accountRepo.UpdateExtra(ctx, accountID, map[string]any{
-		openaiQuotaResetCreditsKey: credits,
-	}); err != nil {
+	writer, ok := s.accountRepo.(OpenAIResetCreditSnapshotRepository)
+	if !ok {
+		return infraerrors.New(
+			http.StatusInternalServerError,
+			"OPENAI_QUOTA_CACHE_WRITE_FAILED",
+			"account repository does not support monotonic reset-credit snapshots",
+		)
+	}
+	fetchedAt := formatCodexWhamSnapshotGeneration(observedAt)
+	snapshot := &OpenAIResetCreditSnapshot{
+		AvailableCount: credits.AvailableCount,
+		Credits:        append([]OpenAIRateLimitResetCreditDetail(nil), credits.Credits...),
+		FetchedAt:      fetchedAt,
+	}
+	if _, err := writer.UpdateOpenAIResetCreditSnapshotIfNewer(ctx, accountID, fetchedAt, snapshot); err != nil {
 		return infraerrors.New(
 			http.StatusInternalServerError,
 			"OPENAI_QUOTA_CACHE_WRITE_FAILED",

@@ -25,6 +25,8 @@ vi.mock('vue-i18n', async () => {
 const FUTURE_EXPIRY_EARLY = '2099-07-03T04:05:06Z'
 const FUTURE_EXPIRY_LATE = '2099-07-05T04:05:06Z'
 const PAST_EXPIRY = '2020-07-03T04:05:06Z'
+const FRESH_FETCHED_AT = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+const STALE_FETCHED_AT = new Date(Date.now() - 31 * 60 * 1000).toISOString()
 
 function makeAccount(overrides: Partial<Account>): Account {
   return {
@@ -95,6 +97,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
             { expires_at: FUTURE_EXPIRY_LATE },
             { expires_at: FUTURE_EXPIRY_EARLY },
           ],
+          fetched_at: FRESH_FETCHED_AT,
         },
       },
     })
@@ -108,7 +111,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     wrapper.unmount()
   })
 
-  it('缓存中的重置卡全部过期时视为未知,不点亮重置入口', () => {
+  it('缓存中的重置卡全部过期时显示零次,不点亮重置入口', () => {
     const account = makeAccount({
       parent_account_id: null,
       extra: {
@@ -123,7 +126,97 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
     const btn = resetButton(wrapper)
     expect(btn.attributes('disabled')).toBeDefined()
-    expect(btn.attributes('title')).toBe('admin.accounts.openaiQuotaReset.resetTooltipNeedQuery')
+    expect(btn.attributes('title')).toBe('admin.accounts.openaiQuotaReset.resetTooltipNoCredits')
+    wrapper.unmount()
+  })
+
+  it('仅返回数量时保留数量且不伪造到期时间', () => {
+    const account = makeAccount({
+      parent_account_id: null,
+      extra: {
+        codex_reset_credit_snapshot: {
+          available_count: 2,
+          fetched_at: FRESH_FETCHED_AT,
+        },
+      },
+    })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count2')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
+    expect(wrapper.find('[data-testid="reset-credit-cache-stale"]').exists()).toBe(false)
+    expect(resetButton(wrapper).attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('超过 30 分钟仍显示最后成功值、更新时间并标记陈旧', () => {
+    const account = makeAccount({
+      parent_account_id: null,
+      extra: {
+        codex_reset_credit_snapshot: {
+          available_count: 1,
+          credits: [{ expires_at: FUTURE_EXPIRY_EARLY }],
+          fetched_at: STALE_FETCHED_AT,
+        },
+      },
+    })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count1')
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.updatedAt:')
+    expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').text()).toBe(
+      'admin.accounts.openaiQuotaReset.stale'
+    )
+    expect(resetButton(wrapper).attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('旧快照没有 fetched_at 时继续水合并标记陈旧', () => {
+    const account = makeAccount({
+      parent_account_id: null,
+      extra: {
+        codex_reset_credit_snapshot: {
+          available_count: 1,
+          credits: [{ expires_at: FUTURE_EXPIRY_EARLY }],
+        },
+      },
+    })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count1')
+    expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.updatedAt:')
+    wrapper.unmount()
+  })
+
+  it('同一账号的 extra 快照变化会重新水合', async () => {
+    const account = makeAccount({
+      parent_account_id: null,
+      extra: {
+        codex_reset_credit_snapshot: {
+          available_count: 0,
+          fetched_at: FRESH_FETCHED_AT,
+        },
+      },
+    })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count0')
+
+    await wrapper.setProps({
+      account: makeAccount({
+        id: account.id,
+        parent_account_id: null,
+        extra: {
+          codex_reset_credit_snapshot: {
+            available_count: 2,
+            fetched_at: FRESH_FETCHED_AT,
+          },
+        },
+      }),
+    })
+
+    expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.count2')
+    expect(resetButton(wrapper).attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 
