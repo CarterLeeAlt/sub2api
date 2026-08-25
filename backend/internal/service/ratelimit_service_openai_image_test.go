@@ -77,6 +77,7 @@ func TestOpenAIGatewayService_HandleOpenAIAccountUpstreamError_ImageRateLimitDoe
 
 func TestOpenAIGatewayServiceForwardImages_ImageRateLimitReturnsFailoverAndCoolsCapability(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	stubOpenAIImagesModelsManifest(t)
 	repo := &modelNotFoundAccountRepoStub{}
 	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
 	errorBody := `{"error":{"type":"rate_limit_exceeded","message":"Rate limit reached for gpt-image-2-codex (for limit gpt-image) in organization org on input-images per min: Limit 4000, Used 4000. Please try again in 1s."}}`
@@ -122,6 +123,7 @@ func TestOpenAIGatewayServiceForwardImages_ImageRateLimitReturnsFailoverAndCools
 
 func TestOpenAIGatewayServiceForwardImages_TextFallbackCoolsImageCapability(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	stubOpenAIImagesModelsManifest(t)
 	repo := &modelNotFoundAccountRepoStub{}
 	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
 	upstreamSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"model\":\"gpt-5.4-mini\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Here's a polished image prompt for your request.\"}]}]}}\n\n"
@@ -168,4 +170,17 @@ func TestOpenAIGatewayServiceForwardImages_TextFallbackCoolsImageCapability(t *t
 	require.Equal(t, openAIImageGenerationRateLimitKey, call.scope)
 	require.Equal(t, openAIImagesOAuthUnavailableReason, call.reason)
 	require.WithinDuration(t, before.Add(openAIImagesOAuthUnavailableCooldown), call.resetAt, time.Second)
+}
+
+func stubOpenAIImagesModelsManifest(t *testing.T) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4-mini","supported_in_api":true}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	originalURL := chatgptCodexModelsURL
+	chatgptCodexModelsURL = server.URL
+	t.Cleanup(func() { chatgptCodexModelsURL = originalURL })
 }

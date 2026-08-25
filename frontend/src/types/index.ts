@@ -1133,6 +1133,7 @@ export interface Account {
     codex_reset_credit_snapshot?: {
       available_count?: number
       credits?: { expires_at?: string }[]
+      fetched_at?: string
     }
   } & Record<string, unknown>)
   proxy_id: number | null

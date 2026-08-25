@@ -1567,6 +1567,61 @@ func (s *AccountRepoSuite) TestUpdateOpenAICodexWhamSnapshotIfNewer_AcceptsNewer
 	s.Require().Equal(95.0, got.Extra["codex_5h_used_percent"])
 }
 
+func (s *AccountRepoSuite) TestUpdateOpenAIResetCreditSnapshotIfNewer_UpgradesLegacyAndRejectsOlder() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:     "acc-reset-credit-legacy",
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeOAuth,
+		Extra: map[string]any{
+			"codex_reset_credit_snapshot": map[string]any{
+				"available_count": 1,
+			},
+		},
+	})
+
+	newerGeneration := "2026-08-25T10:00:00.123456789Z"
+	updated, err := s.repo.UpdateOpenAIResetCreditSnapshotIfNewer(
+		s.ctx,
+		account.ID,
+		newerGeneration,
+		&service.OpenAIResetCreditSnapshot{AvailableCount: 2, FetchedAt: newerGeneration},
+	)
+	s.Require().NoError(err)
+	s.Require().True(updated)
+
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	snapshot, ok := got.Extra["codex_reset_credit_snapshot"].(map[string]any)
+	s.Require().True(ok)
+	s.Require().Equal(newerGeneration, snapshot["fetched_at"])
+	s.Require().Equal(float64(2), snapshot["available_count"])
+
+	olderGeneration := "2026-08-25T10:00:00.000000001Z"
+	updated, err = s.repo.UpdateOpenAIResetCreditSnapshotIfNewer(
+		s.ctx,
+		account.ID,
+		olderGeneration,
+		&service.OpenAIResetCreditSnapshot{AvailableCount: 9, FetchedAt: olderGeneration},
+	)
+	s.Require().NoError(err)
+	s.Require().False(updated)
+
+	updated, err = s.repo.UpdateOpenAIResetCreditSnapshotIfNewer(
+		s.ctx,
+		account.ID,
+		newerGeneration,
+		&service.OpenAIResetCreditSnapshot{AvailableCount: 8, FetchedAt: newerGeneration},
+	)
+	s.Require().NoError(err)
+	s.Require().False(updated)
+
+	got, err = s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	snapshot = got.Extra["codex_reset_credit_snapshot"].(map[string]any)
+	s.Require().Equal(newerGeneration, snapshot["fetched_at"])
+	s.Require().Equal(float64(2), snapshot["available_count"])
+}
+
 func (s *AccountRepoSuite) TestUpdateExtra_SchedulerRelevantStillEnqueuesOutbox() {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:     "acc-extra-mixed",

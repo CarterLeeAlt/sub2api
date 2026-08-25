@@ -124,6 +124,7 @@ func provideCleanup(
 	quotaFlusher *service.UserPlatformQuotaUsageFlusher,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
+	openAIQuotaSnapshotRefresh *service.OpenAIQuotaSnapshotRefreshService,
 	auditLog *service.AuditLogService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
@@ -139,6 +140,12 @@ func provideCleanup(
 
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		parallelSteps := []cleanupStep{
+			{"OpenAIQuotaSnapshotRefreshService", func() error {
+				if openAIQuotaSnapshotRefresh != nil {
+					openAIQuotaSnapshotRefresh.Stop()
+				}
+				return nil
+			}},
 			{"PluginManager", func() error {
 				if pluginManager != nil {
 					pluginManager.Stop()

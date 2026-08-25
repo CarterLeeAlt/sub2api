@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"time"
 
@@ -187,6 +188,24 @@ func ProvideOpenAIQuotaService(
 	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory)
 	service.agentIdentityWS = openAIGatewayService
 	return service
+}
+
+// ProvideOpenAIQuotaSnapshotRefreshService starts the process-wide read-only
+// OpenAI quota snapshot runner.
+func ProvideOpenAIQuotaSnapshotRefreshService(
+	accountRepo AccountRepository,
+	quotaService *OpenAIQuotaService,
+	lockCache LeaderLockCache,
+	db *sql.DB,
+) (*OpenAIQuotaSnapshotRefreshService, error) {
+	refreshRepo, ok := accountRepo.(OpenAIQuotaSnapshotRefreshRepository)
+	if !ok {
+		return nil, fmt.Errorf("account repository does not support OpenAI quota snapshot refresh")
+	}
+	service := NewOpenAIQuotaSnapshotRefreshService(refreshRepo, quotaService)
+	service.SetLeaderLock(lockCache, db)
+	service.Start()
+	return service, nil
 }
 
 func ProvideAccountUsageService(
@@ -849,6 +868,7 @@ var ProviderSet = wire.NewSet(
 	ProvideGrokTokenProvider,
 	ProvideOpenAITokenProvider,
 	ProvideOpenAIQuotaService,
+	ProvideOpenAIQuotaSnapshotRefreshService,
 	ProvideGrokQuotaService,
 	ProvideCNProviderQuotaService,
 	ProvideCNProviderBalanceService,

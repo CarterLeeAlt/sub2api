@@ -128,6 +128,45 @@ func TestAccountRepository_UpdateOpenAICodexWhamSnapshotIfNewer_IsMonotonicAndAt
 	}
 }
 
+func TestAccountRepository_UpdateOpenAIResetCreditSnapshotIfNewer_UsesIndependentGenerationCAS(t *testing.T) {
+	generation := "2026-08-25T10:00:00.123456789Z"
+	for _, tt := range []struct {
+		name       string
+		affected   int64
+		wantUpdate bool
+	}{
+		{name: "newer snapshot is accepted", affected: 1, wantUpdate: true},
+		{name: "same or older snapshot is rejected", affected: 0, wantUpdate: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+			t.Cleanup(func() { _ = client.Close() })
+
+			mock.ExpectExec(`(?s)`+regexp.QuoteMeta("UPDATE accounts")+`.*`+
+				regexp.QuoteMeta("'{codex_reset_credit_snapshot}'")+`.*`+
+				regexp.QuoteMeta("COALESCE(extra->'codex_reset_credit_snapshot'->>'fetched_at', '') = ''")+`.*`+
+				regexp.QuoteMeta("::timestamptz < $3::timestamptz")).
+				WithArgs(sqlmock.AnyArg(), int64(17), generation).
+				WillReturnResult(sqlmock.NewResult(0, tt.affected))
+
+			repo := newAccountRepositoryWithSQL(client, db, nil)
+			updated, err := repo.UpdateOpenAIResetCreditSnapshotIfNewer(
+				context.Background(),
+				17,
+				generation,
+				&service.OpenAIResetCreditSnapshot{AvailableCount: 2, FetchedAt: generation},
+			)
+
+			require.NoError(t, err)
+			require.Equal(t, tt.wantUpdate, updated)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestAccountRepository_ListAccountsWithSchedulingThresholdPause_FiltersAndPagesInDatabase(t *testing.T) {
 	var capturedSQL string
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(captureEntQueryMatcher{actual: &capturedSQL}))
