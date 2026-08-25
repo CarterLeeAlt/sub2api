@@ -241,11 +241,13 @@ func TestOpenAIQuotaSnapshotRefreshDistributesParentSparkAndCountOnlySnapshot(t 
 	require.NoError(t, svc.RunOnce(context.Background()))
 	require.Equal(t, []int64{parent.ID}, quota.calls)
 	require.Equal(t, float64(25), repo.wham[parent.ID]["codex_5h_used_percent"])
+	require.Equal(t, float64(40), repo.wham[parent.ID]["codex_7d_used_percent"])
 	require.Equal(t, float64(75), repo.wham[shadow.ID]["codex_5h_used_percent"])
 	require.Equal(t, 2, repo.reset[parent.ID].AvailableCount)
 	require.Empty(t, repo.reset[parent.ID].Credits)
 	require.Equal(t, repo.reset[parent.ID], repo.reset[shadow.ID])
 	require.Equal(t, "2026-08-25T10:00:00.123456789Z", repo.reset[parent.ID].FetchedAt)
+	require.Equal(t, repo.whamGeneration[parent.ID], repo.resetGeneration[parent.ID])
 }
 
 func TestOpenAIQuotaSnapshotRefreshDelayCoversTenThroughFifteenMinutes(t *testing.T) {

@@ -35,7 +35,7 @@
             d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
           />
         </svg>
-        {{ t('admin.accounts.openaiQuotaReset.count') }}<span v-if="data"> {{ availableResetCount }}</span>
+        {{ t('admin.accounts.openaiQuotaReset.count') }}<span v-if="hasResetCreditCount"> {{ availableResetCount }}</span>
       </button>
 
       <button
@@ -64,7 +64,7 @@
     </div>
 
     <div
-      v-if="cachedData"
+      v-if="cachedSnapshotFetchedAt || cachedSnapshotStale"
       class="flex flex-wrap items-center gap-1 text-[10px] text-gray-500 dark:text-gray-400"
       data-testid="reset-credit-cache-status"
     >
@@ -186,7 +186,6 @@ const loading = ref(false)
 const resetting = ref(false)
 const error = ref<string | null>(null)
 const data = ref<OpenAIQuotaUsage | null>(null)
-const cachedData = ref<OpenAIQuotaUsage | null>(null)
 const resetMessage = ref<string | null>(null)
 const resetWarning = ref<string | null>(null)
 const showResetConfirm = ref(false)
@@ -259,13 +258,14 @@ const readCachedResetCredits = (account: Account): CachedResetCredits | null => 
 
 const hydrateCachedResetCredits = (account: Account) => {
   const cached = readCachedResetCredits(account)
-  cachedData.value = cached?.usage ?? null
-  data.value = cachedData.value
+  // A stale snapshot is useful only for explaining when the last check ran.
+  // It must not supply a count, expiration details, or reset permission.
+  data.value = cached && !cached.stale ? cached.usage : null
   cachedSnapshotFetchedAt.value = cached?.fetchedAt ?? null
   cachedSnapshotStale.value = cached?.stale ?? false
 }
 
-const markCacheFreshFromUsage = (usage: OpenAIQuotaUsage) => {
+const markResetCreditDataFresh = (usage: OpenAIQuotaUsage) => {
   if (typeof usage.fetched_at !== 'number' || !Number.isFinite(usage.fetched_at) || usage.fetched_at <= 0) {
     cachedSnapshotFetchedAt.value = null
   } else {
@@ -280,19 +280,22 @@ hydrateCachedResetCredits(props.account)
 // 重置必须在母账号上进行。前端据此禁用影子的重置入口(外审 F6)。
 const isShadow = computed(() => props.account.parent_account_id != null)
 
+const hasAuthoritativeResetCreditCount = (usage: OpenAIQuotaUsage | null): boolean => {
+  const count = usage?.rate_limit_reset_credits?.available_count
+  return typeof count === 'number' && Number.isFinite(count) && count >= 0
+}
+
+const hasResetCreditCount = computed(() => hasAuthoritativeResetCreditCount(data.value))
 const availableResetCount = computed(() => data.value?.rate_limit_reset_credits?.available_count ?? 0)
-// Prefer the live payload and fall back to the persisted snapshot only when the
-// live state is unknown, so the count and the expirations never come from two
-// different generations of the same data.
 const resetCreditExpirations = computed(() =>
-  ((data.value ?? cachedData.value)?.rate_limit_reset_credits?.credits ?? [])
+  (data.value?.rate_limit_reset_credits?.credits ?? [])
     .map((credit) => credit.expires_at?.trim() ?? '')
     .filter((expiresAt) => expiresAt.length > 0)
     .sort(compareResetCreditExpiry)
 )
 const primaryResetCreditExpiry = computed(() => resetCreditExpirations.value[0] ?? '')
 const hiddenResetCreditCount = computed(() => Math.max(resetCreditExpirations.value.length - 1, 0))
-const canReset = computed(() => availableResetCount.value > 0 && !isShadow.value)
+const canReset = computed(() => hasResetCreditCount.value && availableResetCount.value > 0 && !isShadow.value)
 
 const resetCreditDetailsTitle = computed(() =>
   resetCreditExpirations.value
@@ -309,7 +312,7 @@ const resetCreditDetailsToggleLabel = computed(() => {
 
 const resetButtonTitle = computed(() => {
   if (isShadow.value) return t('admin.accounts.openaiQuotaReset.resetTooltipShadow')
-  if (!data.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNeedQuery')
+  if (!hasResetCreditCount.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNeedQuery')
   if (!canReset.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNoCredits')
   return t('admin.accounts.openaiQuotaReset.resetTooltipReady')
 })
@@ -317,7 +320,7 @@ const resetButtonTitle = computed(() => {
 // "次数" button doubles as the upstream-query trigger and the count display.
 // Tooltip differs between "click to load" (no data yet) and "click to refresh".
 const countButtonTitle = computed(() => {
-  if (!data.value) return t('admin.accounts.openaiQuotaReset.countTooltipLoad')
+  if (!hasResetCreditCount.value) return t('admin.accounts.openaiQuotaReset.countTooltipLoad')
   return t('admin.accounts.openaiQuotaReset.countTooltipRefresh')
 })
 
@@ -388,17 +391,25 @@ const handleQuery = async () => {
   showResetCreditDetails.value = false
   try {
     const result = await refreshOpenAIQuota(props.account.id)
+    if (!hasAuthoritativeResetCreditCount(result)) {
+      data.value = null
+      if (cachedSnapshotFetchedAt.value) cachedSnapshotStale.value = true
+      error.value = t('admin.accounts.openaiQuotaReset.refreshCountUnavailable')
+      return
+    }
     // The upstream read succeeded even when the snapshot write was rejected, so
-    // the live count is always adopted. Only the persisted view is left alone,
-    // which keeps the displayed expirations consistent with what is stored.
+    // the live count and expiration details are always adopted for this view.
     data.value = result
-    if (result.cache_persisted) {
-      cachedData.value = result
-      markCacheFreshFromUsage(result)
-    } else {
+    markResetCreditDataFresh(result)
+    if (!result.cache_persisted) {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.refreshCachePersistFailed')
     }
   } catch (e) {
+    // A failed refresh cannot prove that the previously displayed count is
+    // still current. Treat it as unknown instead of rendering a misleading 0
+    // or allowing a reset from an older positive value.
+    data.value = null
+    if (cachedSnapshotFetchedAt.value) cachedSnapshotStale.value = true
     error.value = extractErrorMessage(e)
   } finally {
     loading.value = false
@@ -428,15 +439,19 @@ const confirmReset = async () => {
   try {
     const result: OpenAIQuotaResetResult = await resetOpenAIQuota(props.account.id)
     showResetCreditDetails.value = false
-    if (result.cache_refreshed && result.quota) {
+    if (
+      result.cache_refreshed &&
+      result.quota &&
+      hasAuthoritativeResetCreditCount(result.quota)
+    ) {
       data.value = result.quota
-      cachedData.value = result.quota
-      markCacheFreshFromUsage(result.quota)
+      markResetCreditDataFresh(result.quota)
     } else {
       // A credit was consumed but the post-reset count could not be read back.
       // Whatever we still hold is one generation stale, so report the count as
       // unknown instead of letting a second consumption start from stale data.
       data.value = null
+      cachedSnapshotStale.value = true
     }
     if (result.account) emit('account-updated', result.account)
 
@@ -452,6 +467,8 @@ const confirmReset = async () => {
       })
     }
   } catch (e) {
+    data.value = null
+    cachedSnapshotStale.value = true
     error.value = extractErrorMessage(e)
   } finally {
     resetting.value = false
