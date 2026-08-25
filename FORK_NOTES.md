@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`67380eafd`](https://github.com/Wei-Shaw/sub2api/commit/67380eafd5ae2eaa8db910ae738199c3dac62e37)（最近发布标签为 `v0.1.179`，该节点位于标签之后） |
-| 最近一次上游合并提交 | [`962d56ec7`](https://github.com/CarterLeeAlt/sub2api/commit/962d56ec7f816d04ef39cae1a10fdb605b3252f3) |
+| 当前已同步上游节点 | [`aa2c4e8d1`](https://github.com/Wei-Shaw/sub2api/commit/aa2c4e8d136b13553ac7bae3d76c25715333a554)（正式 `v0.1.182` 标签提交之后的版本文件同步节点） |
+| 最近一次上游合并提交 | [`83b0ba43a`](https://github.com/CarterLeeAlt/sub2api/commit/83b0ba43a96f236caeb9ab7b637a85f6284846f7) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -73,7 +73,7 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - 构建前运行本 fork 的 OpenAI 定向回归测试；
 - 仅在回归测试通过后构建 `linux/amd64` 镜像；
 - 将完整 Git commit 写入镜像标签、OCI revision 和前后端构建信息。
-- Docker 后端构建镜像的 Go 版本必须与 `backend/go.mod` 声明严格一致；当前两者均为 `1.26.6`。
+- Docker 后端构建镜像的 Go 版本必须与 `backend/go.mod` 声明严格一致；当前两者均为 `1.27.0`。
 
 主要文件：
 
@@ -234,6 +234,29 @@ Grok 429 测试按请求执行前后的时间窗口验证 `Retry-After`，并显
 
 验证：该 Grok 429 回归用例连续重复运行通过，`internal/service` 全量单元测试通过。
 
+### CUSTOM-014：OpenAI OAuth 周期额度快照缓存（`active`）
+
+内部 `OpenAIQuotaSnapshotRefreshService` 周期刷新所有未删除的 OpenAI OAuth 主账号，不以 `status`、`schedulable`、临时停调或限流状态过滤，关闭调度的账号仍会更新展示缓存：
+
+- 启动后错峰首刷；每轮结束后从 10 至 15 个整分钟中均匀随机选择下一轮延迟，不使用固定 ticker；
+- 多实例使用既有 leader lock；锁被占用或锁服务异常时跳过本轮，并在下一次随机延迟后重新竞争；
+- 分页扫描主账号，单账号只执行一次完整 `QueryUsage`，最大并发为 4，并设置单账号超时；失败保留上次成功缓存；
+- global WHAM 窗口写入主账号，`codex_bengalfox` 窗口写入关联 Spark 影子账号；重置卡只读快照分发到父子行，影子账号仍禁止消费；
+- `extra.codex_reset_credit_snapshot` 增加可选 RFC3339Nano `fetched_at`，仓储使用独立的严格更新代际 CAS，拒绝相同或更旧响应覆盖；旧快照无该字段时继续兼容并在下次成功刷新时升级；
+- 上游只返回重置卡数量时照常缓存数量和采集时间，不伪造到期时间；前端从 `extra` 水合，同账号快照变化也重新水合，超过 30 分钟仍显示最后成功值并标记陈旧；
+- 不新增外部端点，不暴露自动用卡设置。只有人工确认的 `POST .../reset-quota` 可以调用 `ResetCredit`；周期服务、调度、429 和用量回写路径均无消费能力。
+
+主要文件：
+
+- `backend/internal/service/openai_quota_snapshot_refresh.go`
+- `backend/internal/service/openai_quota_service.go`
+- `backend/internal/repository/account_repo.go`
+- `backend/internal/service/openai_quota_snapshot_refresh_test.go`
+- `frontend/src/components/account/OpenAIQuotaResetCell.vue`
+- `frontend/src/components/account/__tests__/OpenAIQuotaResetCell.spark_shadow.spec.ts`
+
+相关提交：[`3b609d74b`](https://github.com/CarterLeeAlt/sub2api/commit/3b609d74bd3ba7200d47f0e91fe12f2dd7bec844)、[`a1caee16c`](https://github.com/CarterLeeAlt/sub2api/commit/a1caee16cca9330bc6b25c52c562c8f431291d87)、[`bfe5f0689`](https://github.com/CarterLeeAlt/sub2api/commit/bfe5f06893173b7c65713afdf56bfa1c39d8e298)。
+
 ## 已被上游吸收
 
 ### OpenAI 调度阈值百分比语义（`upstreamed`）
@@ -270,6 +293,20 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-08-25：同步至上游 `aa2c4e8d1`
+
+- 从本地节点 `85dbae9bd` 精确合入上游 `aa2c4e8d1`，即正式 `v0.1.182` 标签提交 `5a7d46962` 加版本文件同步提交；合并前创建 `backup/pre-upstream-merge-20260825-85dbae9bd`，不追随后续浮动主线。
+- `backend/cmd/server/wire_gen.go`：同时保留上游插件仓储/管理器、本地 WHAM/阈值协调器，并接入只读周期额度刷新服务；不创建自动用卡服务。
+- `backend/internal/service/account_usage_service.go`：保留同步单调 WHAM 写入、结构化窗口状态和阈值恢复 CAS，同时接入上游 Spark/OpenCode Go 用量兼容；不触发自动用卡。
+- `backend/internal/service/openai_gateway_scheduling.go`：保留账号通用阈值的最高优先级和现有调度语义，同时吸收上游平台兼容分支。
+- `backend/internal/service/ratelimit_service.go`：保留结构化 429、当前阈值和精确代际 CAS，同时接入上游新增的错误兼容逻辑；移除自动用卡通知。
+- `frontend/src/i18n/locales/en/admin/accounts.ts` 与 `frontend/src/i18n/locales/zh/admin/accounts.ts`：保留通用阈值提示，同时接入插件导航文案，不加入自动用卡开关、阈值或状态标签。
+- `frontend/src/i18n/locales/zh/common.ts`：同时保留插件导航和“代理管理”中文命名。
+- 语义复核继续保留专用 OpenAI OAuth manifest 路径、`supported_in_api` 过滤、权威替换、动态生图主模型与 `gpt-image-2` 规则；删除自动合并后形成的不可达通用 OAuth 请求实现及重复测试。生图请求同时保留动态主模型和上游原样提示词修复。
+- 接入插件迁移 `229_plugins.sql`、`230_plugin_artifacts.sql`，Docker 与 `backend/go.mod` 升级到 Go 1.27.0，并保留 commit/SHA 构建标识。插件安装器补充 Windows ZIP 文件句柄关闭，避免提取后重命名失败。
+- 合并提交：[`83b0ba43a`](https://github.com/CarterLeeAlt/sub2api/commit/83b0ba43a96f236caeb9ab7b637a85f6284846f7)。周期缓存实现：[`3b609d74b`](https://github.com/CarterLeeAlt/sub2api/commit/3b609d74bd3ba7200d47f0e91fe12f2dd7bec844)。上游可移植性补充：[`08305d028`](https://github.com/CarterLeeAlt/sub2api/commit/08305d0288722b5aa2e54bb9308e5dc30a83c705)。人工重置后处理保留：[`a1caee16c`](https://github.com/CarterLeeAlt/sub2api/commit/a1caee16cca9330bc6b25c52c562c8f431291d87)。
+- 本地验证使用 Go 1.27.0：完整 `make test-unit`、`make test-integration`、`go test -tags=unit ./internal/service -count=1` 均通过；golangci-lint 2.13.0 报告 `0 issues`；`make test-frontend` 的 lint 无错误、typecheck 通过、关键套件 166 项通过；完整 Vitest 245 个文件共 1758 项通过；Vite 生产构建和 `CGO_ENABLED=0` 后端构建通过。前端 lint 仅保留一个既有未使用测试辅助函数警告，生产构建仅保留既有大 chunk 警告。
 
 ### 2026-08-22：同步至上游 `67380eafd`
 
@@ -404,11 +441,16 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 29 | [`962d56ec7`](https://github.com/CarterLeeAlt/sub2api/commit/962d56ec7f816d04ef39cae1a10fdb605b3252f3) | 上游同步 | 合并上游 `67380eafd`（最近发布标签 `v0.1.179` 之后），保留 OAuth 动态模型/生图、Codex 指纹与调度阈值恢复，组合国产平台自适应协议和账户弹窗覆盖，并隔离生图 429 测试的 manifest 预取。 |
 | 30 | [`e8dbe8f0e`](https://github.com/CarterLeeAlt/sub2api/commit/e8dbe8f0e542ed5d894a20c950eafb9a94d9eff5) | 界面 | 将 Codex/OpenAI 剩余额度文案统一为 `x% left`，并同步组件断言。 |
 | 31 | [`debfd6231`](https://github.com/CarterLeeAlt/sub2api/commit/debfd62315df793f0b39db0ccb5634b8ca28f07d) | 界面 | 将 Codex/OpenAI 剩余额度红色警示边界调整为 `10%` 及以下，并覆盖 `10%`/`11%` 边界。 |
+| 32 | [`83b0ba43a`](https://github.com/CarterLeeAlt/sub2api/commit/83b0ba43a96f236caeb9ab7b637a85f6284846f7) | 上游同步 | 精确合并上游 `aa2c4e8d1`（`v0.1.182` 加版本同步），保留 OAuth manifest、动态生图、WHAM/CAS、结构化 429、显式复选框选择和“代理管理”，排除自动用卡。 |
+| 33 | [`3b609d74b`](https://github.com/CarterLeeAlt/sub2api/commit/3b609d74bd3ba7200d47f0e91fe12f2dd7bec844) | 功能 | 周期刷新所有未删除 OpenAI OAuth 主账号的 global/Spark WHAM 与重置卡只读快照，并增加严格 `fetched_at` CAS 和前端陈旧状态。 |
+| 34 | [`08305d028`](https://github.com/CarterLeeAlt/sub2api/commit/08305d0288722b5aa2e54bb9308e5dc30a83c705) | 修复 | 关闭 Windows 上的插件 ZIP 文件句柄后再提交包文件，并清理已由专用 OAuth manifest 测试覆盖的旧通用路径测试。 |
+| 35 | [`a1caee16c`](https://github.com/CarterLeeAlt/sub2api/commit/a1caee16cca9330bc6b25c52c562c8f431291d87) | 修复 | 保留人工重置成功后的账号恢复、只读额度缓存刷新和账号重载；消费入口仍仅位于人工确认 handler。 |
+| 36 | [`bfe5f0689`](https://github.com/CarterLeeAlt/sub2api/commit/bfe5f06893173b7c65713afdf56bfa1c39d8e298) | 测试 | 显式检查重置卡快照类型断言，使周期缓存回归通过 golangci-lint 2.13。 |
 
 ## 下次同步检查清单
 
 1. 获取 `upstream/main`，先比较当前共同祖先和上游新增提交，不直接覆盖本地分支。
-2. 检查 `CUSTOM-001` 至 `CUSTOM-013` 的主要文件是否被上游修改。
+2. 检查 `CUSTOM-001` 至 `CUSTOM-014` 的主要文件是否被上游修改。
 3. 如果上游已经提供等价功能，比较行为和测试后将对应条目标记为 `upstreamed`；不要长期维护重复生产代码。
 4. 对测试冲突按覆盖行为判断，不按来源机械选择；保留覆盖更完整且与当前实现一致的测试。
 5. 不恢复 `retired` 的一次性工作流。
@@ -430,10 +472,13 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 - `backend/internal/service/openai_gateway_scheduling.go`
 - `backend/internal/service/openai_codex_fingerprint.go`
 - `backend/internal/service/ratelimit_service.go`
+- `backend/internal/service/openai_quota_snapshot_refresh.go`
+- `backend/internal/service/openai_quota_service.go`
 - `backend/internal/repository/account_repo.go`
 - `backend/internal/repository/group_usage_rollup_trigger_integration_test.go`
 - `frontend/src/components/account/ModelWhitelistSelector.vue`
 - `frontend/src/components/account/EditAccountModal.vue`
+- `frontend/src/components/account/OpenAIQuotaResetCell.vue`
 - `.github/workflows/custom-docker.yml`
 - `Dockerfile`
 - `frontend/src/components/common/VersionBadge.vue`
