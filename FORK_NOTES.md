@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`aa2c4e8d1`](https://github.com/Wei-Shaw/sub2api/commit/aa2c4e8d136b13553ac7bae3d76c25715333a554)（正式 `v0.1.182` 标签提交之后的版本文件同步节点） |
-| 最近一次上游合并提交 | [`83b0ba43a`](https://github.com/CarterLeeAlt/sub2api/commit/83b0ba43a96f236caeb9ab7b637a85f6284846f7) |
+| 当前已同步上游节点 | [`7634e3c23b`](https://github.com/Wei-Shaw/sub2api/commit/7634e3c23b5b9afc588c37b170820f63f1d41bbb)（正式 `v0.1.183` 版本文件同步节点） |
+| 最近一次上游合并提交 | [`24635d431`](https://github.com/CarterLeeAlt/sub2api/commit/24635d431b478b2556b209b74f310d62b0b09f43) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -294,6 +294,16 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已知上游合并处理
 
+### 2026-08-26：同步至上游 `7634e3c23b`
+
+- 从本地节点 `4fbcf3188` 以普通 `--no-ff` merge 合入上游 `main` 的 17 个提交，合并提交为 [`24635d431`](https://github.com/CarterLeeAlt/sub2api/commit/24635d431b478b2556b209b74f310d62b0b09f43)；合并前创建备份分支 `backup/pre-upstream-merge-20260826-4fbcf3188`。
+- `backend/internal/service/openai_gateway_passthrough.go`：接入上游流式 429 语义分类头处理；保留 fork 删除 `notifyOpenAIAutoReset` 的手动额度策略。
+- `backend/internal/service/openai_gateway_scheduling.go`：接入 `session-id` 连字符头、粘性容量溢出的一次性备用路由及不改写持久绑定；保留账号通用 Codex 阈值优先级和现有快照/CAS 调度语义。
+- `backend/internal/service/ratelimit_service.go`：接入 Kimi 并发型 403 可恢复处理；保留结构化 OpenAI OAuth 配额 429、当前阈值、WHAM 代际 CAS 和手动重置策略，未恢复任何自动用卡通知或消费路径。
+- 接受 Responses 工具调用项 ID 重映射、OAuth 429 配额/瞬时错误分类、邮箱 alias 事务并发守卫、Antigravity `max_tokens` 64000 上限、channel monitor composite 聚合 SQL 修正及对应回归测试。
+- 版本文件更新为 `0.1.183`；`backend/go.mod` 与 `Dockerfile` 继续严格使用 Go `1.27.0`。未恢复一次性生图迁移工作流或 `openai_quota_auto_reset*.go` 自动用卡机制；人工确认的 `ResetCredit` 入口保持不变。
+- 验证：`internal/pkg/apicompat` 和 `internal/service` unit 定向测试通过；channel monitor 及本次新增 service 回归定向测试通过；golangci-lint 2.13.0 报告 `0 issues`；`CGO_ENABLED=0` 后端构建通过；前端 lint 0 错误（保留 1 个既有未使用测试辅助函数警告）、typecheck 通过、Vitest 246 个文件共 1763 项通过、Vite 生产构建通过。完整 repository unit 包仍有 3 个既有 AliyunCaptcha httptest 用例因 Windows/SDK 本地 HTTP 连接 `unexpected EOF` 失败，非本次合并代码诊断。
+
 ### 2026-08-25：同步至上游 `aa2c4e8d1`
 
 - 从本地节点 `85dbae9bd` 精确合入上游 `aa2c4e8d1`，即正式 `v0.1.182` 标签提交 `5a7d46962` 加版本文件同步提交；合并前创建 `backup/pre-upstream-merge-20260825-85dbae9bd`，不追随后续浮动主线。
@@ -446,6 +456,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 34 | [`08305d028`](https://github.com/CarterLeeAlt/sub2api/commit/08305d0288722b5aa2e54bb9308e5dc30a83c705) | 修复 | 关闭 Windows 上的插件 ZIP 文件句柄后再提交包文件，并清理已由专用 OAuth manifest 测试覆盖的旧通用路径测试。 |
 | 35 | [`a1caee16c`](https://github.com/CarterLeeAlt/sub2api/commit/a1caee16cca9330bc6b25c52c562c8f431291d87) | 修复 | 保留人工重置成功后的账号恢复、只读额度缓存刷新和账号重载；消费入口仍仅位于人工确认 handler。 |
 | 36 | [`bfe5f0689`](https://github.com/CarterLeeAlt/sub2api/commit/bfe5f06893173b7c65713afdf56bfa1c39d8e298) | 测试 | 显式检查重置卡快照类型断言，使周期缓存回归通过 golangci-lint 2.13。 |
+| 37 | [`24635d431`](https://github.com/CarterLeeAlt/sub2api/commit/24635d431b478b2556b209b74f310d62b0b09f43) | 上游同步 | 合并上游 `7634e3c23b`（`v0.1.183`），接入 Responses 工具调用 ID、邮箱 alias 并发守卫、Antigravity token clamp、Kimi 403 可恢复、Codex `session-id` 和粘性容量溢出修复；保留 OAuth manifest/动态生图、WHAM/CAS/周期额度快照和手动额度重置，排除自动用卡。 |
 
 ## 下次同步检查清单
 
