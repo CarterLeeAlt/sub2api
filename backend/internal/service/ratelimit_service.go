@@ -1859,6 +1859,7 @@ func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 	return &decision.resetAt
 }
 
+//nolint:unused // retained for package-level rate-limit regression tests.
 func (s *RateLimitService) calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 	return calculateOpenAI429ResetTime(headers)
 }
