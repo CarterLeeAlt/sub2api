@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`7634e3c23b`](https://github.com/Wei-Shaw/sub2api/commit/7634e3c23b5b9afc588c37b170820f63f1d41bbb)（正式 `v0.1.183` 版本文件同步节点） |
-| 最近一次上游合并提交 | [`24635d431`](https://github.com/CarterLeeAlt/sub2api/commit/24635d431b478b2556b209b74f310d62b0b09f43) |
+| 当前已同步上游节点 | [`2ac784c51a`](https://github.com/Wei-Shaw/sub2api/commit/2ac784c51a5d0925b324efef2ba6b3446c364781)（正式 `v0.1.185` 标签提交） |
+| 最近一次上游合并提交 | [`7845cf411`](https://github.com/CarterLeeAlt/sub2api/commit/7845cf411) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -259,6 +259,10 @@ Grok 429 测试按请求执行前后的时间窗口验证 `Retry-After`，并显
 
 ## 已被上游吸收
 
+### 管理端用量推理强度展示（`upstreamed`，2026-09-05）
+
+提交 [`18f5f3a41`](https://github.com/CarterLeeAlt/sub2api/commit/18f5f3a41) 曾为管理端用量页自行添加推理强度列（默认可见）。上游 v0.1.184 起提供覆盖更完整的实现（请求值与 `↳` 映射值并列、默认隐藏、用户端隐藏映射值、新增 `upstream_reasoning_effort` 字段与迁移），本分支自 v0.1.185 同步起采纳上游实现并退役 fork 旧版，本地不再保留重复生产代码。
+
 ### OpenAI 调度阈值百分比语义（`upstreamed`）
 
 fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百分比而不是小数比例。同步到上游节点 `10a4c6e3` 时，上游已通过 PR `#5468` 提供等价生产实现，因此不再把生产代码视为 fork 独有功能。
@@ -293,6 +297,20 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-09-05：同步至上游 `2ac784c51a`（v0.1.185）
+
+- 从本地节点 `6019e1d8f` 以普通 `--no-ff` merge 合入上游 `v0.1.185` 标签提交（共同祖先即上一同步点 `7634e3c23b`，上游侧 195 个提交、370 个文件）；合并前创建备份分支 `backup/pre-upstream-merge-20260905-6019e1d8f`。上游 `v0.1.185` 标签打在其 VERSION 同步提交之前，merge commit 中手动将 `backend/cmd/server/VERSION` 置为 `0.1.185`。
+- 自动用卡：上游 `5f09442f` 修改了已删除的 `openai_quota_auto_reset*.go`，合并保持删除；其新增的 `CachePostResetSnapshot`（人工重置后缓存完整用量快照）按 fork 语义实现——重置卡仍走严格 `fetched_at` CAS 快照写入，5h/7d 用量窗口不在此盲写 `UpdateExtra`（由恢复路径的 WHAM 单调写入负责）；上游对应测试 `TestCachePostResetSnapshot` 改写为断言 CAS 语义。人工 `ResetCredit` 入口不受影响。
+- `ratelimit_service.go`：采纳 Spark 配额 429 模型级 scope（`HandleOpenAICodexSparkRateLimit`）、图像能力丢失模型级冷却（`HandleOpenAIImageCapabilityLoss`）与 Fable 调度阈值模型级 scope；Fable 兜底调用插入 fork 的 `validAccountSchedulingThresholdPause` 提前返回分支，账号级阈值最高优先级与 WHAM 代际 CAS 不变。上游新增的 2 个图像冷却直连测试按 v0.1.179 先例补 `stubOpenAIImagesModelsManifest` 进程内 manifest，隔离动态生图主模型预取网络耗时。
+- `openai_gateway_passthrough.go`：接入 `handleOpenAIStreamTerminalAccountSideEffects` 的 `canonicalModel` 变参穿透（服务 Spark 模型级限流）、pre-output SSE keepalive、非流式 200 终止失败判定、TTFT 设置化与上游 endpoint 观测；未恢复任何自动用卡调用。
+- `upstream_models.go`：采纳上游 routed catalog 大重构（Models.dev 能力补全、`SyncUpstreamModelCatalog`、`UpstreamModelCatalog` 快照）；fork 的 OpenAI OAuth manifest 钩子适配新的 `([]string, []byte, error)` 签名（manifest 路径不产生 body）。两模型清单机制面向不同账户类型，并存。
+- 前端：`ModelWhitelistSelector.vue` 保留 OAuth manifest 权威替换路径，同时接入上游预览模式 `upstream-synced` 事件；`CreateAccountModal.vue`/`SyncUpstreamPreviewParams` 同时保留 CN `account_mode`/`api_protocol` 与上游 `model_mapping`；`UsageProgressBar.vue` 同时保留 fork 的 `displayRemaining` x% left 语义与上游 `labelWidth` 徽章模式。
+- 推理强度列：fork 曾在 [`18f5f3a41`](https://github.com/CarterLeeAlt/sub2api/commit/18f5f3a41) 自行实现管理端用量推理强度展示（默认可见）；上游 v0.1.184 起提供超集实现（请求值 + `↳` 映射值、默认隐藏、用户端隐藏映射值、`231_add_usage_log_requested_reasoning_effort.sql`）。本分支采纳上游实现并退役 fork 旧版，`UsageView.vue`、`UsageTable.vue` 及对应测试与上游完全对齐。
+- 仓储与重置：采纳 `ResetQuotaUsed` → `ResetQuotaUsedAndClearRateLimitCooldown` 重命名与 SQL 原子清除限流冷却；接入 `231_add_usage_log_native_compaction_v2.sql`、`231_add_usage_log_requested_reasoning_effort.sql`、`231_user_restrict_public_groups.sql` 与 ent user schema 重生成。`update_service.go` 并入版本比较去 hyphen 后缀修复；Docker 手动更新 403 策略保留。
+- 工具链：本次验证使用工作区 `.tools/` 便携版 Go 1.27.0、Node 24.18.0、pnpm 9.15.9、golangci-lint 2.13.0。
+- 验证：`CGO_ENABLED=0 go build ./...` 通过；`go test -tags=unit ./internal/service -count=1` 全绿；全后端 unit 通过（仅 3 个既有 AliyunCaptcha Windows httptest flake，复跑 `internal/repository` 全绿）；golangci-lint 2.13.0 `0 issues`（修正上游新增测试中弃用别名 `pq.ErrorCode` → `pqerror.Code`）；前端 `lint:check` 通过（保留 1 个既有警告）、`typecheck` 通过、Vitest 251 文件 1821 项通过、Vite 生产构建通过（既有大 chunk 警告）。
+- 上游同步预览新增 models.dev 补全请求后，fork 的 `syncPreviewRecordingUpstream` 测试桩改为按 URL 区分响应并仅记录首个模型列表请求。
 
 ### 2026-08-26：同步至上游 `7634e3c23b`
 
@@ -457,6 +475,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 35 | [`a1caee16c`](https://github.com/CarterLeeAlt/sub2api/commit/a1caee16cca9330bc6b25c52c562c8f431291d87) | 修复 | 保留人工重置成功后的账号恢复、只读额度缓存刷新和账号重载；消费入口仍仅位于人工确认 handler。 |
 | 36 | [`bfe5f0689`](https://github.com/CarterLeeAlt/sub2api/commit/bfe5f06893173b7c65713afdf56bfa1c39d8e298) | 测试 | 显式检查重置卡快照类型断言，使周期缓存回归通过 golangci-lint 2.13。 |
 | 37 | [`24635d431`](https://github.com/CarterLeeAlt/sub2api/commit/24635d431b478b2556b209b74f310d62b0b09f43) | 上游同步 | 合并上游 `7634e3c23b`（`v0.1.183`），接入 Responses 工具调用 ID、邮箱 alias 并发守卫、Antigravity token clamp、Kimi 403 可恢复、Codex `session-id` 和粘性容量溢出修复；保留 OAuth manifest/动态生图、WHAM/CAS/周期额度快照和手动额度重置，排除自动用卡。 |
+| 38 | [`7845cf411`](https://github.com/CarterLeeAlt/sub2api/commit/7845cf411) | 上游同步 | 合并上游 `2ac784c51a`（`v0.1.185`），接入 routed catalog、Spark 模型级 429、图像能力丢失冷却、Fable 模型级阈值、原子配额重置与推理强度列上游实现；`CachePostResetSnapshot` 按 fork CAS 语义落地并退役 [`18f5f3a41`](https://github.com/CarterLeeAlt/sub2api/commit/18f5f3a41) 旧版推理强度展示，继续排除自动用卡。 |
 
 ## 下次同步检查清单
 
