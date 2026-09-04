@@ -121,6 +121,7 @@ type quotaSnapshotUsageReaderStub struct {
 	mu        sync.Mutex
 	usage     *OpenAIQuotaUsage
 	errors    map[int64]error
+	failFirst map[int64]int
 	delay     time.Duration
 	calls     []int64
 	active    int
@@ -133,6 +134,26 @@ func (q *quotaSnapshotUsageReaderStub) QueryUsage(ctx context.Context, accountID
 	q.active++
 	if q.active > q.maxActive {
 		q.maxActive = q.active
+	}
+	if n := q.failFirst[accountID]; n > 0 {
+		q.failFirst[accountID] = n - 1
+		q.mu.Unlock()
+
+		defer func() {
+			q.mu.Lock()
+			q.active--
+			q.mu.Unlock()
+		}()
+		if q.delay > 0 {
+			timer := time.NewTimer(q.delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		return nil, errors.New("transient upstream failure")
 	}
 	q.mu.Unlock()
 
@@ -290,7 +311,7 @@ func TestOpenAIQuotaSnapshotRefreshLeaderLockSkipsBusyAndErrors(t *testing.T) {
 	}
 }
 
-func TestOpenAIQuotaSnapshotRefreshConcurrencyIsBounded(t *testing.T) {
+func TestOpenAIQuotaSnapshotRefreshRunsSerially(t *testing.T) {
 	accounts := make([]Account, 12)
 	for i := range accounts {
 		accounts[i] = quotaSnapshotParent(int64(i+1), StatusActive, true)
@@ -300,7 +321,7 @@ func TestOpenAIQuotaSnapshotRefreshConcurrencyIsBounded(t *testing.T) {
 	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
 
 	require.NoError(t, svc.RunOnce(context.Background()))
-	require.Equal(t, openAIQuotaSnapshotRefreshConcurrency, quota.maxActive)
+	require.Equal(t, 1, quota.maxActive, "quota checks must run one account at a time")
 	require.Len(t, quota.calls, len(accounts))
 }
 
@@ -329,6 +350,7 @@ func TestOpenAIQuotaSnapshotRefreshFailurePreservesSnapshots(t *testing.T) {
 	}
 	quota := &quotaSnapshotUsageReaderStub{errors: map[int64]error{account.ID: errors.New("upstream unavailable")}}
 	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.retryWait = func(context.Context, time.Duration) error { return nil }
 
 	require.NoError(t, svc.RunOnce(context.Background()))
 	require.Equal(t, float64(42), repo.wham[account.ID]["codex_5h_used_percent"])
@@ -341,10 +363,73 @@ func TestOpenAIQuotaSnapshotRefreshAppliesPerAccountTimeout(t *testing.T) {
 	quota := &quotaSnapshotUsageReaderStub{usage: quotaSnapshotTestUsage(), delay: time.Minute}
 	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
 	svc.accountTimeout = 10 * time.Millisecond
+	svc.retryWait = func(context.Context, time.Duration) error { return nil }
 
 	started := time.Now()
 	require.NoError(t, svc.RunOnce(context.Background()))
 	require.Less(t, time.Since(started), time.Second)
 	require.Empty(t, repo.wham)
+	require.Empty(t, repo.reset)
+}
+
+func TestOpenAIQuotaSnapshotRefreshRetriesOnceAfterDelay(t *testing.T) {
+	account := quotaSnapshotParent(1, StatusActive, true)
+	repo := &quotaSnapshotRefreshRepoStub{accounts: []Account{account}}
+	quota := &quotaSnapshotUsageReaderStub{
+		usage:     quotaSnapshotTestUsage(),
+		failFirst: map[int64]int{account.ID: 1},
+	}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.now = func() time.Time { return time.Date(2026, 8, 25, 10, 0, 0, 1, time.UTC) }
+
+	var waits []time.Duration
+	svc.retryWait = func(_ context.Context, delay time.Duration) error {
+		waits = append(waits, delay)
+		return nil
+	}
+
+	require.NoError(t, svc.RunOnce(context.Background()))
+	require.Equal(t, []int64{account.ID, account.ID}, quota.calls, "exactly one retry must follow the failed first attempt")
+	require.Equal(t, []time.Duration{openAIQuotaSnapshotRefreshRetryDelay}, waits)
+	require.Equal(t, float64(25), repo.wham[account.ID]["codex_5h_used_percent"])
+	require.Equal(t, 2, repo.reset[account.ID].AvailableCount)
+}
+
+func TestOpenAIQuotaSnapshotRefreshRetryGivesUpAfterSecondFailure(t *testing.T) {
+	account := quotaSnapshotParent(1, StatusActive, true)
+	previous := &OpenAIResetCreditSnapshot{AvailableCount: 3, FetchedAt: "2026-08-25T09:00:00.000000000Z"}
+	repo := &quotaSnapshotRefreshRepoStub{
+		accounts: []Account{account},
+		reset:    map[int64]*OpenAIResetCreditSnapshot{account.ID: previous},
+	}
+	quota := &quotaSnapshotUsageReaderStub{errors: map[int64]error{account.ID: errors.New("upstream unavailable")}}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+
+	var waits []time.Duration
+	svc.retryWait = func(_ context.Context, delay time.Duration) error {
+		waits = append(waits, delay)
+		return nil
+	}
+
+	require.NoError(t, svc.RunOnce(context.Background()))
+	require.Equal(t, []int64{account.ID, account.ID}, quota.calls, "retry exactly once, never a third attempt")
+	require.Equal(t, []time.Duration{openAIQuotaSnapshotRefreshRetryDelay}, waits)
+	require.Same(t, previous, repo.reset[account.ID], "the last successful snapshot must survive both failures")
+}
+
+func TestOpenAIQuotaSnapshotRefreshRetryAbandonedWhenContextCanceled(t *testing.T) {
+	account := quotaSnapshotParent(1, StatusActive, true)
+	repo := &quotaSnapshotRefreshRepoStub{accounts: []Account{account}}
+	quota := &quotaSnapshotUsageReaderStub{errors: map[int64]error{account.ID: errors.New("upstream unavailable")}}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.retryWait = func(waitCtx context.Context, _ time.Duration) error {
+		cancel()
+		return waitCtx.Err()
+	}
+
+	require.NoError(t, svc.RunOnce(ctx))
+	require.Equal(t, []int64{account.ID}, quota.calls, "no retry after the wait is canceled")
 	require.Empty(t, repo.reset)
 }

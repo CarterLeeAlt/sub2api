@@ -11,13 +11,12 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/google/uuid"
-	"golang.org/x/sync/errgroup"
 )
 
 const (
 	openAIQuotaSnapshotRefreshPageSize       = 100
-	openAIQuotaSnapshotRefreshConcurrency    = 4
 	openAIQuotaSnapshotRefreshAccountTimeout = 20 * time.Second
+	openAIQuotaSnapshotRefreshRetryDelay     = 10 * time.Second
 	openAIQuotaSnapshotRefreshInitialMax     = 2 * time.Minute
 	openAIQuotaSnapshotRefreshLeaderLockKey  = "openai:quota:snapshot:refresh:leader"
 	openAIQuotaSnapshotRefreshLeaderLockTTL  = 30 * time.Minute
@@ -74,6 +73,7 @@ type OpenAIQuotaSnapshotRefreshService struct {
 	initialDelay   func() time.Duration
 	nextDelay      func() time.Duration
 	accountTimeout time.Duration
+	retryWait      func(ctx context.Context, delay time.Duration) error
 }
 
 func NewOpenAIQuotaSnapshotRefreshService(
@@ -91,6 +91,7 @@ func NewOpenAIQuotaSnapshotRefreshService(
 		initialDelay:   randomOpenAIQuotaSnapshotInitialDelay,
 		nextDelay:      randomOpenAIQuotaSnapshotRefreshDelay,
 		accountTimeout: openAIQuotaSnapshotRefreshAccountTimeout,
+		retryWait:      waitOutOpenAIQuotaSnapshotRetryDelay,
 	}
 }
 
@@ -204,28 +205,62 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 			return fmt.Errorf("list OpenAI OAuth accounts page %d: %w", page, err)
 		}
 
-		group, groupCtx := errgroup.WithContext(ctx)
-		group.SetLimit(openAIQuotaSnapshotRefreshConcurrency)
 		for i := range accounts {
 			account := accounts[i]
 			if !account.IsOpenAIOAuth() || account.IsShadow() {
 				continue
 			}
-			group.Go(func() error {
-				accountCtx, cancel := context.WithTimeout(groupCtx, s.accountTimeout)
-				defer cancel()
-				if err := s.refreshAccount(accountCtx, &account); err != nil {
-					slog.Warn("openai_quota_snapshot_refresh_account_failed", "account_id", account.ID, "error", err)
-				}
-				return nil
-			})
+			// Serial on purpose: one upstream query at a time keeps the request
+			// footprint minimal and avoids concurrent-quota-check failures.
+			if err := s.refreshAccountWithRetry(ctx, &account); err != nil {
+				slog.Warn("openai_quota_snapshot_refresh_account_failed", "account_id", account.ID, "error", err)
+			}
 		}
-		_ = group.Wait()
 
 		if len(accounts) < openAIQuotaSnapshotRefreshPageSize || result == nil || page >= result.Pages {
 			return nil
 		}
 	}
+}
+
+// waitOutOpenAIQuotaSnapshotRetryDelay sleeps for the retry delay but wakes up
+// immediately when ctx is canceled so shutdowns never wait out the timer.
+func waitOutOpenAIQuotaSnapshotRetryDelay(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// refreshAccountWithRetry runs one full account refresh and, on failure, waits
+// out a short cooldown before trying exactly once more with a fresh per-account
+// timeout. The wait intentionally sits outside the timeout budget: the timeout
+// only bounds an upstream query, not the cooldown.
+func (s *OpenAIQuotaSnapshotRefreshService) refreshAccountWithRetry(ctx context.Context, account *Account) error {
+	firstCtx, cancelFirst := context.WithTimeout(ctx, s.accountTimeout)
+	firstErr := s.refreshAccount(firstCtx, account)
+	cancelFirst()
+	if firstErr == nil {
+		return nil
+	}
+
+	slog.Warn("openai_quota_snapshot_refresh_account_retry_scheduled",
+		"account_id", account.ID, "retry_delay", openAIQuotaSnapshotRefreshRetryDelay, "error", firstErr)
+	if waitErr := s.retryWait(ctx, openAIQuotaSnapshotRefreshRetryDelay); waitErr != nil {
+		// Context canceled while waiting (shutdown) — give up without retrying.
+		return firstErr
+	}
+
+	retryCtx, cancelRetry := context.WithTimeout(ctx, s.accountTimeout)
+	defer cancelRetry()
+	if retryErr := s.refreshAccount(retryCtx, account); retryErr != nil {
+		return fmt.Errorf("first attempt: %v; retry after %s: %w", firstErr, openAIQuotaSnapshotRefreshRetryDelay, retryErr)
+	}
+	return nil
 }
 
 func (s *OpenAIQuotaSnapshotRefreshService) refreshAccount(ctx context.Context, account *Account) error {
