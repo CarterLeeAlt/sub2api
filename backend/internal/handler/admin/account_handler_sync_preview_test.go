@@ -19,7 +19,19 @@ type syncPreviewRecordingUpstream struct {
 }
 
 func (u *syncPreviewRecordingUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
-	u.request = req.Clone(req.Context())
+	// 上游 routed catalog 会在模型列表后追加 models.dev 能力补全请求;
+	// 该桩只记录首个模型列表请求,并给 registry 返回合法空结构。
+	if strings.Contains(req.URL.Host, "models.dev") {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"providers":{}}`)),
+			Request:    req,
+		}, nil
+	}
+	if u.request == nil {
+		u.request = req.Clone(req.Context())
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},

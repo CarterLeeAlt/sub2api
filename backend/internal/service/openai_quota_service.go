@@ -268,6 +268,18 @@ func (s *OpenAIQuotaService) CacheResetCreditsSnapshot(ctx context.Context, acco
 	return s.cacheResetCreditsSnapshotAt(ctx, accountID, credits, time.Now())
 }
 
+// CachePostResetSnapshot persists the reset credits observed after a reset.
+// Usage windows are deliberately not written here: the reset workflow's
+// recovery path already syncs them through the monotonic WHAM writes, and a
+// blind extra update could regress newer snapshots.
+func (s *OpenAIQuotaService) CachePostResetSnapshot(ctx context.Context, accountID int64, usage *OpenAIQuotaUsage) error {
+	var credits *OpenAIRateLimitResetCredits
+	if usage != nil {
+		credits = usage.RateLimitResetCredits
+	}
+	return s.cacheResetCreditsSnapshotAt(ctx, accountID, credits, time.Now())
+}
+
 func (s *OpenAIQuotaService) cacheResetCreditsSnapshotAt(ctx context.Context, accountID int64, credits *OpenAIRateLimitResetCredits, observedAt time.Time) error {
 	if credits == nil {
 		return infraerrors.New(
