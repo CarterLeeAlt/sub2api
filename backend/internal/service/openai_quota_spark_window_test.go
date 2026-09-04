@@ -27,9 +27,10 @@ import (
 // stubQuotaAccountRepo 是多账号 AccountRepository stub，仅实现 GetByID。
 type stubQuotaAccountRepo struct {
 	AccountRepository
-	accounts       map[int64]*Account
-	extraUpdates   map[int64]map[string]any
-	extraUpdateErr error
+	accounts         map[int64]*Account
+	extraUpdates     map[int64]map[string]any
+	extraUpdateCalls int
+	extraUpdateErr   error
 }
 
 func (r *stubQuotaAccountRepo) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -53,6 +54,7 @@ func (r *stubQuotaAccountRepo) UpdateExtra(_ context.Context, id int64, updates 
 	if r.extraUpdateErr != nil {
 		return r.extraUpdateErr
 	}
+	r.extraUpdateCalls++
 	if r.extraUpdates == nil {
 		r.extraUpdates = make(map[int64]map[string]any)
 	}
@@ -757,6 +759,32 @@ func TestCacheResetCreditsSnapshot(t *testing.T) {
 
 		require.ErrorContains(t, err, "database unavailable")
 	})
+}
+
+func TestCachePostResetSnapshot(t *testing.T) {
+	repo := &stubQuotaAccountRepo{}
+	svc := &OpenAIQuotaService{accountRepo: repo}
+	credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
+	usage := &OpenAIQuotaUsage{
+		RateLimitResetCredits: credits,
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent: 0, LimitWindowSeconds: 5 * 60 * 60, ResetAfterSeconds: 5 * 60 * 60,
+			},
+			SecondaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent: 0, LimitWindowSeconds: 7 * 24 * 60 * 60, ResetAfterSeconds: 7 * 24 * 60 * 60,
+			},
+		},
+	}
+
+	require.NoError(t, svc.CachePostResetSnapshot(context.Background(), 100, usage))
+	// Fork 语义:重置后只通过严格 fetched_at CAS 快照缓存重置卡;5h/7d 用量
+	// 窗口由恢复路径的 WHAM 单调写入负责,禁止在此盲写覆盖较新快照。
+	require.Equal(t, 0, repo.extraUpdateCalls)
+	snapshot, ok := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
+	require.True(t, ok, "reset credits must persist through the strict fetched-at CAS snapshot")
+	require.Equal(t, 0, snapshot.AvailableCount)
+	require.NotEmpty(t, snapshot.FetchedAt)
 }
 
 // TestResetCreditGetByIDError_FailsClosed 验证守卫「失败关闭」语义：
