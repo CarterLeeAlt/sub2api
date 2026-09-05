@@ -166,6 +166,13 @@ func TestFetchUpstreamSupportedModelsSupportsOpenAIOAuth(t *testing.T) {
 	var gotVersion string
 	var gotClientVersion string
 
+	// 同步链路必须申报当前生效的规范版本（面板覆写 → 自动同步 → 编译常量），
+	// 而不是钉死编译期常量：上游按 client_version 门控 manifest 模型清单。
+	SetCodexCanonicalUserAgentResolver(func() string {
+		return openai.CodexDefaultOriginator + "/9.9.9 (Ubuntu 22.4.0; x86_64) xterm-256color"
+	})
+	t.Cleanup(func() { SetCodexCanonicalUserAgentResolver(nil) })
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuthorization = r.Header.Get("Authorization")
 		gotAccountID = r.Header.Get("chatgpt-account-id")
@@ -196,8 +203,8 @@ func TestFetchUpstreamSupportedModelsSupportsOpenAIOAuth(t *testing.T) {
 	require.Equal(t, "Bearer oauth-access-token", gotAuthorization)
 	require.Equal(t, "acc-123", gotAccountID)
 	require.Equal(t, openai.CodexDefaultOriginator, gotOriginator)
-	require.Equal(t, codexCLIVersion, gotVersion)
-	require.Equal(t, codexCLIVersion, gotClientVersion)
+	require.Equal(t, "9.9.9", gotVersion)
+	require.Equal(t, "9.9.9", gotClientVersion)
 }
 
 func TestFetchUpstreamSupportedModelsOpenAIOAuthAddsImageModelWithoutLegacyMainModel(t *testing.T) {
