@@ -38,8 +38,14 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 	// headers, account-id/FedRAMP handling, proxy behavior, Agent Identity auth,
 	// response limits, and manifest-envelope validation. Keep the admin sync path
 	// on that implementation instead of duplicating the protocol here.
+	//
+	// Pass an empty client version so the manifest request resolves the live
+	// canonical version (admin override → auto-synced → compiled constant). The
+	// Codex backend gates manifest entries by client_version (e.g. gpt-6 models
+	// only ship to >= 0.153.0), so pinning the compiled constant would freeze the
+	// synced catalog at whatever models shipped with that historical version.
 	gateway := &OpenAIGatewayService{accountRepo: s.accountRepo}
-	manifest, err := gateway.FetchCodexModelsManifest(ctx, account, codexCLIVersion, "")
+	manifest, err := gateway.FetchCodexModelsManifest(ctx, account, "", "")
 	if err != nil {
 		return nil, newUpstreamModelSyncUpstreamError("Failed to fetch OpenAI Codex model list", err)
 	}
