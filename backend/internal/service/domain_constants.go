@@ -663,11 +663,11 @@ const (
 	// 由 OpenAICodexVersionSyncService 独占写入，面板只读展示；管理员覆写请用
 	// SettingKeyOpenAICodexClientVersion。
 	SettingKeyOpenAICodexClientVersionSynced = "openai_codex_client_version_synced"
-		// SettingKeyOpenAICodexVersionAutoSyncEnabled 是否启用 Codex 客户端版本号自动同步（默认 true）。
-		SettingKeyOpenAICodexVersionAutoSyncEnabled = "openai_codex_version_auto_sync_enabled"
-		// SettingKeyOpenAICodexPATResetCreditsEnabled controls whether Codex PAT accounts may access reset-credit details and consume reset credits. Disabled unless explicitly enabled.
-		SettingKeyOpenAICodexPATResetCreditsEnabled = "openai_codex_pat_reset_credits_enabled"
-		// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 已废弃：历史全局开关只作为升级迁移输入读取。
+	// SettingKeyOpenAICodexVersionAutoSyncEnabled 是否启用 Codex 客户端版本号自动同步（默认 true）。
+	SettingKeyOpenAICodexVersionAutoSyncEnabled = "openai_codex_version_auto_sync_enabled"
+	// SettingKeyOpenAICodexPATResetCreditsEnabled controls whether Codex PAT accounts may access reset-credit details and consume reset credits. Disabled unless explicitly enabled.
+	SettingKeyOpenAICodexPATResetCreditsEnabled = "openai_codex_pat_reset_credits_enabled"
+	// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 已废弃：历史全局开关只作为升级迁移输入读取。
 	// 迁移后等价规则写入 SettingKeyCodexCLIOnlyWhitelist，不再参与运行时判定。
 	SettingKeyOpenAIAllowClaudeCodeCodexPlugin = "openai_allow_claude_code_codex_plugin"
 
