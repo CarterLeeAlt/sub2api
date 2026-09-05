@@ -1519,7 +1519,6 @@ export default {
         reset: 'Reset',
         countTooltipLoad: 'Click to load the available reset-credit count',
         countTooltipRefresh: 'Click to refresh the available reset-credit count',
-        patDisabled: 'Codex PAT quota reset is disabled; actions unavailable',
         patDisabledTooltip: 'Codex PAT quota reset is controlled by a global switch; enable "Enable Codex PAT quota reset" under Settings → Gateway → Forwarding behavior',
         resetTooltipReady: 'Consume 1 reset credit to immediately restore the window',
         resetTooltipNeedQuery: 'Click Credits first to load the available count',

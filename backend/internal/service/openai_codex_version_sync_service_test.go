@@ -437,7 +437,7 @@ func TestOpenAICodexVersionSyncInitialRunsWhenStaleOrMissing(t *testing.T) {
 		repo := newCodexVersionSyncSettingRepoStub(map[string]string{
 			SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
 		})
-		repo.updatedAt = time.Now().Add(-7 * time.Hour)
+		repo.updatedAt = time.Now().Add(-49 * time.Hour)
 		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.147.0"}}}
 
 		newCodexVersionSyncService(repo, github).runInitial()

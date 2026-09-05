@@ -10,8 +10,8 @@ import (
 
 const (
 	// openAICodexVersionSyncInterval 自动同步间隔。上游客户端发版频率是天级，
-	// 6 小时足够及时跟上，同时把对 GitHub API 的调用压到每天 4 次。
-	openAICodexVersionSyncInterval = 6 * time.Hour
+	// 48 小时足以跟上，同时把对 GitHub API 的调用压到每两天 1 次。
+	openAICodexVersionSyncInterval = 48 * time.Hour
 	// openAICodexVersionSyncTimeout 单次同步的整体超时。
 	openAICodexVersionSyncTimeout = 30 * time.Second
 	// openAICodexVersionSyncRepo 官方 Codex 客户端仓库。
