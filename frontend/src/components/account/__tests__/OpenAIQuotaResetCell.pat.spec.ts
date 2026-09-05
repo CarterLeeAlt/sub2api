@@ -63,17 +63,22 @@ beforeEach(() => {
 })
 
 describe('OpenAIQuotaResetCell — Codex PAT 禁用态', () => {
-  it('PAT + 开关关闭：卡片可见，按钮禁用并显示禁用原因，不发起请求', async () => {
+  it('PAT + 开关关闭：次数可查询，重置禁用且不触发请求，无额外提示行', async () => {
+    vi.mocked(refreshOpenAIQuota).mockResolvedValue({
+      fetched_at: Math.floor(Date.now() / 1000),
+      rate_limit_reset_credits: { available_count: 3 },
+    } as Awaited<ReturnType<typeof refreshOpenAIQuota>>)
+
     const wrapper = mountCell(PAT_ACCOUNT)
-    expect(wrapper.find('[data-testid="reset-credit-pat-blocked"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="reset-credit-pat-blocked"]').exists()).toBe(false)
 
     const { count, reset } = findButtons(wrapper)
-    expect(count.attributes('disabled')).toBeDefined()
+    expect(count.attributes('disabled')).toBeUndefined()
     expect(reset.attributes('disabled')).toBeDefined()
 
     await count.trigger('click')
     await flushPromises()
-    expect(refreshOpenAIQuota).not.toHaveBeenCalled()
+    expect(refreshOpenAIQuota).toHaveBeenCalledWith(PAT_ACCOUNT.id)
 
     await reset.trigger('click')
     await flushPromises()

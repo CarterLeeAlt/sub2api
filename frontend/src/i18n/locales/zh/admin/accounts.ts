@@ -486,7 +486,6 @@ export default {
         reset: '重置',
         countTooltipLoad: '点击查询剩余重置次数',
         countTooltipRefresh: '点击刷新剩余重置次数',
-        patDisabled: 'Codex PAT 重置额度功能未启用，操作已禁用',
         patDisabledTooltip: 'Codex PAT 账号的额度重置由全局开关控制；请在 系统设置 → 网关服务 → 请求转发行为 中启用「启用 Codex PAT 重置额度」',
         resetTooltipReady: '消耗 1 次重置次数以立即恢复当前窗口',
         resetTooltipNeedQuery: '先点击「次数」加载剩余重置次数',

@@ -17,7 +17,7 @@
       <button
         type="button"
         class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
-        :disabled="patResetCreditsBlocked || loading || resetting"
+        :disabled="loading || resetting"
         :title="countButtonTitle"
         @click="handleQuery()"
       >
@@ -81,14 +81,6 @@
       >
         {{ t('admin.accounts.openaiQuotaReset.stale') }}
       </span>
-    </div>
-
-    <div
-      v-if="patResetCreditsBlocked"
-      class="text-[10px] text-gray-500 dark:text-gray-400"
-      data-testid="reset-credit-pat-blocked"
-    >
-      {{ t('admin.accounts.openaiQuotaReset.patDisabled') }}
     </div>
 
     <div v-if="primaryResetCreditExpiry && !patResetCreditsBlocked" class="space-y-1">
@@ -342,8 +334,9 @@ const resetButtonTitle = computed(() => {
 
 // "次数" button doubles as the upstream-query trigger and the count display.
 // Tooltip differs between "click to load" (no data yet) and "click to refresh".
+// PAT accounts keep this button: the count comes from /wham/usage and the
+// backend skips the reset-credit details request for them.
 const countButtonTitle = computed(() => {
-  if (patResetCreditsBlocked.value) return t('admin.accounts.openaiQuotaReset.patDisabledTooltip')
   if (!hasResetCreditCount.value) return t('admin.accounts.openaiQuotaReset.countTooltipLoad')
   return t('admin.accounts.openaiQuotaReset.countTooltipRefresh')
 })
@@ -407,7 +400,6 @@ const toggleResetCreditDetails = () => {
 }
 
 const handleQuery = async () => {
-  if (patResetCreditsBlocked.value) return
   if (loading.value) return
   loading.value = true
   error.value = null
