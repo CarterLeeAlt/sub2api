@@ -8,6 +8,14 @@ const { getUsage, getById } = vi.hoisted(() => ({
   getById: vi.fn()
 }))
 
+// OpenAIQuotaResetCell 的 setup 读取全局 PAT 重置额度开关；spec 的账号均非 PAT，
+// 保持关闭即可还原默认交互，同时避免在无 Pinia 的挂载环境中触发 getActivePinia()。
+vi.mock('@/stores/adminSettings', () => ({
+  useAdminSettingsStore: () => ({
+    openaiCodexPATResetCreditsEnabled: false,
+  }),
+}))
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
