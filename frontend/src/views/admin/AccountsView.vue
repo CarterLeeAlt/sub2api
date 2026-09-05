@@ -544,8 +544,6 @@ const accountGroupsForRow = (account: Pick<AccountListItem, 'group_ids'>): Admin
   if (groupIDs.length === 0) return []
   return groupIDs.map(id => groupsByID.value.get(id)).filter((group): group is AdminGroup => Boolean(group))
 }
-const accountTableRef = ref<HTMLElement | null>(null)
-const dataTableRef = ref<InstanceType<typeof DataTable> | null>(null)
 type AccountBulkEditTarget =
   | {
       mode: 'selected'
@@ -1113,8 +1111,7 @@ const {
   clear: clearSelectedIds,
   removeMany: removeSelectedAccounts,
   toggleVisible,
-  selectVisible: selectCurrentPage,
-  batchUpdate
+  selectVisible: selectCurrentPage
 } = useTableSelection<AccountListItem>({
   rows: accounts,
   getId: (account) => account.id
