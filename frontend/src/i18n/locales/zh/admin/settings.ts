@@ -517,6 +517,9 @@ export default {
         openaiCodexVersionAutoSync: '自动同步 Codex 版本号',
         openaiCodexVersionAutoSyncHint: '每 6 小时从官方仓库获取最新稳定版客户端版本号，无需为了跟版本而升级本服务。关闭后仅使用上方手填版本或内置版本。',
         openaiCodexVersionSyncedValue: '当前同步到：{version}',
+        openaiCodexPATResetCredits: '启用 Codex PAT 重置额度',
+        openaiCodexPATResetCreditsHint:
+          '默认关闭。Codex Personal Access Token（at-）账号当前不被上游授权读取或消耗重置次数；确认 OpenAI 已为 PAT 开放该能力后再开启。关闭时 PAT 账号不请求重置卡详情，也不能执行重置操作。',
         codexHardeningTitle: 'Codex 设置',
         codexClientRestrictionTitle: 'Codex 客户端限制',
         codexHardeningDesc:

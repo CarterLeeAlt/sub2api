@@ -17,7 +17,7 @@
       <button
         type="button"
         class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
-        :disabled="loading || resetting"
+        :disabled="patResetCreditsBlocked || loading || resetting"
         :title="countButtonTitle"
         @click="handleQuery()"
       >
@@ -41,7 +41,7 @@
       <button
         type="button"
         class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-orange-600 transition-colors hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-orange-400 dark:hover:bg-orange-900/30"
-        :disabled="resetting || loading || !canReset"
+        :disabled="patResetCreditsBlocked || resetting || loading || !canReset"
         :title="resetButtonTitle"
         @click="openResetConfirm"
       >
@@ -83,7 +83,15 @@
       </span>
     </div>
 
-    <div v-if="primaryResetCreditExpiry" class="space-y-1">
+    <div
+      v-if="patResetCreditsBlocked"
+      class="text-[10px] text-gray-500 dark:text-gray-400"
+      data-testid="reset-credit-pat-blocked"
+    >
+      {{ t('admin.accounts.openaiQuotaReset.patDisabled') }}
+    </div>
+
+    <div v-if="primaryResetCreditExpiry && !patResetCreditsBlocked" class="space-y-1">
       <div class="flex flex-wrap items-center gap-1">
         <span
           class="inline-flex max-w-full items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 tabular-nums dark:bg-dark-800 dark:text-gray-300"
@@ -161,6 +169,7 @@
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
+import { useAdminSettingsStore } from '@/stores/adminSettings'
 import {
   refreshOpenAIQuota,
   resetOpenAIQuota,
@@ -181,6 +190,19 @@ const { t } = useI18n()
 
 // Visible only for OpenAI OAuth accounts.
 const visible = computed(() => props.account.platform === 'openai' && props.account.type === 'oauth')
+
+const adminSettingsStore = useAdminSettingsStore()
+
+// Codex PAT accounts are rendered but non-interactive while the global
+// PAT reset-credit switch is off. The backend enforces the same rule.
+const isPATAccount = computed(() => {
+  const authMode = (props.account.credentials as Record<string, unknown> | undefined)?.auth_mode
+  return typeof authMode === 'string' &&
+    ['personalaccesstoken', 'personal_access_token'].includes(authMode.trim().toLowerCase())
+})
+const patResetCreditsBlocked = computed(() =>
+  isPATAccount.value && !adminSettingsStore.openaiCodexPATResetCreditsEnabled
+)
 
 const loading = ref(false)
 const resetting = ref(false)
@@ -311,6 +333,7 @@ const resetCreditDetailsToggleLabel = computed(() => {
 })
 
 const resetButtonTitle = computed(() => {
+  if (patResetCreditsBlocked.value) return t('admin.accounts.openaiQuotaReset.patDisabledTooltip')
   if (isShadow.value) return t('admin.accounts.openaiQuotaReset.resetTooltipShadow')
   if (!hasResetCreditCount.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNeedQuery')
   if (!canReset.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNoCredits')
@@ -320,6 +343,7 @@ const resetButtonTitle = computed(() => {
 // "次数" button doubles as the upstream-query trigger and the count display.
 // Tooltip differs between "click to load" (no data yet) and "click to refresh".
 const countButtonTitle = computed(() => {
+  if (patResetCreditsBlocked.value) return t('admin.accounts.openaiQuotaReset.patDisabledTooltip')
   if (!hasResetCreditCount.value) return t('admin.accounts.openaiQuotaReset.countTooltipLoad')
   return t('admin.accounts.openaiQuotaReset.countTooltipRefresh')
 })
@@ -383,6 +407,7 @@ const toggleResetCreditDetails = () => {
 }
 
 const handleQuery = async () => {
+  if (patResetCreditsBlocked.value) return
   if (loading.value) return
   loading.value = true
   error.value = null
@@ -417,6 +442,7 @@ const handleQuery = async () => {
 }
 
 const openResetConfirm = () => {
+  if (patResetCreditsBlocked.value) return
   if (resetting.value || loading.value) return
   if (!canReset.value) {
     error.value = t('admin.accounts.openaiQuotaReset.noCreditsAvailable')

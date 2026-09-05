@@ -1,6 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { adminAPI } from '@/api'
+// Import concrete modules instead of the '@/api' barrel: importing the barrel
+// from a store that account cells load transitively would pull unrelated admin
+// modules (and their test mocks) into every consumer.
+import settingsAPI from '@/api/admin/settings'
+import adminPaymentAPI from '@/api/admin/payment'
 import type { CustomMenuItem } from '@/types'
 
 export const useAdminSettingsStore = defineStore('adminSettings', () => {
@@ -49,6 +53,9 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   const opsRealtimeMonitoringEnabled = ref(readCachedBool('ops_realtime_monitoring_enabled_cached', true))
   const opsQueryModeDefault = ref(readCachedString('ops_query_mode_default_cached', 'auto'))
   const paymentEnabled = ref(readCachedBool('payment_enabled_cached', false))
+  // Codex PAT reset-credit capability. Fail closed: stays false until admin
+  // settings explicitly report true.
+  const openaiCodexPATResetCreditsEnabled = ref(readCachedBool('openai_codex_pat_reset_credits_enabled_cached', false))
   const customMenuItems = ref<CustomMenuItem[]>([])
 
   async function fetch(force = false): Promise<void> {
@@ -58,8 +65,8 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
     loading.value = true
     try {
       const [settings, paymentConfigResp] = await Promise.all([
-        adminAPI.settings.getSettings(),
-        adminAPI.payment.getConfig()
+        settingsAPI.getSettings(),
+        adminPaymentAPI.getConfig()
       ])
       opsMonitoringEnabled.value = settings.ops_monitoring_enabled ?? true
       writeCachedBool('ops_monitoring_enabled_cached', opsMonitoringEnabled.value)
@@ -74,6 +81,9 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
 
       paymentEnabled.value = paymentConfigResp.data?.enabled ?? false
       writeCachedBool('payment_enabled_cached', paymentEnabled.value)
+
+      openaiCodexPATResetCreditsEnabled.value = settings.openai_codex_pat_reset_credits_enabled === true
+      writeCachedBool('openai_codex_pat_reset_credits_enabled_cached', openaiCodexPATResetCreditsEnabled.value)
 
       loaded.value = true
     } catch (err) {
@@ -140,6 +150,7 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
     opsRealtimeMonitoringEnabled,
     opsQueryModeDefault,
     paymentEnabled,
+    openaiCodexPATResetCreditsEnabled,
     customMenuItems,
     fetch,
     setOpsMonitoringEnabledLocal,

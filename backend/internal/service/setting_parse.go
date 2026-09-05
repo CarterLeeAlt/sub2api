@@ -239,9 +239,10 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAntigravityUserAgentVersion:                        "",
 		SettingKeyOpenAICodexUserAgent:                               "",
 		SettingKeyOpenAICodexClientVersion:                           "",
-		SettingKeyOpenAICodexClientVersionSynced:                     "",
-		SettingKeyOpenAICodexVersionAutoSyncEnabled:                  "true",
-		SettingPaymentVisibleMethodAlipaySource:                      "",
+			SettingKeyOpenAICodexClientVersionSynced:                     "",
+			SettingKeyOpenAICodexVersionAutoSyncEnabled:                  "true",
+			SettingKeyOpenAICodexPATResetCreditsEnabled:                  "false",
+			SettingPaymentVisibleMethodAlipaySource:                      "",
 		SettingPaymentVisibleMethodWxpaySource:                       "",
 		SettingPaymentVisibleMethodAlipayEnabled:                     "false",
 		SettingPaymentVisibleMethodWxpayEnabled:                      "false",
@@ -882,6 +883,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	} else {
 		result.OpenAICodexVersionAutoSyncEnabled = true
 	}
+	result.OpenAICodexPATResetCreditsEnabled = settings[SettingKeyOpenAICodexPATResetCreditsEnabled] == "true"
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]
 	result.MaxCodexVersion = settings[SettingKeyMaxCodexVersion]
