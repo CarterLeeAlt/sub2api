@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`2ac784c51a`](https://github.com/Wei-Shaw/sub2api/commit/2ac784c51a5d0925b324efef2ba6b3446c364781)（正式 `v0.1.185` 标签提交） |
-| 最近一次上游合并提交 | [`7845cf411`](https://github.com/CarterLeeAlt/sub2api/commit/7845cf411) |
+| 当前已同步上游节点 | [`578785ee7`](https://github.com/Wei-Shaw/sub2api/commit/578785ee7fb35030b094b69624efe25670a36f5f)（`v0.2.1` 标签提交） |
+| 最近一次上游合并提交 | [`47cb55daf`](https://github.com/CarterLeeAlt/sub2api/commit/47cb55daf) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -298,6 +298,18 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已知上游合并处理
 
+### 2026-09-06：同步至上游 `578785ee7`（v0.2.1）
+
+- 从本地节点 `bfc446702` 以普通 `--no-ff` merge 合入上游 `v0.2.1` 标签提交（共同祖先即上一同步点 `2ac784c51a`/`v0.1.185`，上游侧 82 个提交）；合并前创建备份分支 `backup/pre-upstream-merge-20260906-bfc446702`。上游 `v0.2.1` 标签处 VERSION 文件滞后为 `0.2.0`，merge commit 中手动将 `backend/cmd/server/VERSION` 置为 `0.2.1`。
+- GPT-6 Astra：合入上游 `3c8be001`（注册 `gpt-6-astra` 与裸别名 `gpt-6` 归一化、1,050,000 上下文、low/medium/high/xhigh/max 推理档、输入 $10/输出 $50 每百万与长上下文阶梯定价、图像输入）、`126ac24c`（ultrafast service tier）与 PR #6628/#6572（同步后 Astra 能力与续聊状态持久化）。`openai_codex_models_service.go`、`pricing_service.go`、`openai_model_alias.go` 均自动合并成功；CUSTOM-001 的 OAuth manifest 权威替换钩子仍由 `upstream_models.go` 调用（`fetchOpenAIOAuthUpstreamModels`），`upstream_models_openai_oauth.go` 本次未被上游触碰。
+- 3 处文本冲突，逐文件处理：
+  - `backend/cmd/server/VERSION`：手动置 `0.2.1`。
+  - `backend/internal/service/admin_account.go`：上游 `708b85a6a` 在账号创建/更新 extra 归一化处新增 `ValidateUpstreamRequestIDHeaderExtra` 校验，同位置叠加在 fork 已删除的自动用卡 `normalizeOpenAIAutoResetCreditExtra` 之上；处理为维持删除自动用卡调用、接入上游新校验（该校验定义于上游新文件 `upstream_request_id.go`，与自动用卡无关）。
+  - `frontend/src/views/admin/AccountsView.vue`：上游 `db15e0090` compact 账号列表（`groupsByID`/`accountGroupsForRow`/`accountTableRef`/`dataTableRef` 新声明与 `useTableSelection<AccountListItem>` + `batchUpdate`）整体采纳；fork 的显式复选框选择（CUSTOM-009）等改动位于文件其他区域，未受影响。
+- 上游新增迁移 `232_add_usage_log_upstream_request_id.sql`、`233_add_usage_log_upstream_request_id_index_notx.sql`、`234_channel_max_reasoning_effort_multiplier.sql`、`234_group_codex_models_manifest_config.sql`（加上 v0.2.0 的 `232_channel_cache_write_1h_pricing.sql`、`232_group_force_openai_fast.sql`、`232_group_reasoning_effort_over_limit.sql`、`233_group_free_openai_fast.sql`）随合并接入；group 级 Codex manifest 钉定配置（`codex_models_manifest_config`）是 domain/handler/repository 层独立新功能，与 CUSTOM-001 的账号级 manifest 同步并存、互不替代。
+- 未恢复自动用卡（`normalizeOpenAIAutoResetCreditExtra` 合并后零引用）、一次性生图迁移工作流、Codex 动态窗口显隐与 `useSwipeSelect.ts`。
+- 验证：`CGO_ENABLED=0 go build ./...`、`go vet ./...`、`go test -tags=unit ./internal/service -count=1`（fork 定向回归门禁）与全后端 `go test -tags=unit ./...` 通过；golangci-lint 2.13.0 `0 issues`；前端 `lint:check`、`typecheck`、Vitest 全量、Vite 生产构建通过（详见对应验证记录）。
+
 ### 2026-09-05：同步至上游 `2ac784c51a`（v0.1.185）
 
 - 从本地节点 `6019e1d8f` 以普通 `--no-ff` merge 合入上游 `v0.1.185` 标签提交（共同祖先即上一同步点 `7634e3c23b`，上游侧 195 个提交、370 个文件）；合并前创建备份分支 `backup/pre-upstream-merge-20260905-6019e1d8f`。上游 `v0.1.185` 标签打在其 VERSION 同步提交之前，merge commit 中手动将 `backend/cmd/server/VERSION` 置为 `0.1.185`。
@@ -476,6 +488,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 36 | [`bfe5f0689`](https://github.com/CarterLeeAlt/sub2api/commit/bfe5f06893173b7c65713afdf56bfa1c39d8e298) | 测试 | 显式检查重置卡快照类型断言，使周期缓存回归通过 golangci-lint 2.13。 |
 | 37 | [`24635d431`](https://github.com/CarterLeeAlt/sub2api/commit/24635d431b478b2556b209b74f310d62b0b09f43) | 上游同步 | 合并上游 `7634e3c23b`（`v0.1.183`），接入 Responses 工具调用 ID、邮箱 alias 并发守卫、Antigravity token clamp、Kimi 403 可恢复、Codex `session-id` 和粘性容量溢出修复；保留 OAuth manifest/动态生图、WHAM/CAS/周期额度快照和手动额度重置，排除自动用卡。 |
 | 38 | [`7845cf411`](https://github.com/CarterLeeAlt/sub2api/commit/7845cf411) | 上游同步 | 合并上游 `2ac784c51a`（`v0.1.185`），接入 routed catalog、Spark 模型级 429、图像能力丢失冷却、Fable 模型级阈值、原子配额重置与推理强度列上游实现；`CachePostResetSnapshot` 按 fork CAS 语义落地并退役 [`18f5f3a41`](https://github.com/CarterLeeAlt/sub2api/commit/18f5f3a41) 旧版推理强度展示，继续排除自动用卡。 |
+| 39 | [`47cb55daf`](https://github.com/CarterLeeAlt/sub2api/commit/47cb55daf) | 上游同步 | 合并上游 `578785ee7`（`v0.2.1`），接入 GPT-6 Astra（模型注册/定价/归一化/能力持久化）、ultrafast service tier、group 级 Codex manifest 钉定配置、compact 账号列表与 upstream request-id 校验；维持删除自动用卡，保留 CUSTOM-001/009/011/012 定制。 |
 
 ## 下次同步检查清单
 
