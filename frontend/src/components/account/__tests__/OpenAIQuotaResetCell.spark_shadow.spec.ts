@@ -10,6 +10,13 @@ vi.mock('@/api/admin/accounts', () => ({
   resetOpenAIQuota: vi.fn(),
 }))
 
+// 组件读取全局 PAT 重置额度开关；spec 的账号均非 PAT，保持关闭即可还原默认交互。
+vi.mock('@/stores/adminSettings', () => ({
+  useAdminSettingsStore: () => ({
+    openaiCodexPATResetCreditsEnabled: false,
+  }),
+}))
+
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {

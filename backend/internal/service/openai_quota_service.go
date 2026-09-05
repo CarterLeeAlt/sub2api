@@ -23,6 +23,10 @@ import (
 // errors.Is still matches it by identity since ResetCredit returns this var.
 var ErrSparkShadowResetNotSupported = infraerrors.New(http.StatusConflict, "SPARK_SHADOW_RESET_NOT_SUPPORTED", "spark shadow account does not support credit reset; reset the parent account")
 
+// ErrOpenAIPATResetCreditsDisabled is returned when a Codex PAT account
+// attempts reset-credit access while the global PAT switch is disabled.
+var ErrOpenAIPATResetCreditsDisabled = infraerrors.New(http.StatusForbidden, "OPENAI_QUOTA_PAT_RESET_CREDITS_DISABLED", "Codex personal access token reset credits are disabled")
+
 // Endpoints used by the OpenAI/ChatGPT/Codex quota query and reset feature.
 const (
 	chatGPTUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
@@ -153,6 +157,8 @@ type OpenAIQuotaService struct {
 	privacyClientFactory PrivacyClientFactory
 	agentIdentityTaskMu  sync.Mutex
 	agentIdentityWS      agentIdentityWSConnectionInvalidator
+	// codexPATResetCreditsEnabled 读取全局 PAT 重置额度开关；nil 视为关闭。
+	codexPATResetCreditsEnabled func(context.Context) bool
 }
 
 // NewOpenAIQuotaService constructs a quota service. token provider is required —
@@ -169,6 +175,14 @@ func NewOpenAIQuotaService(
 		proxyRepo:            proxyRepo,
 		tokenProvider:        tokenProvider,
 		privacyClientFactory: privacyClientFactory,
+	}
+}
+
+// SetCodexPATResetCreditsEnabled injects the global PAT reset-credit capability
+// reader. A nil reader keeps the feature disabled for PAT accounts.
+func (s *OpenAIQuotaService) SetCodexPATResetCreditsEnabled(reader func(context.Context) bool) {
+	if s != nil {
+		s.codexPATResetCreditsEnabled = reader
 	}
 }
 
@@ -238,6 +252,9 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 
 	payload.FetchedAt = time.Now().Unix()
 	if !includeResetCreditDetails {
+		return &payload, nil
+	}
+	if !s.canUseResetCredits(ctx, accountID) {
 		return &payload, nil
 	}
 	details := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
@@ -372,6 +389,9 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 		if acc.IsShadow() {
 			return nil, ErrSparkShadowResetNotSupported
 		}
+		if acc.IsOpenAIPersonalAccessToken() && !s.isCodexPATResetCreditsEnabled(ctx) {
+			return nil, ErrOpenAIPATResetCreditsDisabled
+		}
 	}
 
 	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
@@ -426,6 +446,31 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 		"windows_reset", payload.WindowsReset,
 	)
 	return &payload, nil
+}
+
+// canUseResetCredits reports whether the account (resolving spark shadows to
+// their credential parent) may issue reset-credit requests. Non-PAT accounts
+// are always allowed; PAT accounts follow the global switch and fail closed
+// when the account, its parent, or the switch cannot be read.
+func (s *OpenAIQuotaService) canUseResetCredits(ctx context.Context, accountID int64) bool {
+	if s == nil || s.accountRepo == nil {
+		return false
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil || account == nil {
+		return false
+	}
+	if account.IsShadow() {
+		account, err = resolveCredentialAccount(ctx, s.accountRepo, account)
+		if err != nil || account == nil {
+			return false
+		}
+	}
+	return !account.IsOpenAIPersonalAccessToken() || s.isCodexPATResetCreditsEnabled(ctx)
+}
+
+func (s *OpenAIQuotaService) isCodexPATResetCreditsEnabled(ctx context.Context) bool {
+	return s != nil && s.codexPATResetCreditsEnabled != nil && s.codexPATResetCreditsEnabled(ctx)
 }
 
 // prepareUpstreamCall loads the account, validates it, obtains a fresh access

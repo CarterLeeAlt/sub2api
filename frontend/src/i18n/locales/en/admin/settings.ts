@@ -524,6 +524,9 @@ export default {
         openaiCodexVersionAutoSync: 'Auto-sync Codex version',
         openaiCodexVersionAutoSyncHint: 'Fetches the latest stable client version from the official repository every 6 hours, so you never need to upgrade this service just to keep the version current. When disabled, only the version above or the built-in default is used.',
         openaiCodexVersionSyncedValue: 'Currently synced: {version}',
+        openaiCodexPATResetCredits: 'Enable Codex PAT quota reset',
+        openaiCodexPATResetCreditsHint:
+          'Off by default. Codex Personal Access Token (at-) accounts are not currently authorized by the upstream to read or consume reset credits; enable only after OpenAI grants this capability to PATs. While off, PAT accounts do not request reset-credit details and cannot reset.',
         codexHardeningTitle: "Codex Settings",
         codexClientRestrictionTitle: "Codex client restriction",
         codexHardeningDesc:

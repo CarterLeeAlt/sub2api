@@ -889,6 +889,16 @@ func (s *SettingService) IsClientDatelineNormalizationEnabled(ctx context.Contex
 	return s.getGatewayForwardingSettingsCached(ctx).clientDatelineNormalization
 }
 
+// IsOpenAICodexPATResetCreditsEnabled reports whether Codex PAT accounts may
+// query reset-credit details or consume a reset credit. Missing values and read
+// failures deliberately fail closed.
+func (s *SettingService) IsOpenAICodexPATResetCreditsEnabled(ctx context.Context) bool {
+	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAICodexUserAgentDBTimeout)
+	defer cancel()
+	value, err := s.settingRepo.GetValue(dbCtx, SettingKeyOpenAICodexPATResetCreditsEnabled)
+	return err == nil && strings.TrimSpace(value) == "true"
+}
+
 // GetClaudeOAuthSystemPromptInjectionSettings returns the Claude OAuth mimic
 // system block switch, legacy custom expansion prompt, and configurable blocks JSON.
 // Empty values mean use the built-in Claude Code default blocks.

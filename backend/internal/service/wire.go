@@ -184,9 +184,13 @@ func ProvideOpenAIQuotaService(
 	tokenProvider *OpenAITokenProvider,
 	privacyClientFactory PrivacyClientFactory,
 	openAIGatewayService *OpenAIGatewayService,
+	settingService *SettingService,
 ) *OpenAIQuotaService {
 	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory)
 	service.agentIdentityWS = openAIGatewayService
+	if settingService != nil {
+		service.SetCodexPATResetCreditsEnabled(settingService.IsOpenAICodexPATResetCreditsEnabled)
+	}
 	return service
 }
 

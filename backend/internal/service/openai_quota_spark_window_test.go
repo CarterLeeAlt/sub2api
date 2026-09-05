@@ -694,6 +694,98 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 	require.NotEmpty(t, snapshot.FetchedAt)
 }
 
+func TestQueryUsagePATSkipsResetCreditDetailsWhenDisabled(t *testing.T) {
+	ctx := context.Background()
+	account := &Account{
+		ID:       300,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"chatgpt_account_id": "org-pat123",
+			"auth_mode":          OpenAIAuthModePersonalAccessToken,
+			"access_token":       "at-pat-token",
+		},
+	}
+	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{300: account}}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
+		OpenAITokenCacheKey(account): "at-pat-token",
+	}}
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
+
+	var detailCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			_ = json.NewEncoder(w).Encode(OpenAIQuotaUsage{
+				RateLimit:             &OpenAIRateLimit{},
+				RateLimitResetCredits: &OpenAIRateLimitResetCredits{AvailableCount: 2},
+			})
+		case "/backend-api/wham/rate-limit-reset-credits":
+			detailCalls++
+			_, _ = w.Write([]byte(`{"credits":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	usage, err := svc.QueryUsage(ctx, 300)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	require.Equal(t, 2, usage.RateLimitResetCredits.AvailableCount)
+	require.Equal(t, 0, detailCalls)
+
+	svc.SetCodexPATResetCreditsEnabled(func(context.Context) bool { return true })
+	usage, err = svc.QueryUsage(ctx, 300)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	require.Equal(t, 1, detailCalls)
+}
+
+func TestResetCreditPATDisabledFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	account := &Account{
+		ID:       301,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"chatgpt_account_id": "org-pat123",
+			"auth_mode":          OpenAIAuthModePersonalAccessToken,
+			"access_token":       "at-pat-token",
+		},
+	}
+	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{301: account}}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
+		OpenAITokenCacheKey(account): "at-pat-token",
+	}}
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
+
+	var consumeCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/backend-api/wham/rate-limit-reset-credits/consume" {
+			consumeCalls++
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	_, err := svc.ResetCredit(ctx, 301)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrOpenAIPATResetCreditsDisabled))
+	require.Equal(t, 0, consumeCalls)
+
+	svc.SetCodexPATResetCreditsEnabled(func(context.Context) bool { return true })
+	_, err = svc.ResetCredit(ctx, 301)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrOpenAIPATResetCreditsDisabled))
+	require.Equal(t, 1, consumeCalls)
+}
+
 func TestCacheResetCreditsSnapshot(t *testing.T) {
 	ctx := context.Background()
 
