@@ -431,7 +431,11 @@ func parseCodexSessionImportContent(content string) ([]any, error) {
 
 func parseCodexSessionImportLines(content string) ([]any, error) {
 	values := make([]any, 0)
+	// 报错行号必须追踪真实输入行：一条 JSON 可展开多个条目、空行会被跳过，
+	// len(values)+1 报的是"第几个条目"而非"第几行"，误导批量导入排错。
+	lineNumber := 0
 	for _, line := range strings.Split(content, "\n") {
+		lineNumber++
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -439,7 +443,7 @@ func parseCodexSessionImportLines(content string) ([]any, error) {
 		if looksLikeJSON(line) {
 			lineValues, err := decodeCodexJSONStream(line)
 			if err != nil {
-				return nil, fmt.Errorf("第 %d 行 JSON 解析失败: %w", len(values)+1, err)
+				return nil, fmt.Errorf("第 %d 行 JSON 解析失败: %w", lineNumber, err)
 			}
 			values = append(values, flattenCodexImportValues(lineValues)...)
 			continue

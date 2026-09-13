@@ -81,7 +81,10 @@ func mergeCodexModelsManifestBodies(bodies [][]byte) ([]byte, error) {
 				}
 				seenSlug[slug] = struct{}{}
 			} else {
-				fingerprint := string(bytes.TrimSpace(raw))
+				// 无 slug 条目按规范化 JSON 指纹去重：原始字节指纹会把
+				// 字段顺序/空白差异的同一条目误判为不同（多账号 manifest
+				// 经不同代理注入时常见），重复项透传给客户端。
+				fingerprint := canonicalCodexManifestFingerprint(raw)
 				if _, exists := seenSlugLess[fingerprint]; exists {
 					continue
 				}
@@ -222,4 +225,19 @@ func (s *OpenAIGatewayService) fetchPinnedOpenAIModels(ctx context.Context, grou
 		slog.Warn("openai_models_pinned_partial_failure", "group_id", group.ID, "failed_account_ids", failedIDs)
 	}
 	return successes, nil
+}
+
+// canonicalCodexManifestFingerprint 返回无 slug 条目的稳定指纹：先按通用
+// Go 类型往返一次（json.Unmarshal 到 any 会把对象键排序为 map 遍历序，
+// Marshal 再按键名字典序输出），空白与键序差异归一，值语义相同即同指纹。
+func canonicalCodexManifestFingerprint(raw json.RawMessage) string {
+	var value any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &value); err != nil {
+		return string(bytes.TrimSpace(raw))
+	}
+	normalized, err := json.Marshal(value)
+	if err != nil {
+		return string(bytes.TrimSpace(raw))
+	}
+	return string(normalized)
 }

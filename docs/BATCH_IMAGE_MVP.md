@@ -13,13 +13,20 @@ API users do not see Gemini file names, Vertex job names, GCS paths, signed URLs
 
 ```text
 POST   /v1/images/batches
+GET    /v1/images/batches
+GET    /v1/images/batches/models
 GET    /v1/images/batches/{id}
 GET    /v1/images/batches/{id}/items
 GET    /v1/images/batches/{id}/items/{custom_id}/content
 GET    /v1/images/batches/{id}/download
 POST   /v1/images/batches/{id}/cancel
 DELETE /v1/images/batches/{id}/outputs
+DELETE /v1/images/batches/{id}
 ```
+
+`GET /v1/images/batches` 列出当前调用方的批图任务；`GET /v1/images/batches/models`
+返回当前可用（定价解析通过、账号支持）的批图模型清单；`DELETE /v1/images/batches/{id}`
+删除任务记录（不删除已产出的图片文件， outputs 删除仍走专用端点）。
 
 Submit request:
 

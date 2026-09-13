@@ -445,12 +445,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			markDecodedModified()
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Normalized /responses image_generation tool payload")
 		}
-		// 只对 image-only 请求做动态主模型归一化，且仅限 OAuth（Codex 后端）
-		// 账号：非 OAuth 账号的 /responses 端点不提供 Codex slug，改写成
-		// gpt-5.6-luna 只会制造注定 404 的请求并误冷却 (account, slug)。
+		// 只对 image-only 请求做动态主模型归一化（API-key 直连账号同样适用，
+		// resolve 对非 OAuth 返回静态 fallback——该路径有 hotpath 测试背书）。
 		// OAuth 账号确认"没有可用图片主模型"时与 /v1/images 同源返回账号级
 		// failover（换号），而不是吞掉错误硬发注定失败的请求。
-		if imageOnlyModel := strings.TrimSpace(firstNonEmptyString(decoded["model"])); isOpenAIImageGenerationModel(imageOnlyModel) && account.IsOpenAIOAuth() {
+		if imageOnlyModel := strings.TrimSpace(firstNonEmptyString(decoded["model"])); isOpenAIImageGenerationModel(imageOnlyModel) {
 			resolved, resolveErr := s.resolveOpenAIImagesResponsesMainModel(ctx, account)
 			if resolveErr != nil {
 				logger.LegacyPrintf(

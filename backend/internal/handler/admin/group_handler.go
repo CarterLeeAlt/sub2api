@@ -906,58 +906,6 @@ func (h *GroupHandler) Delete(c *gin.Context) {
 	response.Success(c, gin.H{"message": "Group deleted successfully"})
 }
 
-// GetStats handles getting group statistics
-// GET /api/v1/admin/groups/:id/stats
-func (h *GroupHandler) GetStats(c *gin.Context) {
-	if h.rejectUnsupportedSimpleModeOperation(c, "stats") {
-		return
-	}
-	groupID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		response.BadRequest(c, "Invalid group ID")
-		return
-	}
-
-	totalAPIKeys, activeAPIKeys, err := h.adminService.GetGroupAPIKeyStats(c.Request.Context(), groupID)
-	if err != nil {
-		response.Error(c, 500, "Failed to get group API key stats")
-		return
-	}
-
-	var totalRequests int64
-	var totalCost float64
-	// dashboardService 在部分测试/最小构造下为 nil：此时 keys 统计照常返回，
-	// 用量聚合降级为 0（与构造签名 NewGroupHandler(adminSvc, nil, nil) 的可选语义一致）。
-	if h.dashboardService != nil {
-		// 全量口径的用量聚合：usage_logs 表按 created_at 过滤，起点锚定 Unix 纪元
-		// 覆盖全部历史记录。
-		stats, err := h.dashboardService.GetGroupStatsWithFilters(
-			c.Request.Context(),
-			time.Unix(0, 0), time.Now(),
-			0, 0, 0, groupID, nil, nil, nil,
-		)
-		if err != nil {
-			response.Error(c, 500, "Failed to get group usage stats")
-			return
-		}
-		for _, groupStat := range stats {
-			if groupStat.GroupID != groupID {
-				continue
-			}
-			totalRequests = groupStat.Requests
-			totalCost = groupStat.ActualCost
-			break
-		}
-	}
-
-	response.Success(c, gin.H{
-		"total_api_keys":  totalAPIKeys,
-		"active_api_keys": activeAPIKeys,
-		"total_requests":  totalRequests,
-		"total_cost":      totalCost,
-	})
-}
-
 // GetUsageSummary returns today's, yesterday's, and cumulative cost for all groups.
 // GET /api/v1/admin/groups/usage-summary
 func (h *GroupHandler) GetUsageSummary(c *gin.Context) {
