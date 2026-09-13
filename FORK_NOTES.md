@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`578785ee7`](https://github.com/Wei-Shaw/sub2api/commit/578785ee7fb35030b094b69624efe25670a36f5f)（`v0.2.1` 标签提交） |
-| 最近一次上游合并提交 | [`47cb55daf`](https://github.com/CarterLeeAlt/sub2api/commit/47cb55daf) |
+| 当前已同步上游节点 | [`bdb42e22f`](https://github.com/Wei-Shaw/sub2api/commit/bdb42e22f81fcb633ff0a060961211dd2bcb515b)（`v0.2.4` 标签提交 [`5de5e2bed`](https://github.com/Wei-Shaw/sub2api/commit/5de5e2bed035d43591a2e10e51f420ef6a84eb98) 及其后 main 顶端） |
+| 最近一次上游合并提交 | [`f6fbd8110`](https://github.com/CarterLeeAlt/sub2api/commit/f6fbd81107c06f60dcd9a3dd5270581717e22bb0) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -298,6 +298,17 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已知上游合并处理
 
+### 2026-09-13：同步至上游 `bdb42e22f`（v0.2.4 及其后）
+
+- 从本地节点 `362892752` 以普通 `--no-ff` merge 合入上游 main 顶端 `bdb42e22f`（共同祖先即上一同步点 `578785ee7`/`v0.2.1`，上游侧 323 个提交、688 个文件；覆盖 `v0.2.2`/`v0.2.3`/`v0.2.4` 三个标签及其后 142 个提交）；合并前创建备份分支 `backup/pre-upstream-merge-20260913-36289275`，合并前以 `git merge-tree` 试合并确认 11 个冲突文件。`backend/cmd/server/VERSION` 取上游 `0.2.4`。
+- 上游主要新能力随合并接入：OpenCode 平台（Zen/GO 账户类型）、MiniMax 平台、OpenAI 原生 Codex Images 直调端点与 404 回退（`openai_images_direct.go`，`usesCodexDirectImages` 显式白名单）、Codex WS 连接池常驻读循环与线程标识执行作用域、group 模型白名单网关级强制（breaking）、可见模型清单网关取模、站点类型三态开关、管理端用户删除、订阅-用量关联、OpenAI 周成本估算、月/年过期预设等。
+- `ratelimit_service.go`（语义抉择）：上游 `5fea83dca` 对"未耗尽 429"改为主张 reset-after 头不能证明耗尽、回落可配置短冷却（避免瞬时 429 长期排除账号），与 fork [`f58caad00`](https://github.com/CarterLeeAlt/sub2api/commit/f58caad00d5d9e7251eeb6ad2d61ce3b9d7609f6) 的"取最长窗口重置点 + 快照提前恢复"兜底互斥；经确认采纳上游语义并移除 fork 兜底块。fork 的 WHAM 快照配额 429 恢复机制（`ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged` 等，作用于 100% 耗尽路径）完整保留；`recoveryThreshold` 参数保留在 `calculateOpenAI429ResetDecision` 签名中（当前仅由结构化 provenance 消费），清除上游遗留的死归一化赋值（golangci-lint ineffassign）。单测同步改写：`TestHandle429_OpenAIQuotaProvenanceUsesEffectiveThreshold` 改为钉 7d=100% 耗尽时 provenance 仍记录账户有效阈值（95），新增 `TestHandle429_OpenAISubThresholdQuota429FallsBackToGenericCooldown` 钉未耗尽回落行为。
+- `openai_images_responses.go`（语义合并）：保留上游 `direct` 直调分支结构（`targetURL`/404 回退/头部差异均依赖），在非 direct 分支保留 fork 的 manifest 动态主模型解析（`resolveOpenAIImagesResponsesMainModel` + `buildOpenAIImagesResponsesRequestForMainModel`）；`resolveErr` 命名避免内层 err 遮蔽（lint ineffassign）。
+- `upstream_models.go` / `upstream_models_openai_oauth.go`（语义合并）：上游将 `buildOpenAIUpstreamModelsRequest` 重构为 OAuth→`buildOpenAIOAuthUpstreamModelsRequest`/API-key→共享构造器的分发并在管理端同步按钮落地 OAuth 支持；补回合并丢失的上游新函数后，fork 的 `fetchOpenAIOAuthUpstreamModels` 适配为双传输：`s.httpUpstream` 存在时复用上游统一构造器与 `doUpstreamModelsRequest` 并返回原始 body（使上游新增 `TestCodexContextWindowSyncRoundTrip` 等注入式测试可行），否则保留网关 `FetchCodexModelsManifest` 回退（空版本参数与上游 `CodexCanonicalClientVersion()` 解析链一致）；`supported_in_api` 过滤与 `gpt-image-2` 追加规则不变（CUSTOM-001/002 保持 `active`）。
+- 11 处文本冲突逐文件处理：`wire_gen.go`/`api_contract_test.go` 的 `NewAdminService` 调用按合并后 24 参签名（上游新增 `cfg` 首参 + fork 保留 `thresholdReconciler`）；`scheduler_cache.go` 取上游注释；`cn_provider_balance_check_service_test.go` 取上游语义（MiniMax coding 进额度探测 `{1,2,4,5}`）+ fork 线程安全 `probedIDs()` 访问器；`plugin_package.go` 取上游 `closeArchive` 闭包（与 fork `08305d028` Windows 句柄修复同语义、含防双重关闭，fork 版可视为 upstreamed）；`EditAccountModal.vue` 取上游 `isCNProviderPlatform`/`opencode_go` 结构并在初始化与保存两处保留 DeepSeek coding→payg 归一化（保存处经 `currentOpenCodeOrCNMode()`）；`onboarding.css` 同时保留 fork 字重 600（自托管字体）与上游 `text-shadow: none`。
+- 未恢复自动用卡、一次性生图迁移工作流、Codex 动态窗口显隐与 `useSwipeSelect.ts`；上游新增迁移随合并接入。
+- 验证：`go build ./...`、`go vet ./...`、全后端 `go test ./...`（仅 3 个既有 AliyunCaptcha Windows httptest flake，复跑 `internal/repository` 全绿）、CI 门禁同款 `go test -tags=unit ./internal/service -count=1` 全绿；golangci-lint 2.13.0 `0 issues`（修正 2 处 ineffassign）；前端 `pnpm build`（i18n 完整性检查 + vue-tsc + Vite 生产构建）通过。工具链为工作区 `.toolchains/` 便携版（Go 1.27.0、Node 22.20.0、pnpm 10.34.5、golangci-lint 2.13.0）。
+
 ### 2026-09-06：同步至上游 `578785ee7`（v0.2.1）
 
 - 从本地节点 `bfc446702` 以普通 `--no-ff` merge 合入上游 `v0.2.1` 标签提交（共同祖先即上一同步点 `2ac784c51a`/`v0.1.185`，上游侧 82 个提交）；合并前创建备份分支 `backup/pre-upstream-merge-20260906-bfc446702`。上游 `v0.2.1` 标签处 VERSION 文件滞后为 `0.2.0`，merge commit 中手动将 `backend/cmd/server/VERSION` 置为 `0.2.1`。
@@ -489,6 +500,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 37 | [`24635d431`](https://github.com/CarterLeeAlt/sub2api/commit/24635d431b478b2556b209b74f310d62b0b09f43) | 上游同步 | 合并上游 `7634e3c23b`（`v0.1.183`），接入 Responses 工具调用 ID、邮箱 alias 并发守卫、Antigravity token clamp、Kimi 403 可恢复、Codex `session-id` 和粘性容量溢出修复；保留 OAuth manifest/动态生图、WHAM/CAS/周期额度快照和手动额度重置，排除自动用卡。 |
 | 38 | [`7845cf411`](https://github.com/CarterLeeAlt/sub2api/commit/7845cf411) | 上游同步 | 合并上游 `2ac784c51a`（`v0.1.185`），接入 routed catalog、Spark 模型级 429、图像能力丢失冷却、Fable 模型级阈值、原子配额重置与推理强度列上游实现；`CachePostResetSnapshot` 按 fork CAS 语义落地并退役 [`18f5f3a41`](https://github.com/CarterLeeAlt/sub2api/commit/18f5f3a41) 旧版推理强度展示，继续排除自动用卡。 |
 | 39 | [`47cb55daf`](https://github.com/CarterLeeAlt/sub2api/commit/47cb55daf) | 上游同步 | 合并上游 `578785ee7`（`v0.2.1`），接入 GPT-6 Astra（模型注册/定价/归一化/能力持久化）、ultrafast service tier、group 级 Codex manifest 钉定配置、compact 账号列表与 upstream request-id 校验；维持删除自动用卡，保留 CUSTOM-001/009/011/012 定制。 |
+| 40 | [`f6fbd8110`](https://github.com/CarterLeeAlt/sub2api/commit/f6fbd81107c06f60dcd9a3dd5270581717e22bb0) | 上游同步 | 合并上游 `bdb42e22f`（`v0.2.4` 及其后 main 顶端），接入 OpenCode/MiniMax 平台、Codex Images 直调与 WS 连接池、group 模型白名单强制等；未耗尽 429 经确认采纳上游可配置冷却语义并改写对应单测，OAuth manifest 同步适配双传输并保留 `supported_in_api` 过滤与 `gpt-image-2` 追加，维持删除自动用卡。 |
 
 ## 下次同步检查清单
 
