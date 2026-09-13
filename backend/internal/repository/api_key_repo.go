@@ -732,19 +732,6 @@ func (r *apiKeyRepository) CountByGroupID(ctx context.Context, groupID int64) (i
 	return int64(count), err
 }
 
-// CountGroupAPIKeyStats 返回分组的 API Key 总数与启用数（均为未删除记录）。
-func (r *apiKeyRepository) CountGroupAPIKeyStats(ctx context.Context, groupID int64) (total int64, active int64, err error) {
-	total, err = r.CountByGroupID(ctx, groupID)
-	if err != nil {
-		return 0, 0, err
-	}
-	activeCount, err := r.activeQuery().Where(apikey.GroupIDEQ(groupID), apikey.StatusEQ(service.StatusActive)).Count(ctx)
-	if err != nil {
-		return 0, 0, err
-	}
-	return total, int64(activeCount), nil
-}
-
 func (r *apiKeyRepository) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
 	keys, err := r.activeQuery().
 		Where(apikey.UserIDEQ(userID)).

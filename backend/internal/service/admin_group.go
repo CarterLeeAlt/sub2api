@@ -1233,10 +1233,6 @@ func (s *adminServiceImpl) GetGroupAPIKeys(ctx context.Context, groupID int64, p
 	return keys, result.Total, nil
 }
 
-func (s *adminServiceImpl) GetGroupAPIKeyStats(ctx context.Context, groupID int64) (total int64, active int64, err error) {
-	return s.apiKeyRepo.CountGroupAPIKeyStats(ctx, groupID)
-}
-
 func (s *adminServiceImpl) GetGroupRateMultipliers(ctx context.Context, groupID int64) ([]UserGroupRateEntry, error) {
 	if err := s.ValidateSimpleModeGroupOperation(AdminGroupOperationMultiplier); err != nil {
 		return nil, err

@@ -40,8 +40,10 @@ func TestGenericRateLimitWritesInvalidateCodexQuotaProvenance(t *testing.T) {
 		resetAt := time.Now().UTC().Add(time.Hour)
 		mock.ExpectExec(`(?s)`+regexp.QuoteMeta("WITH updated AS (")+`.*`+
 			regexp.QuoteMeta("extra = COALESCE(extra, '{}'::jsonb) - $3")+`.*`+
+			regexp.QuoteMeta("OR rate_limit_reset_at < $2")+`.*`+
 			regexp.QuoteMeta("INSERT INTO scheduler_outbox")).
-			WithArgs(sqlmock.AnyArg(), resetAt, service.OpenAICodexRateLimitStateExtraKey, int64(44), service.SchedulerOutboxEventAccountChanged).
+			WithArgs(sqlmock.AnyArg(), resetAt, service.OpenAICodexRateLimitStateExtraKey, int64(44),
+				service.SchedulerOutboxEventAccountChanged, service.PlatformOpenAI, service.AccountTypeOAuth).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 
 		repo := newAccountRepositoryWithSQL(nil, db, nil)

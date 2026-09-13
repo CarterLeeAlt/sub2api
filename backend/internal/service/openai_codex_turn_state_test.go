@@ -186,7 +186,10 @@ func TestGuardOpenAICodexTurnStateEcho(t *testing.T) {
 		require.Equal(t, "blob-unknown", h.Get("x-codex-turn-state"))
 	})
 
-	t.Run("expired_provenance_passthrough_and_pruned", func(t *testing.T) {
+	// 过期只影响记录留存，不影响本次剥离判定：手里已有铸造账号，异账号回带
+	// 必须剥离（sticky TTL 过期 + 客户端回带旧 blob + 调度切号同时发生时，
+	// 放行正是守卫要防的跨账号矛盾信号）。
+	t.Run("expired_provenance_still_strips_foreign_account_and_pruned", func(t *testing.T) {
 		svc := &OpenAIGatewayService{}
 		c, _ := newTurnStateTestContext(t, 7, "sess-g4")
 		svc.openaiCodexTurnStateOrigins.Store("7\x00sess-g4", openAICodexTurnStateOrigin{
@@ -195,9 +198,21 @@ func TestGuardOpenAICodexTurnStateEcho(t *testing.T) {
 		})
 		h := newOutbound("blob-A")
 		svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 43}, h)
-		require.Equal(t, "blob-A", h.Get("x-codex-turn-state"))
+		require.Empty(t, h.Get("x-codex-turn-state"), "过期记录仍须按铸造账号剥离异账号 blob")
 		_, ok := svc.openaiCodexTurnStateOrigins.Load("7\x00sess-g4")
-		require.False(t, ok)
+		require.False(t, ok, "过期记录在判定后仍被清理")
+	})
+
+	t.Run("expired_provenance_same_account_passthrough", func(t *testing.T) {
+		svc := &OpenAIGatewayService{}
+		c, _ := newTurnStateTestContext(t, 7, "sess-g4b")
+		svc.openaiCodexTurnStateOrigins.Store("7\x00sess-g4b", openAICodexTurnStateOrigin{
+			accountID: 43,
+			expiresAt: time.Now().Add(-time.Minute),
+		})
+		h := newOutbound("blob-A")
+		svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 43}, h)
+		require.Equal(t, "blob-A", h.Get("x-codex-turn-state"))
 	})
 
 	t.Run("no_session_seed_noop", func(t *testing.T) {

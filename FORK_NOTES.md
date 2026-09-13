@@ -47,9 +47,9 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 
 ### CUSTOM-002：OpenAI OAuth 动态生图主模型（`active`）
 
-生图能力不再绑定固定的 `gpt-5.4-mini`。系统根据 Codex manifest 为当前 OAuth 账户选择支持图像输入的 Responses 主模型：
+生图能力不绑定固定主模型。系统根据 Codex manifest 为当前 OAuth 账户选择支持图像输入的 Responses 主模型（历史演进：`gpt-5.4-mini` → 现默认 `gpt-5.6-luna`，常量 `openAIImagesResponsesMainModel`，可被 env `SUB2API_IMAGES_MAIN_MODEL` 覆盖）：
 
-- manifest 中存在 `gpt-5.4-mini` 且可用时仍优先选择它；
+- manifest 中存在默认主模型（当前为 `gpt-5.6-luna`）且可用时仍优先选择它；
 - 否则按 manifest 的 `priority` 选择可用模型，并用模型名保证同优先级下结果稳定；
 - 缺少 `input_modalities` 时沿用 Codex 的兼容语义，视为支持文本和图像；
 - `free` 或无法确定套餐的账户不暴露 `gpt-image-2`；
@@ -592,3 +592,47 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 - `internal/service` 包大量测试文件在并行测试中直调 `gin.SetMode(gin.TestMode)`，写 gin 包级模式变量；`-race` 下并行执行互报数据竞争（生产无此模式，项目门禁 `go test -tags=unit` 不带 `-race` 故从未暴露）。`openai_compat_model_test.go` 已改为 `sync.Once` helper 作为示范，包级统一改造留待与上游协调（机械替换会在每次上游同步时制造冲突面）。
 - `grok_free_quota_gate_test.go:241` 整体重赋值全局 `openaiGrokFreeQuotaGateCache`，与先前测试残留的后台刷新 goroutine 构成竞争（仅测试环境；生产路径从不重赋值该全局）。
 - 本轮全部改动区域（WS 连接池/透传 adapter/ingress/生图守卫/配额刷新/SSE 解析/影子健康）经 `-race` 定向验证干净。
+
+## 2026-09-14 全面审查修复轮
+
+第二轮分区深度审查（WS 四路径 / Codex 协议核心 / 调度限流配额 / 生图链路 / apicompat / 横切面）后的修复记录。与上游语义相关的决策如下，上游同步时必须复核：
+
+### WS 原生路径与 HTTP 路径补齐（上轮"对齐"只覆盖了消费侧）
+
+- **turn-state**：WS v2 握手铸造 blob 处补 `noteOpenAICodexTurnStateProvenance`（此前溯源表只有 HTTP 写入，守卫对 WS 铸造值永久盲区）；`BindSessionTurnState/GetSessionTurnState` 增加铸造账号维度（`accountID=0` 历史数据保持放行）；passthrough adapter 在拨号头组装前补守卫（modeRouter 提前 return 曾完全绕开 ingress 守卫）。
+- **指纹收敛（#5553）**：WS v2 forwarder / ingress / passthrough adapter 三处补 resolve→stage 生产点。此前 WS 侧只有消费没有生产，收敛在该路径静默失效。
+- **生图并发槽**：`OpenAIWSIngressHooks` 新增 `ImageSlotAcquire`，ingress 主循环与 http_bridge 循环按 turn 粒度占/释 `ImageConcurrency` 槽位（桥接注入升级的意图经 `imageBillingModel` 信号覆盖）。此前 WS ingress 注入桥接工具却完全绕过生图并发治理。
+
+### 阈值停调恢复权威化（收口上轮"留待下轮"偏差，CUSTOM-006）
+
+- 恢复判定（`shouldClearOpenAISchedulingThresholdPause`）新鲜度锚从多来源秒级 `codex_usage_updated_at` 换成 `codex_wham_usage_updated_at` 纳秒代际；百分比只读 WHAM 专写键 `codex_wham_<w>_used_percent`（`buildCodexWhamRateLimitExtraUpdates` 落库，头路径不写）。**代价（有意）**：WHAM 长期不可用时账号停留停调直到窗口重置，不再被头数据提前放出来。
+- **阈值放宽立即生效**（产品决策）：恢复判定使用当前生效阈值（账号 override → 当前全局表 → 触发时记录值兜底）；`AccountUsageService`/`OpenAIQuotaSnapshotRefreshService` 新增可选 `SetSettingService` 接线。
+- 429 路径头快照（`persistOpenAICodexSnapshot`）改走 `UpdateCodexUsageExtraIfNewer` 单调守卫；通用 `SetRateLimited` 对 OpenAI OAuth 账号加"只延长"守卫（瞬时在途 429 不再覆盖数天级配额边界并删除 WHAM 恢复 marker）；WHAM 落库不再回退次要时间戳 `codex_usage_updated_at`（SQL 条件合并）。
+
+### ctx_pool current-turn 重放
+
+- sendAndRelay 的 429 failover 错误在主循环收尾处以 `newOpenAIWSCurrentTurnFailoverError` 包装（账号无关原始帧 + 全量 input 序列，与 http_bridge 同构）。此前第 N>1 轮被 429 换号会把会话首包重放给新账号，客户端收到错位回答。
+
+### passthrough 流写竞态与其他管道修复
+
+- `ensureResponseFailedTerminal` 前无条件 `stopKeepalive`（零输出路径心跳未停，与终态写并发写同一原始 ResponseWriter）。
+- forwarder_v2 的 error/response.failed 客户端写出副本补 `sanitizeOpenAICapacityShedErrorCodeForClient`（原三条路径已覆盖，Codex CLI 对原始降载码判致命）。
+- staged 头被 keepalive 抢跑（`Written()` 后无法补发头）确认为物理限制：头丢失可接受，且此时**不应**补记溯源（客户端未收到该 blob，记录反而污染守卫）——该路径行为保持，仅注释说明。
+- turn-state 溯源过期分支改为"先按铸造账号判定剥离、再删除记录"；ingress ctx_pool 对非 JSON 上游帧 MarkBroken（与 forwarder_v2 口径一致）；WS turn 2+ 的 usage 记录按当轮 payload 刷新哈希。
+
+### 生图链路
+
+- `/v1/responses` image-only 归一化加 OAuth 门控（非 OAuth 账号不再被改写成 Codex slug）；解析失败与 `/v1/images` 同源返回账号级 failover；`input_fidelity` 进 Responses 桥接透传清单；plan-gated 主模型守卫移到错误透传规则与 `ShouldHandleErrorCode` 之前。
+- **批量生图仅支持按张计费**（产品决策）：`BatchImageUnitPrice` 对 token 计费模式显式拒绝（此前把每 token 价当每张价，几乎免费出图）；此类模型不进可用列表、提交即报错，走普通生图入口。
+- 批图 indexing 持久性故障（输出丢失、provider 摘除）加重试上界（5 次，与 settlement 一致），超限转 failed 并释放冻结；`IncrementBatchImageJobIndexRetry` 为新增 repo 方法；成功计数按解析 ImageCount 而非行数；async image 任务崩溃后滞留 processing 由轮询惰性 reaper 转超时失败。
+
+### 协议与其他
+
+- apicompat：未映射 Responses 输出项（local_shell/mcp/tool_search）维持丢弃但记 warn 日志（产品决策）；`response.failed` 兜底映射 stop 记日志；显式小 `max_tokens` 不再被 clamp 到 128（尊重客户端约束）；终态 output 复用流中 item ID；块 stop 后迟到的工具参数 delta 丢弃并记日志。
+- `normalizeCodexToolChoice` 的 function 分支补 `input.additional_tools` 双查；悬空 `item_reference`（指向已剥 rs_* 的 reasoning 项）丢弃（#1957 同族）。
+- 指纹 seed：ensure SQL 与 backfill 迁移 239 覆盖 setup-token（运行时判定早已接受该类型，两套口径不一致导致经 API 直设收敛模式时静默失效）。
+- pinned manifest 合并对无 slug 条目按规范化 JSON 指纹去重。
+- **删除分组统计接口**（产品决策）：`GET /admin/groups/:id/stats` 端点、`AdminService.GetGroupAPIKeyStats`、`APIKeyRepository.CountGroupAPIKeyStats`、前端 `groupsAPI.getStats` 一并移除——无前端消费者且全历史聚合有慢查询隐患，日后需要时从 git 历史恢复。
+- 删除死文件 `backend/internal/service/prompts/codex_opencode_bridge.txt`（全库零引用）。
+- Codex 批量导入报错行号改为追踪真实输入行（原 `len(values)+1` 在多条目/空行场景错位）。
+

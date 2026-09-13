@@ -43,7 +43,6 @@ func setupAdminRouter() (*gin.Engine, *stubAdminService) {
 	router.POST("/api/v1/admin/groups", groupHandler.Create)
 	router.PUT("/api/v1/admin/groups/:id", groupHandler.Update)
 	router.DELETE("/api/v1/admin/groups/:id", groupHandler.Delete)
-	router.GET("/api/v1/admin/groups/:id/stats", groupHandler.GetStats)
 	router.GET("/api/v1/admin/groups/:id/api-keys", groupHandler.GetGroupAPIKeys)
 
 	router.GET("/api/v1/admin/proxies", proxyHandler.List)
@@ -255,10 +254,7 @@ func TestGroupHandlerEndpoints(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/admin/groups/2/stats", nil)
-	router.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
+	// groups/:id/stats 端点已随分组统计功能移除（FORK_NOTES 2026-09-14 轮）。
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/admin/groups/2/api-keys", nil)
