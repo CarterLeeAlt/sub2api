@@ -3,6 +3,7 @@ package apicompat
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -63,9 +64,6 @@ func AnthropicToChatCompletionsRequest(req *AnthropicRequest) (*ChatCompletionsR
 
 	if req.MaxTokens > 0 {
 		v := req.MaxTokens
-		if v < minMaxOutputTokens {
-			v = minMaxOutputTokens
-		}
 		out.MaxCompletionTokens = &v
 	}
 
@@ -830,15 +828,21 @@ func handleCCAnthropicToolCall(state *ChatCompletionsToAnthropicStreamState, too
 			blockIdx := state.toolBlockIndex[idx]
 			if state.ContentBlockOpen && blockIdx == state.ContentBlockIndex {
 				state.CurrentToolHadDelta = true
+				events = append(events, AnthropicStreamEvent{
+					Type:  "content_block_delta",
+					Index: &blockIdx,
+					Delta: &AnthropicDelta{
+						Type:        "input_json_delta",
+						PartialJSON: toolCall.Function.Arguments,
+					},
+				})
+			} else {
+				// 迟到的参数片段：该工具块已 content_block_stop（交错流式的
+				// 非规范上游才会出现）。指向已关闭块索引的 input_json_delta
+				// 会被严格客户端（Claude Code）拒绝，丢弃并记日志。
+				slog.Warn("apicompat.anthropic_late_tool_delta_dropped",
+					"tool_index", idx, "block_index", blockIdx)
 			}
-			events = append(events, AnthropicStreamEvent{
-				Type:  "content_block_delta",
-				Index: &blockIdx,
-				Delta: &AnthropicDelta{
-					Type:        "input_json_delta",
-					PartialJSON: toolCall.Function.Arguments,
-				},
-			})
 		} else {
 			state.pendingToolArgs[idx] += toolCall.Function.Arguments
 		}

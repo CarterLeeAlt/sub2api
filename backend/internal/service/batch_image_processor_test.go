@@ -640,6 +640,18 @@ func (r *fakeBatchImageRepository) MarkBatchImageJobSettled(_ context.Context, p
 	return nil
 }
 
+func (r *fakeBatchImageRepository) IncrementBatchImageJobIndexRetry(_ context.Context, batchID, code, message string) (int, error) {
+	job, ok := r.jobs[batchID]
+	if !ok {
+		return 0, ErrBatchImageJobNotFound
+	}
+	job.LastErrorCode = batchImageStringPtr(code)
+	job.LastErrorMessage = batchImageOptionalStringPtr(message)
+	job.RetryCount++
+	r.events[batchID] = append(r.events[batchID], "index_retry_failed")
+	return job.RetryCount, nil
+}
+
 func (r *fakeBatchImageRepository) SetBatchImageJobSettlementFailed(_ context.Context, batchID, code, message string) (int, error) {
 	job, ok := r.jobs[batchID]
 	if !ok {

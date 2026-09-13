@@ -383,7 +383,10 @@ func normalizeCodexToolChoice(reqBody map[string]any) bool {
 			delete(choiceMap, "function")
 			modified = true
 		}
-		if !codexToolsContainFunctionName(reqBody["tools"], name) {
+		// Responses Lite 的 function 工具可声明在 input.additional_tools，
+		// 只查顶层 tools 会把强制选择错误降级为 auto（与下方非 function
+		// 类型的双查口径一致）。
+		if !codexToolsContainFunctionName(reqBody["tools"], name) && !codexInputAdditionalToolsContainFunctionName(reqBody["input"], name) {
 			reqBody["tool_choice"] = "auto"
 			return true
 		}
@@ -394,6 +397,23 @@ func normalizeCodexToolChoice(reqBody map[string]any) bool {
 	}
 	reqBody["tool_choice"] = "auto"
 	return true
+}
+
+func codexInputAdditionalToolsContainFunctionName(rawInput any, name string) bool {
+	input, ok := rawInput.([]any)
+	if !ok || strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok || strings.TrimSpace(firstNonEmptyString(item["type"])) != "additional_tools" {
+			continue
+		}
+		if codexToolsContainFunctionName(item["tools"], name) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexInputAdditionalToolsContainType(rawInput any, toolType string) bool {
@@ -1638,6 +1658,19 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 	referenceIDMappings := codexItemReferenceIDMappings(input, opts.PreserveCallIDs)
 	inputItemIDs := codexInputItemIDs(input)
 	inputCallIDs := codexInputCallIDs(input)
+	// reasoning 项的 id 在下方分支被无条件剥离（store=false 下回放 rs_* 404，
+	// issue #1957）；指向这些项的 item_reference 因此悬空——同样的 id 查找会
+	// 404。收集这些 id，引用命中时丢弃引用本身（reasoning 项仍随 input 发送）。
+	unreferenceableItemIDs := make(map[string]struct{})
+	for _, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok || strings.TrimSpace(firstNonEmptyString(item["type"])) != "reasoning" {
+			continue
+		}
+		if id := strings.TrimSpace(firstNonEmptyString(item["id"])); id != "" {
+			unreferenceableItemIDs[id] = struct{}{}
+		}
+	}
 	for _, item := range input {
 		m, ok := item.(map[string]any)
 		if !ok {
@@ -1693,6 +1726,13 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 		if typ == "item_reference" {
 			if !opts.PreserveReferences {
 				continue
+			}
+			// 引用指向 id 被无条件剥离的 reasoning 项：上游按 id 查找会 404
+			// （与 #1957 同族的 store=false 症状），丢弃悬空引用。
+			if trimmedRef := strings.TrimSpace(firstNonEmptyString(m["id"])); trimmedRef != "" {
+				if _, dangling := unreferenceableItemIDs[trimmedRef]; dangling {
+					continue
+				}
 			}
 			newItem := make(map[string]any, len(m))
 			for key, value := range m {

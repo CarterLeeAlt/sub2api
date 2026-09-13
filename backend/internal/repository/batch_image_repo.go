@@ -336,6 +336,27 @@ WHERE batch_id = $1
 	return appendBatchImageEventWithSQL(ctx, sqlq, params.BatchID, "settlement_completed", params.EventPayload)
 }
 
+// IncrementBatchImageJobIndexRetry 记录一次 indexing 阶段的可重试失败并递增
+// retry_count，返回递增后的计数值。processor 据此判断是否放弃无限 requeue
+// （输出永久丢失 / provider 被摘除的 job 会把冻结余额无限期占用）。
+func (r *batchImageRepository) IncrementBatchImageJobIndexRetry(ctx context.Context, batchID, code, message string) (int, error) {
+	var retryCount int
+	err := r.sql.QueryRowContext(ctx, `
+UPDATE batch_image_jobs
+SET last_error_code = $2,
+    last_error_message = $3,
+    retry_count = retry_count + 1,
+    updated_at = $4
+WHERE batch_id = $1
+RETURNING retry_count`, batchID, code, message, time.Now()).Scan(&retryCount)
+	if err != nil {
+		return 0, translatePersistenceError(err, service.ErrBatchImageJobNotFound, nil)
+	}
+	return retryCount, appendBatchImageEventWithSQL(ctx, r.sql, batchID, "index_retry_failed", map[string]any{
+		"error_code": code,
+	})
+}
+
 func (r *batchImageRepository) SetBatchImageJobSettlementFailed(ctx context.Context, batchID, code, message string) (int, error) {
 	var retryCount int
 	err := r.sql.QueryRowContext(ctx, `

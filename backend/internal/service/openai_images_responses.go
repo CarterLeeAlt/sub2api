@@ -422,6 +422,11 @@ func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel st
 		{path: "output_format", value: parsed.OutputFormat},
 		{path: "moderation", value: parsed.Moderation},
 		{path: "style", value: parsed.Style},
+		// input_fidelity 控制编辑保真（high 时保留输入图细节）。直调路径
+		// 透传该字段；Responses 桥接此前静默丢弃，编辑行为与直调不一致。
+		// gpt-image-2 工具仍由 normalizeOpenAIResponsesImageGenerationTools
+		// 按既有语义剥离。
+		{path: "input_fidelity", value: parsed.InputFidelity},
 	} {
 		if trimmed := strings.TrimSpace(field.value); trimmed != "" {
 			tool, _ = sjson.SetBytes(tool, field.path, trimmed)
@@ -943,6 +948,22 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 		)
 	}
 
+	// 主控不可用不代表图片模型配额耗尽，直接透传，避免误冷却整个图片账号池。
+	if account.IsOpenAIOAuthLike() && isOpenAIImagesMainModelErrorForRequest(ctx, resp.StatusCode, body) {
+		upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
+		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
+		return nil, upErr
+	}
+	// plan-gated 主模型守卫必须先于 applyErrorPassthroughRule 与
+	// ShouldHandleErrorCode：账号自定义错误码排除 400 时，若守卫排在
+	// ShouldHandleErrorCode 之后，400 会先被通用 500 分支吞掉，透传守卫
+	// 不可达（上轮"plan-gated 透明透传"修复被短路）。
+	if account.IsOpenAIOAuthLike() && isOpenAIImagesMainModelErrorForRequest(ctx, resp.StatusCode, body) {
+		upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
+		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
+		return nil, upErr
+	}
+
 	// Honor admin-configured error passthrough rules first.
 	if status, errType, errMsg, matched := applyErrorPassthroughRule(
 		c,
@@ -989,12 +1010,6 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 		return nil, upErr
 	}
 
-	// 主控不可用不代表图片模型配额耗尽，直接透传，避免误冷却整个图片账号池。
-	if account.IsOpenAIOAuthLike() && isOpenAIImagesMainModelErrorForRequest(ctx, resp.StatusCode, body) {
-		upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
-		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
-		return nil, upErr
-	}
 	// Track rate limits / decide whether to disable the account (secondary failover).
 	var modelForCooldown string
 	if len(requestedModel) > 0 {

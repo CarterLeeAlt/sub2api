@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -69,7 +70,16 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 				}
 			}
 		case "web_search_call":
-			// silently consumed — results already incorporated into text output
+			// results already incorporated into text output
+		default:
+			// local_shell_call / mcp_tool_call / tool_search_call 等未映射的
+			// 输出项目前被刻意丢弃（产品决策：chat 客户端无法执行此类工具）。
+			// 丢弃必须是可观测的：静默蒸发会让调用方无从解释"上游说调了工具
+			// 但回复里没有"，这里记日志供排查。
+			if item.Type != "" {
+				slog.Warn("apicompat.responses_output_item_dropped",
+					"item_type", item.Type, "response_id", resp.ID)
+			}
 		}
 	}
 
@@ -263,6 +273,12 @@ func resToChatHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 	// function_call 与 custom_tool_call（custom/freeform 工具）均按工具调用注册，
 	// 以便后续 *_input.delta / *_arguments.delta 能映射到正确的工具索引。
 	if evt.Item == nil || (evt.Item.Type != "function_call" && evt.Item.Type != "custom_tool_call") {
+		// 未注册的 added 类型（local_shell_call 等）在 done 阶段也会被丢弃，
+		// 在这里记日志让"工具调用静默蒸发"可观测（与终态 default 分支同口径）。
+		if evt.Item != nil && evt.Item.Type != "" && evt.Item.Type != "message" && evt.Item.Type != "reasoning" && evt.Item.Type != "web_search_call" {
+			slog.Warn("apicompat.responses_output_item_dropped",
+				"item_type", evt.Item.Type, "stream", true)
+		}
 		return nil
 	}
 
@@ -342,6 +358,13 @@ func resToChatHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 func resToChatHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
 	state.Finalized = true
 	finishReason := "stop"
+	if evt.Response != nil && evt.Response.Status == "failed" {
+		// response.failed 走到这里说明当前消费方未前置拦截错误事件（现网唯一
+		// 消费方 openai_gateway_chat_completions 已拦截）。兜底映射为 stop 会
+		// 让客户端把失败当正常完成——记日志以便新增消费方时发现缺口。
+		slog.Warn("apicompat.response_failed_mapped_to_stop",
+			"response_id", evt.Response.ID)
+	}
 
 	if evt.Usage != nil {
 		state.Usage = chatUsageFromResponsesUsage(evt.Usage)

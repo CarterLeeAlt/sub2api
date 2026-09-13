@@ -55,10 +55,9 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 		maxTokens = *req.MaxCompletionTokens
 	}
 	if maxTokens > 0 {
+		// 客户端显式设置的上限原样透传（含小于旧下限 128 的合法小值）——
+		// 强行 clamp 会改写客户端约束，导致输出与计费超出请求边界。
 		v := maxTokens
-		if v < minMaxOutputTokens {
-			v = minMaxOutputTokens
-		}
 		out.MaxOutputTokens = &v
 	}
 

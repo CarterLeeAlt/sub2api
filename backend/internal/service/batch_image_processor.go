@@ -74,7 +74,32 @@ func (p *BatchImageProviderProcessor) Process(ctx context.Context, batchID strin
 
 	provider, ok := p.ProviderRegistry.Get(job.Provider)
 	if !ok || provider == nil {
-		return BatchImageProcessResult{}, ErrBatchImageUnsupportedProvider
+		// provider 被运维摘除是持久性状态：无限 requeue 会把 job 变成毒消息、
+		// 冻结余额永不释放。与 indexing 重试上界同构，超限转 failed 释放冻结。
+		retryCount, recordErr := p.Repo.IncrementBatchImageJobIndexRetry(ctx, job.BatchID,
+			"PROVIDER_UNAVAILABLE", truncateBatchImageMessage(ErrBatchImageUnsupportedProvider.Error(), batchImageMaxErrorMessageLength))
+		if recordErr != nil {
+			logger.L().Warn("batch_image.provider_retry_record_failed",
+				zap.String("batch_id", job.BatchID), zap.Error(recordErr))
+			return BatchImageProcessResult{}, ErrBatchImageUnsupportedProvider
+		}
+		job.RetryCount = retryCount
+		if retryCount < batchImageIndexingMaxRetries {
+			return BatchImageProcessResult{}, ErrBatchImageUnsupportedProvider
+		}
+		if err := p.Repo.TransitionBatchImageJobStatus(ctx, job.BatchID, BatchImageJobStatusFailed, BatchImageTransitionOptions{
+			EventType:    "provider_retry_exhausted",
+			EventPayload: map[string]any{"error_code": "PROVIDER_UNAVAILABLE", "retry_count": retryCount},
+			ErrorCode:    batchImageStringPtr("PROVIDER_UNAVAILABLE_RETRY_EXHAUSTED"),
+			ErrorMessage: batchImageOptionalStringPtr("provider is no longer available for this job"),
+		}); err != nil {
+			return BatchImageProcessResult{}, err
+		}
+		job.Status = BatchImageJobStatusFailed
+		if err := p.releaseTerminalHold(ctx, job); err != nil {
+			return BatchImageProcessResult{}, err
+		}
+		return BatchImageProcessResult{Terminal: true}, nil
 	}
 	if job.AccountID == nil || *job.AccountID <= 0 {
 		return BatchImageProcessResult{}, ErrBatchImageMissingAccountID
@@ -187,7 +212,35 @@ func (p *BatchImageProviderProcessor) indexAndSettle(ctx context.Context, job *B
 	result, err := indexer.Index(ctx, job, provider, account)
 	if err != nil {
 		if errors.Is(err, ErrBatchImageIndexOutputMissing) {
-			return BatchImageProcessResult{}, err
+			// 输出文件丢失/过期是持久性故障：无限 requeue 会让冻结余额永不释放、
+			// worker 每 ErrorRetryDelay 空转一次。与 settlement 耗尽出口同构——
+			// 递增重试计数，达到上限即转 failed 并释放冻结（用户可手动 Cancel
+			// 兜底的场景由此获得自动恢复路径）。
+			retryCount, recordErr := p.Repo.IncrementBatchImageJobIndexRetry(ctx, job.BatchID,
+				"INDEX_OUTPUT_MISSING", truncateBatchImageMessage(err.Error(), batchImageMaxErrorMessageLength))
+			if recordErr != nil {
+				logger.L().Warn("batch_image.index_retry_record_failed",
+					zap.String("batch_id", job.BatchID), zap.Error(recordErr))
+				return BatchImageProcessResult{}, err
+			}
+			job.RetryCount = retryCount
+			if retryCount < batchImageIndexingMaxRetries {
+				return BatchImageProcessResult{}, err
+			}
+			transitionErr := p.Repo.TransitionBatchImageJobStatus(ctx, job.BatchID, BatchImageJobStatusFailed, BatchImageTransitionOptions{
+				EventType:    "indexing_retry_exhausted",
+				EventPayload: map[string]any{"error_code": "INDEX_OUTPUT_MISSING", "retry_count": retryCount},
+				ErrorCode:    batchImageStringPtr("INDEX_OUTPUT_MISSING_RETRY_EXHAUSTED"),
+				ErrorMessage: batchImageOptionalStringPtr("provider output could not be indexed after retries"),
+			})
+			if transitionErr != nil {
+				return BatchImageProcessResult{}, transitionErr
+			}
+			job.Status = BatchImageJobStatusFailed
+			if err := p.releaseTerminalHold(ctx, job); err != nil {
+				return BatchImageProcessResult{}, err
+			}
+			return BatchImageProcessResult{Terminal: true}, nil
 		}
 		// job 状态已被并发方推进（如已进入 settling/终态）：不是索引数据问题，
 		// 短延迟 requeue 让下一轮按最新状态处理，不能误转 failed。
@@ -349,7 +402,9 @@ func (i *BatchImageResultIndexer) Index(ctx context.Context, job *BatchImageJob,
 			item.Status = BatchImageItemStatusSuccess
 			item.MimeType = batchImageOptionalStringPtr(parsed.MimeType)
 			item.FileExtension = batchImageOptionalStringPtr(parsed.FileExtension)
-			result.SuccessCount++
+			// 按解析出的图片数计数而非按行：单行可携带多张 inline 图
+			// （ImageCount>1），按行计数会让用户多拿图少计费。
+			result.SuccessCount += maxBatchImageInt(parsed.ImageCount, 1)
 		} else {
 			item.ErrorCode = batchImageOptionalStringPtr(parsed.ErrorCode)
 			item.ErrorMessage = batchImageOptionalStringPtr(parsed.ErrorMessage)
@@ -679,4 +734,11 @@ func truncateBatchImageMessage(message string, limit int) string {
 		return message
 	}
 	return message[:limit]
+}
+
+func maxBatchImageInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
