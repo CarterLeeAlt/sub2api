@@ -882,6 +882,32 @@ func TestResponsesToChatCompletions_ToolCalls(t *testing.T) {
 	assert.Equal(t, `{"city":"NYC"}`, msg.ToolCalls[0].Function.Arguments)
 }
 
+func TestResponsesToChatCompletions_CustomToolCall(t *testing.T) {
+	resp := &ResponsesResponse{
+		ID:     "resp_custom",
+		Status: "completed",
+		Output: []ResponsesOutput{
+			{
+				Type:   "custom_tool_call",
+				CallID: "call_patch",
+				Name:   "apply_patch",
+				Input:  "*** Begin Patch\n*** End Patch",
+			},
+		},
+	}
+
+	chat := ResponsesToChatCompletions(resp, "gpt-5-codex")
+	require.Len(t, chat.Choices, 1)
+	assert.Equal(t, "tool_calls", chat.Choices[0].FinishReason)
+
+	msg := chat.Choices[0].Message
+	require.Len(t, msg.ToolCalls, 1)
+	assert.Equal(t, "call_patch", msg.ToolCalls[0].ID)
+	assert.Equal(t, "function", msg.ToolCalls[0].Type)
+	assert.Equal(t, "apply_patch", msg.ToolCalls[0].Function.Name)
+	assert.Equal(t, "*** Begin Patch\n*** End Patch", msg.ToolCalls[0].Function.Arguments)
+}
+
 func TestResponsesToChatCompletions_Reasoning(t *testing.T) {
 	resp := &ResponsesResponse{
 		ID:     "resp_789",

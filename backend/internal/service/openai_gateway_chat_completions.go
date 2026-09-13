@@ -294,6 +294,18 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 	logger.L().Debug("openai chat_completions: model mapping applied", logFields...)
 
+	// Responses 形状旁路会原样转发客户端声明的 image_generation 工具（普通 CC 形状
+	// 经 ChatCompletionsToResponses 丢弃该工具，不会产图）。回程必须按 /v1/responses
+	// 相同口径统计图片产出并切换计费模型，否则图片按普通 token 计费。
+	var ccImageCounter *openAIImageOutputCounter
+	var ccImageCfg OpenAIResponsesImageBillingConfig
+	if isResponsesShape && openAIRequestBodyHasImageGenerationDeclaration(responsesBody) {
+		if cfg, cfgErr := resolveOpenAIResponsesImageBillingConfigDetailedFromBody(responsesBody, billingModel); cfgErr == nil {
+			ccImageCfg = cfg
+			ccImageCounter = newOpenAIImageOutputCounter()
+		}
+	}
+
 	if account.UsesOpenAICodexProtocol() {
 		var reqBody map[string]any
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
@@ -432,9 +444,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	var result *OpenAIForwardResult
 	var handleErr error
 	if clientStream {
-		result, handleErr = s.handleChatStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, len(body))
+		result, handleErr = s.handleChatStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, len(body), ccImageCounter, ccImageCfg)
 	} else {
-		result, handleErr = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
+		result, handleErr = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, ccImageCounter, ccImageCfg)
 	}
 	stampOpenAIResponsesUpstreamEndpoint(c, result)
 
@@ -536,10 +548,14 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	billingModel string,
 	upstreamModel string,
 	startTime time.Time,
+	imageCounter *openAIImageOutputCounter,
+	imageCfg OpenAIResponsesImageBillingConfig,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 
-	finalResponse, usage, acc, err := s.readOpenAICompatBufferedTerminal(resp, c, "openai chat_completions buffered", requestID)
+	// 在终端读取过程中喂图片计数器：必须用原始 payload（struct 化的
+	// ResponsesOutput 不承载 image_generation_call 的 result 字段）。
+	finalResponse, usage, acc, err := s.readOpenAICompatBufferedTerminal(resp, c, "openai chat_completions buffered", requestID, imageCounter)
 	if err != nil {
 		return nil, s.newOpenAICompatBufferedReadFailoverError(c, account, resp, requestID, err)
 	}
@@ -632,6 +648,17 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 		Stream:                        false,
 		Duration:                      time.Since(startTime),
 	}
+	// Responses 形状旁路声明的 image_generation 工具产出的图片按 /v1/responses
+	// 相同口径计费：按张数与尺寸档切换计费模型，而不是普通 token。
+	if imageCounter != nil {
+		if n := imageCounter.Count(); n > 0 {
+			result.ImageCount = n
+			result.ImageSize = imageCfg.SizeTier
+			result.ImageInputSize = imageCfg.InputSize
+			result.ImageOutputSizes = imageCounter.Sizes()
+			result.BillingModel = imageCfg.Model
+		}
+	}
 	// Grok chat bridge: bill native search tools found in the terminal Responses body.
 	if account != nil && account.IsGrok() && finalResponse != nil {
 		if body, err := json.Marshal(finalResponse); err == nil {
@@ -695,6 +722,8 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	upstreamModel string,
 	startTime time.Time,
 	requestBodyLen int,
+	imageCounter *openAIImageOutputCounter,
+	imageCfg OpenAIResponsesImageBillingConfig,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
@@ -758,6 +787,17 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		if searchCount > 0 {
 			out.SearchCount = searchCount
 		}
+		// Responses 形状旁路声明的 image_generation 工具产出的图片按 /v1/responses
+		// 相同口径计费：按张数与尺寸档切换计费模型，而不是普通 token。
+		if imageCounter != nil {
+			if n := imageCounter.Count(); n > 0 {
+				out.ImageCount = n
+				out.ImageSize = imageCfg.SizeTier
+				out.ImageInputSize = imageCfg.InputSize
+				out.ImageOutputSizes = imageCounter.Sizes()
+				out.BillingModel = imageCfg.Model
+			}
+		}
 		return out
 	}
 
@@ -770,6 +810,11 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		}
 		if countSearch {
 			searchCount += countGrokNativeSearchCallsInSSEDataDedup([]byte(payload), streamSearchSeen)
+		}
+		// 每个上游事件喂给图片计数器：image_generation_call 的 item.done 与
+		// response.completed 都可能携带产出，counter 内部按 id/内容去重。
+		if imageCounter != nil {
+			imageCounter.AddSSEData([]byte(payload))
 		}
 
 		var event apicompat.ResponsesStreamEvent

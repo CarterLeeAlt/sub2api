@@ -598,11 +598,12 @@ func (s *SettingService) GetAdminAPIKeyStatus(ctx context.Context) (maskedKey st
 		return "", false, nil
 	}
 
-	// 脱敏：显示前 10 位和后 4 位
+	// 脱敏：长 key 显示前 10 位和后 4 位；短 key 全遮蔽只留末 2 位——
+	// 手工配置的短 key 若原样返回等于把管理凭据泄漏给前端。
 	if len(key) > 14 {
 		maskedKey = key[:10] + "..." + key[len(key)-4:]
 	} else {
-		maskedKey = key
+		maskedKey = "****" + key[len(key)-min(len(key), 2):]
 	}
 
 	return maskedKey, true, nil

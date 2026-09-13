@@ -120,10 +120,8 @@ func TestHandleSmartRetry_503_LongDelay_SingleAccountRetry_RetryInPlace(t *testi
 		},
 	}
 
-	availableURLs := []string{"https://ag-1.test"}
-
 	svc := &AntigravityGatewayService{}
-	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test", 0, availableURLs)
+	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test")
 
 	require.NotNil(t, result)
 	require.Equal(t, smartRetryActionBreakWithResp, result.action)
@@ -184,10 +182,8 @@ func TestHandleSmartRetry_503_LongDelay_NoSingleAccountRetry_StillSwitches(t *te
 		},
 	}
 
-	availableURLs := []string{"https://ag-1.test"}
-
 	svc := &AntigravityGatewayService{}
-	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test", 0, availableURLs)
+	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test")
 
 	require.NotNil(t, result)
 	require.Equal(t, smartRetryActionBreakWithResp, result.action)
@@ -243,10 +239,8 @@ func TestHandleSmartRetry_429_LongDelay_SingleAccountRetry_StillSwitches(t *test
 		},
 	}
 
-	availableURLs := []string{"https://ag-1.test"}
-
 	svc := &AntigravityGatewayService{}
-	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test", 0, availableURLs)
+	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test")
 
 	require.NotNil(t, result)
 	require.Equal(t, smartRetryActionBreakWithResp, result.action)
@@ -325,10 +319,8 @@ func TestHandleSmartRetry_503_ShortDelay_SingleAccountRetry_NoRateLimit(t *testi
 		},
 	}
 
-	availableURLs := []string{"https://ag-1.test"}
-
 	svc := &AntigravityGatewayService{}
-	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test", 0, availableURLs)
+	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test")
 
 	require.NotNil(t, result)
 	require.Equal(t, smartRetryActionBreakWithResp, result.action)
@@ -404,10 +396,8 @@ func TestHandleSmartRetry_503_ShortDelay_NoSingleAccountRetry_SetsRateLimit(t *t
 		},
 	}
 
-	availableURLs := []string{"https://ag-1.test"}
-
 	svc := &AntigravityGatewayService{}
-	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test", 0, availableURLs)
+	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test")
 
 	require.NotNil(t, result)
 	require.Equal(t, smartRetryActionBreakWithResp, result.action)

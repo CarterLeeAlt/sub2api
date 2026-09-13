@@ -59,10 +59,37 @@ type GeminiBatchResponse struct {
 	InlinedResponsesAlt []any  `json:"inlined_responses"`
 }
 
+// geminiBatchErrorCode 兼容 Google API 的两种 error.code 形态：标准 REST 错误
+// 返回数字（如 {"code":8}），按 string 反序列化会让整包解码失败，导致失败批次
+// 永远拿不到错误信息。统一归一化为字符串，保持调用方的 string 语义。
+type geminiBatchErrorCode string
+
+func (c *geminiBatchErrorCode) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*c = ""
+		return nil
+	}
+	if len(trimmed) >= 2 && trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*c = geminiBatchErrorCode(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*c = geminiBatchErrorCode(n.String())
+	return nil
+}
+
 type GeminiBatchError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Status  string `json:"status"`
+	Code    geminiBatchErrorCode `json:"code"`
+	Message string               `json:"message"`
+	Status  string               `json:"status"`
 }
 
 type GeminiAPIBatchImageProvider struct {
@@ -375,7 +402,7 @@ func mapGeminiBatchState(batch *GeminiBatchJob) *BatchProviderStatus {
 		status.Done = true
 		status.ErrorCode = "GEMINI_BATCH_EXPIRED"
 	default:
-		if batch.Error != nil && (strings.TrimSpace(batch.Error.Message) != "" || strings.TrimSpace(batch.Error.Code) != "") {
+		if batch.Error != nil && (strings.TrimSpace(batch.Error.Message) != "" || strings.TrimSpace(string(batch.Error.Code)) != "") {
 			status.InternalState = BatchProviderStateFailed
 			status.Done = true
 			status.ErrorCode = "GEMINI_BATCH_FAILED"
@@ -383,7 +410,7 @@ func mapGeminiBatchState(batch *GeminiBatchJob) *BatchProviderStatus {
 	}
 
 	if batch.Error != nil {
-		if code := strings.TrimSpace(batch.Error.Code); code != "" {
+		if code := strings.TrimSpace(string(batch.Error.Code)); code != "" {
 			status.ErrorCode = code
 		} else if status.ErrorCode == "" && strings.TrimSpace(batch.Error.Status) != "" {
 			status.ErrorCode = strings.TrimSpace(batch.Error.Status)

@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	mathrand "math/rand"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -92,7 +91,6 @@ type smartRetryAction int
 const (
 	smartRetryActionContinue      smartRetryAction = iota // 继续默认重试逻辑
 	smartRetryActionBreakWithResp                         // 结束循环并返回 resp
-	smartRetryActionContinueURL                           // 继续 URL fallback 循环
 )
 
 // smartRetryResult 智能重试的结果
@@ -105,13 +103,7 @@ type smartRetryResult struct {
 
 // handleSmartRetry 处理 OAuth 账号的智能重试逻辑
 // 将 429/503 限流处理逻辑抽取为独立函数，减少 antigravityRetryLoop 的复杂度
-func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParams, resp *http.Response, respBody []byte, baseURL string, urlIdx int, availableURLs []string) *smartRetryResult {
-	// "Resource has been exhausted" 是 URL 级别限流，切换 URL（仅 429）
-	if resp.StatusCode == http.StatusTooManyRequests && isURLLevelRateLimit(respBody) && urlIdx < len(availableURLs)-1 {
-		logger.LegacyPrintf("service.antigravity_gateway", "%s URL fallback (429): %s -> %s", p.prefix, baseURL, availableURLs[urlIdx+1])
-		return &smartRetryResult{action: smartRetryActionContinueURL}
-	}
-
+func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParams, resp *http.Response, respBody []byte, baseURL string) *smartRetryResult {
 	category := antigravity429Unknown
 	if resp.StatusCode == http.StatusTooManyRequests {
 		category = classifyAntigravity429(respBody)
@@ -508,10 +500,8 @@ func (s *AntigravityGatewayService) antigravityRetryLoop(p antigravityRetryLoopP
 	if baseURL == "" {
 		return nil, errors.New("no antigravity forward base url configured")
 	}
-	availableURLs := []string{baseURL}
 
 	var resp *http.Response
-	var usedBaseURL string
 	logBody := p.settingService != nil && p.settingService.cfg != nil && p.settingService.cfg.Gateway.LogUpstreamErrorBody
 	maxBytes := 2048
 	if p.settingService != nil && p.settingService.cfg != nil && p.settingService.cfg.Gateway.LogUpstreamErrorBodyMaxBytes > 0 {
@@ -524,192 +514,186 @@ func (s *AntigravityGatewayService) antigravityRetryLoop(p antigravityRetryLoopP
 		return truncateString(string(body), maxBytes)
 	}
 
-urlFallbackLoop:
-	for urlIdx, baseURL := range availableURLs {
-		usedBaseURL = baseURL
-		allAttemptsInternal500 := true // 追踪本轮所有 attempt 是否全部命中 INTERNAL 500
-		for attempt := 1; attempt <= antigravityMaxRetries; attempt++ {
-			select {
-			case <-p.ctx.Done():
-				logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled error=%v", p.prefix, p.ctx.Err())
-				return nil, p.ctx.Err()
-			default:
-			}
+	// 说明：历史上这里有跨 daily/sandbox 端点的 URL fallback 循环，但
+	// availableURLs 恒为单元素切片，切换分支全部不可达。已按“永不切换 URL”
+	// 的真实行为删除该死循环与相关判定（isURLLevelRateLimit 等）。
+	allAttemptsInternal500 := true // 追踪本轮所有 attempt 是否全部命中 INTERNAL 500
+attemptLoop:
+	for attempt := 1; attempt <= antigravityMaxRetries; attempt++ {
+		select {
+		case <-p.ctx.Done():
+			logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled error=%v", p.prefix, p.ctx.Err())
+			return nil, p.ctx.Err()
+		default:
+		}
 
-			upstreamReq, err := antigravity.NewAPIRequestWithURL(p.ctx, baseURL, p.action, p.accessToken, p.body)
-			if err != nil {
-				return nil, err
-			}
+		upstreamReq, err := antigravity.NewAPIRequestWithURL(p.ctx, baseURL, p.action, p.accessToken, p.body)
+		if err != nil {
+			return nil, err
+		}
 
-			resp, err = p.httpUpstream.Do(upstreamReq, p.proxyURL, p.account.ID, p.account.Concurrency)
-			if err == nil && resp == nil {
-				err = errors.New("upstream returned nil response")
-			}
-			if err != nil {
-				safeErr := sanitizeUpstreamErrorMessage(err.Error())
-				appendOpsUpstreamError(p.c, OpsUpstreamErrorEvent{
-					ProxyID:            opsUpstreamProxyID(p.account),
-					ProxyName:          opsUpstreamProxyName(p.account),
-					Platform:           p.account.Platform,
-					AccountID:          p.account.ID,
-					AccountName:        p.account.Name,
-					UpstreamStatusCode: 0,
-					UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-					Kind:               "request_error",
-					Message:            safeErr,
-				})
-				if shouldAntigravityFallbackToNextURL(err, 0) && urlIdx < len(availableURLs)-1 {
-					logger.LegacyPrintf("service.antigravity_gateway", "%s URL fallback (connection error): %s -> %s", p.prefix, baseURL, availableURLs[urlIdx+1])
-					continue urlFallbackLoop
+		resp, err = p.httpUpstream.Do(upstreamReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+		if err == nil && resp == nil {
+			err = errors.New("upstream returned nil response")
+		}
+		if err != nil {
+			safeErr := sanitizeUpstreamErrorMessage(err.Error())
+			appendOpsUpstreamError(p.c, OpsUpstreamErrorEvent{
+				ProxyID:            opsUpstreamProxyID(p.account),
+				ProxyName:          opsUpstreamProxyName(p.account),
+				Platform:           p.account.Platform,
+				AccountID:          p.account.ID,
+				AccountName:        p.account.Name,
+				UpstreamStatusCode: 0,
+				UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
+				Kind:               "request_error",
+				Message:            safeErr,
+			})
+			if attempt < antigravityMaxRetries {
+				logger.LegacyPrintf("service.antigravity_gateway", "%s status=request_failed retry=%d/%d error=%v", p.prefix, attempt, antigravityMaxRetries, err)
+				if !sleepAntigravityBackoffWithContext(p.ctx, attempt) {
+					logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled_during_backoff", p.prefix)
+					return nil, p.ctx.Err()
 				}
+				continue
+			}
+			logger.LegacyPrintf("service.antigravity_gateway", "%s status=request_failed retries_exhausted error=%v", p.prefix, err)
+			setOpsUpstreamError(p.c, 0, safeErr, "")
+			return nil, fmt.Errorf("upstream request failed after retries: %w", err)
+		}
+
+		// 统一处理错误响应
+		if resp.StatusCode >= 400 {
+			respBody := s.readUpstreamErrorBody(resp)
+			_ = resp.Body.Close()
+
+			if overagesInjected && shouldMarkCreditsExhausted(resp, respBody, nil) {
+				modelKey := resolveCreditsOveragesModelKey(p.ctx, p.account, "", p.requestedModel)
+				s.handleCreditsRetryFailure(p.ctx, p.prefix, modelKey, p.account, &http.Response{
+					StatusCode: resp.StatusCode,
+					Header:     resp.Header.Clone(),
+					Body:       io.NopCloser(bytes.NewReader(respBody)),
+				}, nil)
+			}
+
+			// ★ 统一入口：自定义错误码 + 临时不可调度
+			if handled, outStatus, policyErr := s.applyErrorPolicy(p, resp.StatusCode, resp.Header, respBody); handled {
+				if policyErr != nil {
+					return nil, policyErr
+				}
+				resp = &http.Response{
+					StatusCode: outStatus,
+					Header:     resp.Header.Clone(),
+					Body:       io.NopCloser(bytes.NewReader(respBody)),
+				}
+				break attemptLoop
+			}
+
+			// 429/503 限流处理：智能重试和账户配额限流
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+				// 尝试智能重试处理（OAuth 账号专用）
+				smartResult := s.handleSmartRetry(p, resp, respBody, baseURL)
+				switch smartResult.action {
+				case smartRetryActionBreakWithResp:
+					if smartResult.err != nil {
+						return nil, smartResult.err
+					}
+					// 模型限流时返回切换账号信号
+					if smartResult.switchError != nil {
+						return nil, smartResult.switchError
+					}
+					resp = smartResult.resp
+					break attemptLoop
+				}
+				// smartRetryActionContinue: 继续默认重试逻辑
+
+				// 账户/模型配额限流，重试 3 次（指数退避）- 默认逻辑（非 OAuth 账号或解析失败）
 				if attempt < antigravityMaxRetries {
-					logger.LegacyPrintf("service.antigravity_gateway", "%s status=request_failed retry=%d/%d error=%v", p.prefix, attempt, antigravityMaxRetries, err)
+					upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(respBody))
+					upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+					appendOpsUpstreamError(p.c, OpsUpstreamErrorEvent{
+						ProxyID:            opsUpstreamProxyID(p.account),
+						ProxyName:          opsUpstreamProxyName(p.account),
+						Platform:           p.account.Platform,
+						AccountID:          p.account.ID,
+						AccountName:        p.account.Name,
+						UpstreamStatusCode: resp.StatusCode,
+						UpstreamRequestID:  resp.Header.Get("x-request-id"),
+						UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
+						Kind:               "retry",
+						Message:            upstreamMsg,
+						Detail:             getUpstreamDetail(respBody),
+					})
+					logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d retry=%d/%d body=%s", p.prefix, resp.StatusCode, attempt, antigravityMaxRetries, truncateForLog(respBody, 200))
 					if !sleepAntigravityBackoffWithContext(p.ctx, attempt) {
 						logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled_during_backoff", p.prefix)
 						return nil, p.ctx.Err()
 					}
 					continue
 				}
-				logger.LegacyPrintf("service.antigravity_gateway", "%s status=request_failed retries_exhausted error=%v", p.prefix, err)
-				setOpsUpstreamError(p.c, 0, safeErr, "")
-				return nil, fmt.Errorf("upstream request failed after retries: %w", err)
-			}
 
-			// 统一处理错误响应
-			if resp.StatusCode >= 400 {
-				respBody := s.readUpstreamErrorBody(resp)
-				_ = resp.Body.Close()
-
-				if overagesInjected && shouldMarkCreditsExhausted(resp, respBody, nil) {
-					modelKey := resolveCreditsOveragesModelKey(p.ctx, p.account, "", p.requestedModel)
-					s.handleCreditsRetryFailure(p.ctx, p.prefix, modelKey, p.account, &http.Response{
-						StatusCode: resp.StatusCode,
-						Header:     resp.Header.Clone(),
-						Body:       io.NopCloser(bytes.NewReader(respBody)),
-					}, nil)
-				}
-
-				// ★ 统一入口：自定义错误码 + 临时不可调度
-				if handled, outStatus, policyErr := s.applyErrorPolicy(p, resp.StatusCode, resp.Header, respBody); handled {
-					if policyErr != nil {
-						return nil, policyErr
-					}
-					resp = &http.Response{
-						StatusCode: outStatus,
-						Header:     resp.Header.Clone(),
-						Body:       io.NopCloser(bytes.NewReader(respBody)),
-					}
-					break urlFallbackLoop
-				}
-
-				// 429/503 限流处理：区分 URL 级别限流、智能重试和账户配额限流
-				if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-					// 尝试智能重试处理（OAuth 账号专用）
-					smartResult := s.handleSmartRetry(p, resp, respBody, baseURL, urlIdx, availableURLs)
-					switch smartResult.action {
-					case smartRetryActionContinueURL:
-						continue urlFallbackLoop
-					case smartRetryActionBreakWithResp:
-						if smartResult.err != nil {
-							return nil, smartResult.err
-						}
-						// 模型限流时返回切换账号信号
-						if smartResult.switchError != nil {
-							return nil, smartResult.switchError
-						}
-						resp = smartResult.resp
-						break urlFallbackLoop
-					}
-					// smartRetryActionContinue: 继续默认重试逻辑
-
-					// 账户/模型配额限流，重试 3 次（指数退避）- 默认逻辑（非 OAuth 账号或解析失败）
-					if attempt < antigravityMaxRetries {
-						upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(respBody))
-						upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
-						appendOpsUpstreamError(p.c, OpsUpstreamErrorEvent{
-							ProxyID:            opsUpstreamProxyID(p.account),
-							ProxyName:          opsUpstreamProxyName(p.account),
-							Platform:           p.account.Platform,
-							AccountID:          p.account.ID,
-							AccountName:        p.account.Name,
-							UpstreamStatusCode: resp.StatusCode,
-							UpstreamRequestID:  resp.Header.Get("x-request-id"),
-							UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-							Kind:               "retry",
-							Message:            upstreamMsg,
-							Detail:             getUpstreamDetail(respBody),
-						})
-						logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d retry=%d/%d body=%s", p.prefix, resp.StatusCode, attempt, antigravityMaxRetries, truncateForLog(respBody, 200))
-						if !sleepAntigravityBackoffWithContext(p.ctx, attempt) {
-							logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled_during_backoff", p.prefix)
-							return nil, p.ctx.Err()
-						}
-						continue
-					}
-
-					// 重试用尽，标记账户限流
-					p.handleError(p.ctx, p.prefix, p.account, resp.StatusCode, resp.Header, respBody, p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
-					logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d rate_limited base_url=%s body=%s", p.prefix, resp.StatusCode, baseURL, truncateForLog(respBody, 200))
-					resp = &http.Response{
-						StatusCode: resp.StatusCode,
-						Header:     resp.Header.Clone(),
-						Body:       io.NopCloser(bytes.NewReader(respBody)),
-					}
-					break urlFallbackLoop
-				}
-
-				// 其他可重试错误（500/502/504/529，不包括 429 和 503）
-				if shouldRetryAntigravityError(resp.StatusCode) {
-					if attempt < antigravityMaxRetries {
-						upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(respBody))
-						upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
-						appendOpsUpstreamError(p.c, OpsUpstreamErrorEvent{
-							ProxyID:            opsUpstreamProxyID(p.account),
-							ProxyName:          opsUpstreamProxyName(p.account),
-							Platform:           p.account.Platform,
-							AccountID:          p.account.ID,
-							AccountName:        p.account.Name,
-							UpstreamStatusCode: resp.StatusCode,
-							UpstreamRequestID:  resp.Header.Get("x-request-id"),
-							UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-							Kind:               "retry",
-							Message:            upstreamMsg,
-							Detail:             getUpstreamDetail(respBody),
-						})
-						logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d retry=%d/%d body=%s", p.prefix, resp.StatusCode, attempt, antigravityMaxRetries, truncateForLog(respBody, 500))
-						if !sleepAntigravityBackoffWithContext(p.ctx, attempt) {
-							logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled_during_backoff", p.prefix)
-							return nil, p.ctx.Err()
-						}
-						// 追踪 INTERNAL 500：非匹配的 attempt 清除标记
-						if !isAntigravityInternalServerError(resp.StatusCode, respBody) {
-							allAttemptsInternal500 = false
-						}
-						continue
-					}
-				}
-
-				// INTERNAL 500 渐进惩罚：3 次重试全部命中特定 500 时递增计数器并惩罚
-				if allAttemptsInternal500 && isAntigravityInternalServerError(resp.StatusCode, respBody) {
-					s.handleInternal500RetryExhausted(p.ctx, p.prefix, p.account)
-				}
-
-				// 其他 4xx 错误或重试用尽，直接返回
+				// 重试用尽，标记账户限流
+				p.handleError(p.ctx, p.prefix, p.account, resp.StatusCode, resp.Header, respBody, p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
+				logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d rate_limited base_url=%s body=%s", p.prefix, resp.StatusCode, baseURL, truncateForLog(respBody, 200))
 				resp = &http.Response{
 					StatusCode: resp.StatusCode,
 					Header:     resp.Header.Clone(),
 					Body:       io.NopCloser(bytes.NewReader(respBody)),
 				}
-				break urlFallbackLoop
+				break
 			}
 
-			// 成功响应（< 400）
-			break urlFallbackLoop
+			// 其他可重试错误（500/502/504/529，不包括 429 和 503）
+			if shouldRetryAntigravityError(resp.StatusCode) {
+				if attempt < antigravityMaxRetries {
+					upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(respBody))
+					upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+					appendOpsUpstreamError(p.c, OpsUpstreamErrorEvent{
+						ProxyID:            opsUpstreamProxyID(p.account),
+						ProxyName:          opsUpstreamProxyName(p.account),
+						Platform:           p.account.Platform,
+						AccountID:          p.account.ID,
+						AccountName:        p.account.Name,
+						UpstreamStatusCode: resp.StatusCode,
+						UpstreamRequestID:  resp.Header.Get("x-request-id"),
+						UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
+						Kind:               "retry",
+						Message:            upstreamMsg,
+						Detail:             getUpstreamDetail(respBody),
+					})
+					logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d retry=%d/%d body=%s", p.prefix, resp.StatusCode, attempt, antigravityMaxRetries, truncateForLog(respBody, 500))
+					if !sleepAntigravityBackoffWithContext(p.ctx, attempt) {
+						logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled_during_backoff", p.prefix)
+						return nil, p.ctx.Err()
+					}
+					// 追踪 INTERNAL 500：非匹配的 attempt 清除标记
+					if !isAntigravityInternalServerError(resp.StatusCode, respBody) {
+						allAttemptsInternal500 = false
+					}
+					continue
+				}
+			}
+
+			// INTERNAL 500 渐进惩罚：3 次重试全部命中特定 500 时递增计数器并惩罚
+			if allAttemptsInternal500 && isAntigravityInternalServerError(resp.StatusCode, respBody) {
+				s.handleInternal500RetryExhausted(p.ctx, p.prefix, p.account)
+			}
+
+			// 其他 4xx 错误或重试用尽，直接返回
+			resp = &http.Response{
+				StatusCode: resp.StatusCode,
+				Header:     resp.Header.Clone(),
+				Body:       io.NopCloser(bytes.NewReader(respBody)),
+			}
+			break
 		}
+
+		// 成功响应（< 400）
+		break
 	}
 
-	if resp != nil && resp.StatusCode < 400 && usedBaseURL != "" {
-		antigravity.DefaultURLAvailability.MarkSuccess(usedBaseURL)
+	if resp != nil && resp.StatusCode < 400 && baseURL != "" {
+		antigravity.DefaultURLAvailability.MarkSuccess(baseURL)
 	}
 
 	// 成功响应时清零 INTERNAL 500 连续失败计数器（覆盖所有成功路径，含 smart retry）
@@ -728,42 +712,6 @@ func shouldRetryAntigravityError(statusCode int) bool {
 	default:
 		return false
 	}
-}
-
-// isURLLevelRateLimit 判断是否为 URL 级别的限流（应切换 URL 重试）
-// "Resource has been exhausted" 是 URL/节点级别限流，切换 URL 可能成功
-// "exhausted your capacity on this model" 是账户/模型配额限流，切换 URL 无效
-func isURLLevelRateLimit(body []byte) bool {
-	// 快速检查：包含 "Resource has been exhausted" 且不包含 "capacity on this model"
-	bodyStr := string(body)
-	return strings.Contains(bodyStr, "Resource has been exhausted") &&
-		!strings.Contains(bodyStr, "capacity on this model")
-}
-
-// isAntigravityConnectionError 判断是否为连接错误（网络超时、DNS 失败、连接拒绝）
-func isAntigravityConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// 检查超时错误
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return true
-	}
-
-	// 检查连接错误（DNS 失败、连接拒绝）
-	var opErr *net.OpError
-	return errors.As(err, &opErr)
-}
-
-// shouldAntigravityFallbackToNextURL 判断是否应切换到下一个 URL
-// 仅连接错误和 HTTP 429 触发 URL 降级
-func shouldAntigravityFallbackToNextURL(err error, statusCode int) bool {
-	if isAntigravityConnectionError(err) {
-		return true
-	}
-	return statusCode == http.StatusTooManyRequests
 }
 
 // getSessionID 从 gin.Context 获取 session_id（用于日志追踪）

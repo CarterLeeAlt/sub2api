@@ -165,6 +165,14 @@ func (c *openAIImageOutputCounter) addImageOutputItem(item gjson.Result) {
 		return
 	}
 	size := strings.TrimSpace(item.Get("size").String())
+	if size == "" {
+		// 桥接注入的 image_generation 工具不带 size 且上游常不回显：解码 b64
+		// 头部探测真实像素，与 Images 端点的 reconcile 口径一致，避免计费档位
+		// 全部落到默认 2K（对 1K 产出多计费）。
+		if probed := detectOpenAIImageResultSize(result); probed != "" {
+			size = probed
+		}
+	}
 	if _, exists := c.seen[key]; exists {
 		if size != "" && strings.TrimSpace(c.seenSizes[key]) == "" {
 			c.seenSizes[key] = size
@@ -177,6 +185,15 @@ func (c *openAIImageOutputCounter) addImageOutputItem(item gjson.Result) {
 		c.seenSizes[key] = size
 	}
 	c.count++
+}
+
+// feedOpenAIImageOutputCounters 把原始 SSE payload 喂给若干图片计数器。
+// 必须在 struct 化之前喂：ResponsesOutput 没有承载 image_generation_call 的
+// result 字段，marshal 往返会丢掉图片数据导致计数落空。
+func feedOpenAIImageOutputCounters(counters []*openAIImageOutputCounter, payload string) {
+	for _, counter := range counters {
+		counter.AddSSEData([]byte(payload))
+	}
 }
 
 func hashOpenAIImageOutputResult(result string) string {

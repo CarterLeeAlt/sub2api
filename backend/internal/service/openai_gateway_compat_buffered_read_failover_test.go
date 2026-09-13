@@ -47,7 +47,7 @@ func TestChatCompletionsBufferedResponsesReadErrorReturnsFailover(t *testing.T) 
 			account := &Account{ID: 40, Name: "openai-oauth", Platform: PlatformOpenAI}
 
 			result, err := (&OpenAIGatewayService{}).handleChatBufferedStreamingResponse(
-				resp, c, account, "gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-sol", time.Now(),
+				resp, c, account, "gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-sol", time.Now(), nil, OpenAIResponsesImageBillingConfig{},
 			)
 
 			require.Error(t, err)
@@ -85,6 +85,8 @@ func TestChatCompletionsBufferedResponsesReadErrorDoesNotFailoverAfterClientCanc
 		"gpt-5.6-sol",
 		"gpt-5.6-sol",
 		time.Now(),
+		nil,
+		OpenAIResponsesImageBillingConfig{},
 	)
 
 	require.Error(t, err)
@@ -114,6 +116,8 @@ func TestChatCompletionsBufferedResponsesOversizedLineDoesNotFailover(t *testing
 		"gpt-5.6-sol",
 		"gpt-5.6-sol",
 		time.Now(),
+		nil,
+		OpenAIResponsesImageBillingConfig{},
 	)
 
 	require.ErrorIs(t, err, bufio.ErrTooLong)

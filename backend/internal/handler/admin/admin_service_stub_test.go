@@ -401,6 +401,16 @@ func (s *stubAdminService) GetGroupAPIKeys(ctx context.Context, groupID int64, p
 	return s.apiKeys, int64(len(s.apiKeys)), nil
 }
 
+func (s *stubAdminService) GetGroupAPIKeyStats(ctx context.Context, groupID int64) (total int64, active int64, err error) {
+	activeCount := int64(0)
+	for _, key := range s.apiKeys {
+		if key.IsActive() {
+			activeCount++
+		}
+	}
+	return int64(len(s.apiKeys)), activeCount, nil
+}
+
 func (s *stubAdminService) GetGroupRateMultipliers(_ context.Context, _ int64) ([]service.UserGroupRateEntry, error) {
 	return nil, nil
 }

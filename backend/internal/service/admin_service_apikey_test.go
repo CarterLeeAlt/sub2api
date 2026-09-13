@@ -192,6 +192,9 @@ func (s *apiKeyRepoStubForGroupUpdate) ClearGroupIDByGroupID(context.Context, in
 func (s *apiKeyRepoStubForGroupUpdate) CountByGroupID(context.Context, int64) (int64, error) {
 	panic("unexpected")
 }
+func (s *apiKeyRepoStubForGroupUpdate) CountGroupAPIKeyStats(context.Context, int64) (total int64, active int64, err error) {
+	panic("unexpected")
+}
 func (s *apiKeyRepoStubForGroupUpdate) ListKeysByUserID(context.Context, int64) ([]string, error) {
 	panic("unexpected")
 }

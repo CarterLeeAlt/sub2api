@@ -118,6 +118,27 @@ func TestGeminiProvider_SubmitUploadsJSONLThenCreatesBatch(t *testing.T) {
 	require.NotContains(t, string(client.uploadedJSONL), "sk-secret")
 }
 
+// Google API 的 error.code 是数字（如 {"code":8}）：反序列化必须同时兼容数字与
+// 字符串两种形态，否则失败批次整包解码失败，任务无法判 failed、计费 hold 不释放。
+func TestGeminiBatchErrorUnmarshalJSON_AcceptsNumericAndStringCode(t *testing.T) {
+	var numeric GeminiBatchJob
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"batches/1","state":"JOB_STATE_FAILED","error":{"code":8,"message":"bad prompt","status":"INVALID_ARGUMENT"}}`), &numeric))
+	require.NotNil(t, numeric.Error)
+	require.Equal(t, "8", string(numeric.Error.Code))
+	require.Equal(t, "bad prompt", numeric.Error.Message)
+	require.Equal(t, "INVALID_ARGUMENT", numeric.Error.Status)
+
+	var str GeminiBatchJob
+	require.NoError(t, json.Unmarshal([]byte(`{"error":{"code":"8","message":"bad prompt"}}`), &str))
+	require.NotNil(t, str.Error)
+	require.Equal(t, "8", string(str.Error.Code))
+
+	var nullCode GeminiBatchJob
+	require.NoError(t, json.Unmarshal([]byte(`{"error":{"code":null,"message":"oops"}}`), &nullCode))
+	require.NotNil(t, nullCode.Error)
+	require.Empty(t, string(nullCode.Error.Code))
+}
+
 func TestGeminiProvider_GetMapsStates(t *testing.T) {
 	tests := []struct {
 		name      string

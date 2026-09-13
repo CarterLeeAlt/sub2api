@@ -654,9 +654,10 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 
 	var result *OpenAIForwardResult
 	if clientStream {
-		result, err = s.handleChatStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, len(body))
+		// Grok 桥不涉及 image_generation 工具，图片计数器传空。
+		result, err = s.handleChatStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, len(body), nil, OpenAIResponsesImageBillingConfig{})
 	} else {
-		result, err = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
+		result, err = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, nil, OpenAIResponsesImageBillingConfig{})
 	}
 	if result != nil {
 		result.UpstreamEndpoint = grokChatResponsesEndpoint
