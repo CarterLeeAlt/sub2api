@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -19,6 +20,9 @@ type quotaSnapshotRefreshRepoStub struct {
 	listCalls int
 	listErr   error
 	shadowErr error
+
+	canonicals map[int64]*Account
+	getByIDErr error
 
 	wham            map[int64]map[string]any
 	whamGeneration  map[int64]string
@@ -52,6 +56,25 @@ func (r *quotaSnapshotRefreshRepoStub) ListWithFilters(
 	return out, &pagination.PaginationResult{
 		Total: int64(len(r.accounts)), Page: params.Page, PageSize: params.PageSize, Pages: pages,
 	}, nil
+}
+
+func (r *quotaSnapshotRefreshRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.getByIDErr != nil {
+		return nil, r.getByIDErr
+	}
+	if canonical, ok := r.canonicals[id]; ok {
+		clone := *canonical
+		return &clone, nil
+	}
+	for i := range r.accounts {
+		if r.accounts[i].ID == id {
+			clone := r.accounts[i]
+			return &clone, nil
+		}
+	}
+	return nil, ErrAccountNotFound
 }
 
 func (r *quotaSnapshotRefreshRepoStub) ListShadowsByParent(_ context.Context, parentID int64) ([]*Account, error) {
@@ -182,6 +205,10 @@ type quotaSnapshotLeaderLockStub struct {
 	err      error
 	calls    int
 	releases int
+
+	renewOK  bool
+	renewErr error
+	renews   int
 }
 
 func (l *quotaSnapshotLeaderLockStub) TryAcquireLeaderLock(context.Context, string, string, time.Duration) (bool, error) {
@@ -189,9 +216,52 @@ func (l *quotaSnapshotLeaderLockStub) TryAcquireLeaderLock(context.Context, stri
 	return l.acquired, l.err
 }
 
+func (l *quotaSnapshotLeaderLockStub) RenewLeaderLock(context.Context, string, string, time.Duration) (bool, error) {
+	l.renews++
+	if l.renewErr != nil {
+		return false, l.renewErr
+	}
+	return l.renewOK, nil
+}
+
 func (l *quotaSnapshotLeaderLockStub) ReleaseLeaderLock(context.Context, string, string) error {
 	l.releases++
 	return nil
+}
+
+// quotaSnapshotRecoveryReconcilerStub records the CAS-guarded recovery calls
+// issued by the periodic refresher and can simulate a successful recovery by
+// clearing the 429 provenance on the canonical account.
+type quotaSnapshotRecoveryReconcilerStub struct {
+	mu             sync.Mutex
+	thresholdCalls []string
+	quota429Calls  []string
+	thresholdErr   error
+	quota429Err    error
+	clearOn429     bool
+}
+
+func (r *quotaSnapshotRecoveryReconcilerStub) ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(
+	_ context.Context, _ *Account, expectedWhamUpdatedAt string,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.thresholdCalls = append(r.thresholdCalls, expectedWhamUpdatedAt)
+	return r.thresholdErr
+}
+
+func (r *quotaSnapshotRecoveryReconcilerStub) ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(
+	_ context.Context, account *Account, expectedWhamUpdatedAt string,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.quota429Calls = append(r.quota429Calls, expectedWhamUpdatedAt)
+	if r.clearOn429 && account != nil {
+		account.RateLimitedAt = nil
+		account.RateLimitResetAt = nil
+		delete(account.Extra, OpenAICodexRateLimitStateExtraKey)
+	}
+	return r.quota429Err
 }
 
 func quotaSnapshotTestUsage() *OpenAIQuotaUsage {
@@ -432,4 +502,158 @@ func TestOpenAIQuotaSnapshotRefreshRetryAbandonedWhenContextCanceled(t *testing.
 	require.NoError(t, svc.RunOnce(ctx))
 	require.Equal(t, []int64{account.ID}, quota.calls, "no retry after the wait is canceled")
 	require.Empty(t, repo.reset)
+}
+
+// quotaSnapshotRecoveryCanonical builds a canonical account row carrying both a
+// scheduling-threshold pause and a quota-derived 429, as the recovery trigger
+// would observe after reloading the account from the database.
+func quotaSnapshotRecoveryCanonical(accountID int64, refreshedAt time.Time) *Account {
+	until := refreshedAt.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform:         PlatformOpenAI,
+		Window:           "7d",
+		ThresholdPercent: 90,
+		UsedPercent:      95,
+		Until:            until,
+		Now:              refreshedAt.Add(-time.Hour),
+	})
+	observedAt := refreshedAt.Add(-time.Minute)
+	resetAt := refreshedAt.Add(4 * time.Hour)
+	var quota429State any
+	_ = json.Unmarshal([]byte(buildOpenAICodexQuota429State("5h", observedAt, resetAt, 100, 95)), &quota429State)
+	return &Account{
+		ID:                      accountID,
+		Platform:                PlatformOpenAI,
+		Type:                    AccountTypeOAuth,
+		Status:                  StatusActive,
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: reason,
+		RateLimitedAt:           &observedAt,
+		RateLimitResetAt:        &resetAt,
+		Extra: map[string]any{
+			OpenAICodexRateLimitStateExtraKey: quota429State,
+			"codex_usage_updated_at":          refreshedAt.Format(time.RFC3339),
+			"codex_7d_used_percent":           0.0,
+			"codex_7d_reset_at":               until.Format(time.RFC3339),
+		},
+	}
+}
+
+// A freshly persisted authoritative WHAM snapshot must trigger the same
+// CAS-guarded recovery as the admin usage path, even with zero query traffic
+// (gateway-only deployments). Both the scheduling-threshold pause and the
+// quota-derived 429 must be reconciled against the generation that was just
+// written, never against an in-memory copy.
+func TestOpenAIQuotaSnapshotRefreshRecoversPauseAndQuota429AfterPersist(t *testing.T) {
+	refreshedAt := time.Date(2026, 8, 25, 10, 0, 0, 1, time.UTC)
+	parent := quotaSnapshotParent(1, StatusActive, true)
+	canonical := quotaSnapshotRecoveryCanonical(parent.ID, refreshedAt)
+	repo := &quotaSnapshotRefreshRepoStub{
+		accounts:   []Account{parent},
+		canonicals: map[int64]*Account{parent.ID: canonical},
+	}
+	quota := &quotaSnapshotUsageReaderStub{usage: quotaSnapshotTestUsage()}
+	reconciler := &quotaSnapshotRecoveryReconcilerStub{clearOn429: true}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.SetRecoveryReconciler(reconciler)
+	svc.now = func() time.Time { return refreshedAt }
+
+	require.NoError(t, svc.RunOnce(context.Background()))
+
+	persistedGeneration := repo.whamGeneration[parent.ID]
+	require.Equal(t, "2026-08-25T10:00:00.000000001Z", persistedGeneration)
+	require.Equal(t, []string{persistedGeneration}, reconciler.quota429Calls,
+		"429 recovery must use the exact generation persisted by this cycle")
+	require.Equal(t, []string{persistedGeneration}, reconciler.thresholdCalls,
+		"scheduling-threshold recovery must use the exact generation persisted by this cycle")
+	// The stub clears the 429 provenance on the reloaded canonical row; the
+	// state lives in the shared Extra map owned by the repo stub.
+	require.NotContains(t, canonical.Extra, OpenAICodexRateLimitStateExtraKey,
+		"429 provenance must be cleared by the recovery trigger")
+}
+
+// When a newer generation already won the CAS (e.g. a concurrent admin query
+// refreshed first), the periodic refresher must not fire recovery: its expected
+// generation no longer matches the database row.
+func TestOpenAIQuotaSnapshotRefreshSkipsRecoveryWhenGenerationNotAdvanced(t *testing.T) {
+	parent := quotaSnapshotParent(1, StatusActive, true)
+	repo := &quotaSnapshotRefreshRepoStub{
+		accounts:       []Account{parent},
+		whamGeneration: map[int64]string{parent.ID: "2026-08-25T11:00:00.000000000Z"},
+	}
+	quota := &quotaSnapshotUsageReaderStub{usage: quotaSnapshotTestUsage()}
+	reconciler := &quotaSnapshotRecoveryReconcilerStub{}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.SetRecoveryReconciler(reconciler)
+	svc.now = func() time.Time { return time.Date(2026, 8, 25, 10, 0, 0, 1, time.UTC) }
+
+	require.NoError(t, svc.RunOnce(context.Background()))
+	require.Empty(t, reconciler.quota429Calls)
+	require.Empty(t, reconciler.thresholdCalls)
+	require.Equal(t, "2026-08-25T11:00:00.000000000Z", repo.whamGeneration[parent.ID],
+		"the older generation must not overwrite the persisted one")
+}
+
+// A failing recovery reconcile must never interrupt the refresh cycle, matching
+// the per-account failure handling of the query path.
+func TestOpenAIQuotaSnapshotRefreshReconcileFailureDoesNotAbortCycle(t *testing.T) {
+	parent := quotaSnapshotParent(1, StatusActive, true)
+	repo := &quotaSnapshotRefreshRepoStub{
+		accounts:   []Account{parent},
+		canonicals: map[int64]*Account{parent.ID: quotaSnapshotRecoveryCanonical(parent.ID, time.Date(2026, 8, 25, 10, 0, 0, 1, time.UTC))},
+	}
+	quota := &quotaSnapshotUsageReaderStub{usage: quotaSnapshotTestUsage()}
+	reconciler := &quotaSnapshotRecoveryReconcilerStub{
+		thresholdErr: errors.New("reconcile repository unavailable"),
+		quota429Err:  errors.New("reconcile repository unavailable"),
+	}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.SetRecoveryReconciler(reconciler)
+	svc.now = func() time.Time { return time.Date(2026, 8, 25, 10, 0, 0, 1, time.UTC) }
+
+	require.NoError(t, svc.RunOnce(context.Background()))
+	require.Len(t, reconciler.quota429Calls, 1)
+	require.Len(t, reconciler.thresholdCalls, 1)
+	require.Equal(t, float64(25), repo.wham[parent.ID]["codex_5h_used_percent"],
+		"the snapshot must still be persisted when recovery fails")
+}
+
+// Every processed page must renew the leader lock so a serial sweep that
+// outlives the TTL cannot silently lose leadership mid-cycle.
+func TestOpenAIQuotaSnapshotRefreshRenewsLeaderLockPerPage(t *testing.T) {
+	accounts := make([]Account, 0, 101)
+	for id := int64(1); id <= 101; id++ {
+		accounts = append(accounts, quotaSnapshotParent(id, StatusActive, true))
+	}
+	repo := &quotaSnapshotRefreshRepoStub{accounts: accounts}
+	quota := &quotaSnapshotUsageReaderStub{usage: quotaSnapshotTestUsage()}
+	lock := &quotaSnapshotLeaderLockStub{acquired: true, renewOK: true}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.SetLeaderLock(lock, nil)
+
+	require.NoError(t, svc.RunOnce(context.Background()))
+	require.Equal(t, 2, lock.renews, "one renewal per processed page")
+	require.Len(t, quota.calls, 101)
+	require.Equal(t, 1, lock.releases)
+}
+
+// Losing the leader lock at a page boundary must abort the cycle immediately:
+// continuing would sweep concurrently with the new leader.
+func TestOpenAIQuotaSnapshotRefreshAbortsWhenLeaderLockRenewFails(t *testing.T) {
+	accounts := make([]Account, 0, 101)
+	for id := int64(1); id <= 101; id++ {
+		accounts = append(accounts, quotaSnapshotParent(id, StatusActive, true))
+	}
+	repo := &quotaSnapshotRefreshRepoStub{accounts: accounts}
+	quota := &quotaSnapshotUsageReaderStub{usage: quotaSnapshotTestUsage()}
+	lock := &quotaSnapshotLeaderLockStub{acquired: true, renewOK: false}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.SetLeaderLock(lock, nil)
+
+	err := svc.RunOnce(context.Background())
+	require.Error(t, err, "a lost leader lock must fail the cycle")
+	require.Len(t, quota.calls, 100, "only the first page may be processed before aborting")
+	require.NotContains(t, quota.calls, int64(101), "the second page must not run after the lock is lost")
+	require.Equal(t, 1, lock.renews)
+	require.Equal(t, 1, lock.releases, "the lock must still be released via the deferred release")
 }

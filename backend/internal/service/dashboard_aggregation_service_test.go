@@ -184,6 +184,10 @@ func (c *dashboardAggregationLeaderLockRecordingCache) TryAcquireLeaderLock(ctx 
 	return c.delegate.TryAcquireLeaderLock(ctx, key, owner, ttl)
 }
 
+func (c *dashboardAggregationLeaderLockRecordingCache) RenewLeaderLock(ctx context.Context, key, owner string, ttl time.Duration) (bool, error) {
+	return c.delegate.RenewLeaderLock(ctx, key, owner, ttl)
+}
+
 func (c *dashboardAggregationLeaderLockRecordingCache) ReleaseLeaderLock(ctx context.Context, key, owner string) error {
 	return c.delegate.ReleaseLeaderLock(ctx, key, owner)
 }

@@ -77,3 +77,68 @@ func TestLeaderLockCache_TTLExpires(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok, "lock should be re-acquirable after the TTL expires")
 }
+
+// Renewal is compare-and-expire: only the current owner can extend the TTL. A
+// stale holder whose lease expired — and whose key was re-acquired by a peer —
+// must never extend the new owner's lock.
+func TestLeaderLockCache_RenewIsCompareAndExpire(t *testing.T) {
+	cache, _ := newLeaderLockTestCache(t)
+	ctx := context.Background()
+	const key = "openai:quota:snapshot:refresh:leader"
+
+	ok, err := cache.TryAcquireLeaderLock(ctx, key, "A", time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	ok, err = cache.RenewLeaderLock(ctx, key, "A", time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok, "the current owner should renew")
+
+	ok, err = cache.RenewLeaderLock(ctx, key, "B", time.Minute)
+	require.NoError(t, err)
+	require.False(t, ok, "a peer must not renew someone else's lock")
+}
+
+// Renewal must actually extend the lease: after the original TTL has passed the
+// key survives because the owner renewed with a longer TTL.
+func TestLeaderLockCache_RenewExtendsTTL(t *testing.T) {
+	cache, mr := newLeaderLockTestCache(t)
+	ctx := context.Background()
+	const key = "openai:quota:snapshot:refresh:leader"
+
+	ok, err := cache.TryAcquireLeaderLock(ctx, key, "A", time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	ok, err = cache.RenewLeaderLock(ctx, key, "A", 10*time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	mr.FastForward(2 * time.Minute)
+
+	val, err := cache.rdb.Get(ctx, leaderLockKeyPrefix+key).Result()
+	require.NoError(t, err)
+	require.Equal(t, "A", val, "renewed lock must outlive the original TTL")
+
+	ok, err = cache.RenewLeaderLock(ctx, key, "B", time.Minute)
+	require.NoError(t, err)
+	require.False(t, ok, "a peer must not renew someone else's lock")
+}
+
+// Once the key is gone (expired or deleted) renewal must report a lost lock
+// instead of an error.
+func TestLeaderLockCache_RenewAfterExpiryReturnsFalse(t *testing.T) {
+	cache, mr := newLeaderLockTestCache(t)
+	ctx := context.Background()
+	const key = "openai:quota:snapshot:refresh:leader"
+
+	ok, err := cache.TryAcquireLeaderLock(ctx, key, "A", time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	mr.FastForward(2 * time.Minute)
+
+	ok, err = cache.RenewLeaderLock(ctx, key, "A", time.Minute)
+	require.NoError(t, err)
+	require.False(t, ok, "renewing an expired lock reports a lost lock, not an error")
+}

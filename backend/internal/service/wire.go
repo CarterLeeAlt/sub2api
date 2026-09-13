@@ -195,12 +195,15 @@ func ProvideOpenAIQuotaService(
 }
 
 // ProvideOpenAIQuotaSnapshotRefreshService starts the process-wide read-only
-// OpenAI quota snapshot runner.
+// OpenAI quota snapshot runner. rateLimitService is optional; when present it
+// receives quota-driven recovery triggers for freshly persisted authoritative
+// WHAM snapshots (same CAS-guarded reconciliation as the account-usage path).
 func ProvideOpenAIQuotaSnapshotRefreshService(
 	accountRepo AccountRepository,
 	quotaService *OpenAIQuotaService,
 	lockCache LeaderLockCache,
 	db *sql.DB,
+	rateLimitService *RateLimitService,
 ) (*OpenAIQuotaSnapshotRefreshService, error) {
 	refreshRepo, ok := accountRepo.(OpenAIQuotaSnapshotRefreshRepository)
 	if !ok {
@@ -208,6 +211,9 @@ func ProvideOpenAIQuotaSnapshotRefreshService(
 	}
 	service := NewOpenAIQuotaSnapshotRefreshService(refreshRepo, quotaService)
 	service.SetLeaderLock(lockCache, db)
+	if rateLimitService != nil {
+		service.SetRecoveryReconciler(rateLimitService)
+	}
 	service.Start()
 	return service, nil
 }

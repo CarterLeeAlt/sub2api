@@ -445,12 +445,21 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			markDecodedModified()
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Normalized /responses image_generation tool payload")
 		}
-		if normalizeOpenAIResponsesImageOnlyModel(decoded) {
-			markDecodedModified()
-			if model, ok := decoded["model"].(string); ok {
-				upstreamModel = strings.TrimSpace(model)
+		// 只对 image-only 请求做动态主模型解析：manifest 已由 FetchCodexModelsManifest
+		// 缓存，但普通文本请求不应为归一化付出任何查找成本。解析失败时回落静态主模型，
+		// 与 /v1/images 非直调路径的失败语义保持一致。
+		if imageOnlyModel := strings.TrimSpace(firstNonEmptyString(decoded["model"])); isOpenAIImageGenerationModel(imageOnlyModel) {
+			responsesMainModel := ""
+			if resolved, resolveErr := s.resolveOpenAIImagesResponsesMainModel(ctx, account); resolveErr == nil {
+				responsesMainModel = resolved
 			}
-			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Normalized /responses image-only model request inbound_model=%s image_model=%s upstream_model=%s", requestView.Model, billingModel, upstreamModel)
+			if normalizeOpenAIResponsesImageOnlyModel(decoded, responsesMainModel) {
+				markDecodedModified()
+				if model, ok := decoded["model"].(string); ok {
+					upstreamModel = strings.TrimSpace(model)
+				}
+				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Normalized /responses image-only model request inbound_model=%s image_model=%s upstream_model=%s", requestView.Model, billingModel, upstreamModel)
+			}
 		}
 		if err := validateOpenAIResponsesImageModel(decoded, upstreamModel); err != nil {
 			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
@@ -460,6 +469,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if hasOpenAIImageGenerationTool(decoded) {
 			imageIntent = true
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] /responses image_generation request inbound_model=%s mapped_model=%s account_type=%s", requestView.Model, upstreamModel, account.Type)
+			// handler 只按客户端显式声明预判占槽；桥接注入/规范化在 service 层才
+			// 确认生图意图，这里补偿占槽，避免最高负载的生图请求绕过 ImageConcurrency。
+			// 占槽失败时 acquirer 已写出 429，无需再次响应。
+			if !acquireOpenAIImageSlotForForward(c) {
+				return nil, errors.New("image generation concurrency limit exceeded")
+			}
 		}
 		if codexImageGenerationBridgeEnabled && applyCodexImageGenerationBridgeInstructions(decoded) {
 			markDecodedModified()
@@ -572,8 +587,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			// so the header builder derives the same namespace exactly once.
 			promptCacheKey = clientPromptCacheKey
 		} else if currentPromptCacheKey, ok := decoded["prompt_cache_key"].(string); ok && currentPromptCacheKey != "" {
-			// Fingerprint convergence may inject a default key when the client did
-			// not provide one; preserve that existing fallback.
+			// 指纹收敛只把客户端已提供的 key 改写为账号作用域值，从不注入新键；
+			// 这里读到的是客户端原始（可能已被收敛改写）的 key。
 			promptCacheKey = currentPromptCacheKey
 		} else if codexResult.PromptCacheKey != "" {
 			promptCacheKey = codexResult.PromptCacheKey

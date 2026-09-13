@@ -4,7 +4,7 @@
 # Copy this file to /etc/sub2api/config.yaml and modify as needed
 # 复制此文件到 /etc/sub2api/config.yaml 并根据需要修改
 #
-# Documentation / 文档: https://github.com/Wei-Shaw/sub2api
+# Documentation / 文档: https://github.com/CarterLeeAlt/sub2api
 
 # =============================================================================
 # Server Configuration
@@ -758,6 +758,13 @@ dashboard_aggregation:
   retention:
     # Raw usage_logs retention
     # 原始 usage_logs 保留天数
+    # 注意：这是原始用量日志的唯一自动删除通道——dashboard_aggregation 聚合作业
+    # 会按此窗口静默删除超期原始日志（删除后不可恢复），与下方 usage_cleanup
+    # 管理员手动清理任务相互独立、无联动。规划保留期时以本值为准。
+    # Note: this is the ONLY automatic deletion channel for raw usage logs —
+    # the aggregation job silently prunes logs older than this window. It is
+    # independent from (and not coordinated with) the admin-driven usage_cleanup
+    # tasks below.
     usage_logs_days: 90
     # Hourly aggregation retention
     # 小时聚合保留天数

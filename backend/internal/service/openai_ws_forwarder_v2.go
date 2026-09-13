@@ -136,6 +136,17 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			turnState = savedTurnState
 		}
 	}
+	// turn-state 跨账号回带守卫：HTTP Forward/Passthrough 在出站前都会用
+	// guardOpenAICodexTurnStateEcho 剥离已知由其他账号铸造的回带值，WS 原生路径
+	// 在此补齐同款守卫。此处是客户端回带（请求头）与 stateStore 恢复两个来源的
+	// 汇合点，统一过一次守卫即可覆盖；之后由本账号上游握手刷新的值（见下方
+	// handshakeTurnState）不属于跨账号回带，不再重复判定。
+	if turnState != "" {
+		guardedTurnState := http.Header{}
+		guardedTurnState.Set(openAIWSTurnStateHeader, turnState)
+		s.guardOpenAICodexTurnStateEcho(c, account, guardedTurnState)
+		turnState = strings.TrimSpace(guardedTurnState.Get(openAIWSTurnStateHeader))
+	}
 	preferredConnID := ""
 	if stateStore != nil && previousResponseID != "" {
 		if connID, ok := stateStore.GetResponseConn(previousResponseID); ok {
@@ -376,6 +387,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		mappedModelBytes = []byte(mappedModel)
 	}
 	bufferedStreamEvents := make([][]byte, 0, 4)
+	bufferedStreamBytes := 0
 	eventCount := 0
 	tokenEventCount := 0
 	terminalEventCount := 0
@@ -499,6 +511,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			emitStreamMessage(buffered, false)
 		}
 		bufferedStreamEvents = bufferedStreamEvents[:0]
+		bufferedStreamBytes = 0
 		flushStreamWriter(true)
 		flushedBufferedEventCount += flushed
 		if debugEnabled {
@@ -744,9 +757,32 @@ readLoop:
 			// 以便上游早期断连时仍可安全回退到 HTTP，不给下游发送半截流。
 			shouldBuffer := firstTokenMs == nil && !isTokenEvent && !isTerminalEvent
 			if shouldBuffer {
+				// pre-token 缓冲与 HTTP 路径口径对齐：累计字节上限直接复用首输出暂存
+				// 的 8MB 硬限（openAIFirstOutputStageMaxBytes），防止上游在产出首个
+				// token 前无限倾倒非 token 事件把进程内存打爆。超限按"上游异常"既有
+				// 路径处理：连接标记不可复用并回退 HTTP——此时尚未向下游写出任何
+				// 字节（wroteDownstream 必为 false），回退安全。
+				if bufferedStreamBytes+len(message) > openAIFirstOutputStageMaxBytes {
+					lease.MarkBroken()
+					logOpenAIWSModeInfo(
+						"pretoken_buffer_overflow account_id=%d conn_id=%s buffered_bytes=%d incoming_bytes=%d limit=%d events=%d buffered_events=%d",
+						account.ID,
+						connID,
+						bufferedStreamBytes,
+						len(message),
+						openAIFirstOutputStageMaxBytes,
+						eventCount,
+						bufferedEventCount,
+					)
+					return nil, wrapOpenAIWSFallback(
+						"pretoken_buffer_limit",
+						fmt.Errorf("%w: buffered=%d incoming=%d limit=%d", errOpenAIFirstOutputStageLimit, bufferedStreamBytes, len(message), openAIFirstOutputStageMaxBytes),
+					)
+				}
 				buffered := make([]byte, len(message))
 				copy(buffered, message)
 				bufferedStreamEvents = append(bufferedStreamEvents, buffered)
+				bufferedStreamBytes += len(buffered)
 				bufferedEventCount++
 				if debugEnabled && shouldLogOpenAIWSBufferedEvent(bufferedEventCount) {
 					logOpenAIWSModeDebug(

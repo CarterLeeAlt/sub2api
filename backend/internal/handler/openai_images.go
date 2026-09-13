@@ -62,11 +62,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		return
 	}
 
-	if isMultipartImagesContentType(c.GetHeader("Content-Type")) {
-		setOpsRequestContext(c, "", false)
-	} else {
-		setOpsRequestContext(c, "", false)
-	}
+	setOpsRequestContext(c, "", false)
 
 	parsed, err := h.gatewayService.ParseOpenAIImagesRequest(c, body)
 	if err != nil {

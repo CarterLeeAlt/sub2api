@@ -64,7 +64,31 @@ func forEachOpenAISSEFrame(body string, fn func(string, []byte)) {
 			emitData(frame.Data)
 			return
 		}
-		for _, value := range strings.Split(frame.Data, "\n") {
+		lines := strings.Split(frame.Data, "\n")
+		if len(lines) > 1 {
+			eachLineJSON := true
+			for _, value := range lines {
+				trimmed := strings.TrimSpace(value)
+				if trimmed == "" || trimmed == "[DONE]" {
+					// 终止哨兵与空行不是载荷（emitData 会跳过），
+					// 不应据此否定"每行各自是合法 JSON"的挤帧形态。
+					continue
+				}
+				if !gjson.Valid(trimmed) {
+					eachLineJSON = false
+					break
+				}
+			}
+			if !eachLineJSON {
+				// SSE 规范中一个事件的多个 data: 行拼接后（frame.Data 即拼接结果）
+				// 才是完整载荷。整体不是合法 JSON 的多行 data（如纯文本事件）必须
+				// 整体回调；逐行拆分会把一条事件错拆成多条，破坏事件原子性。仅对
+				// "每行各自是合法 JSON"的拼接文档形态保持逐行回调的既有兼容行为。
+				emitData(frame.Data)
+				return
+			}
+		}
+		for _, value := range lines {
 			emitData(value)
 		}
 	}

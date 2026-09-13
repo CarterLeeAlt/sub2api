@@ -347,7 +347,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	openAIQuotaSnapshotRefreshService, err := service.ProvideOpenAIQuotaSnapshotRefreshService(accountRepository, openAIQuotaService, leaderLockCache, db)
+	openAIQuotaSnapshotRefreshService, err := service.ProvideOpenAIQuotaSnapshotRefreshService(accountRepository, openAIQuotaService, leaderLockCache, db, rateLimitService)
 	if err != nil {
 		return nil, err
 	}

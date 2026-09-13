@@ -556,7 +556,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if imageReleaseFunc != nil {
 			defer imageReleaseFunc()
 		}
+	} else {
+		// 显式意图为 false 时，Codex 桥接可能在 service 层才注入 image_generation
+		// 工具升级出生图意图：注入补偿占槽器，由 Forward 在注入成功后占用，
+		// handler 出口统一释放，避免该路径绕过 ImageConcurrency。
+		service.SetOpenAIImageSlotAcquirer(c, openAIForwardImageSlotAcquirer{h: h})
 	}
+	defer service.ReleaseOpenAIImageSlotForForward(c)
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
@@ -2934,7 +2940,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					turnErr,
 				)
 				if turnErr != nil {
-					if result == nil || result.ImageCount <= 0 {
+					// 断连排水（ClientDisconnect）与图片部分产出（ImageCount>0）的 turn
+					// 虽以错误收尾，但上游已计量的 usage 必须入账；其余错误仍直接放弃。
+					if result == nil || (result.ImageCount <= 0 && !result.ClientDisconnect) {
 						return
 					}
 					// cyber 命中时该 turn 的用量已由 recordCyberPolicyIfMarked(forwardErrored=true)
@@ -2945,6 +2953,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					reqLog.Warn("openai.websocket_partial_error_with_image_result",
 						zap.Int64("account_id", account.ID),
 						zap.Int("image_count", result.ImageCount),
+						zap.Bool("client_disconnect", result.ClientDisconnect),
 						zap.Error(turnErr),
 					)
 				}
@@ -3306,6 +3315,14 @@ func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(parent context.Con
 		}
 	}()
 	task(ctx)
+}
+
+// openAIForwardImageSlotAcquirer 把 handler 的生图并发槽借给 service 层 Forward，
+// 供桥接注入等 imageIntent 事后升级时补偿占槽；占槽失败时复用统一的 429 响应。
+type openAIForwardImageSlotAcquirer struct{ h *OpenAIGatewayHandler }
+
+func (a openAIForwardImageSlotAcquirer) AcquireForForward(c *gin.Context) (func(), bool) {
+	return a.h.acquireImageGenerationSlot(c, false)
 }
 
 func (h *OpenAIGatewayHandler) acquireImageGenerationSlot(c *gin.Context, streamStarted bool) (func(), bool) {

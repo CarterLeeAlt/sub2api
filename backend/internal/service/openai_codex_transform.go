@@ -294,8 +294,8 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		result.Modified = true
 	}
 
-	// instructions 处理逻辑：根据是否是 Codex CLI 分别调用不同方法
-	if !opts.SkipDefaultInstructions && applyInstructions(reqBody, opts.IsCodexCLI) {
+	// instructions 处理逻辑：仅在 instructions 为空时按映射后模型填充默认值。
+	if !opts.SkipDefaultInstructions && applyInstructions(reqBody) {
 		result.Modified = true
 	}
 	if isCodexSparkModel(normalizedModel) && applyCodexSparkImageUnsupportedInstructions(reqBody) {
@@ -457,6 +457,19 @@ func codexToolsContainFunctionName(rawTools any, name string) bool {
 	return false
 }
 
+// looksLikeOpenAIToolCallID 判断 id 是否形如工具调用 ID（call_/fc_/ctc_/tsc_
+// 前缀）。消息 ID（如 msg_xxx）不满足该形态，不能当 call_id 配对工具输出。
+func looksLikeOpenAIToolCallID(id string) bool {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return false
+	}
+	return strings.HasPrefix(trimmed, "call_") ||
+		strings.HasPrefix(trimmed, "fc_") ||
+		strings.HasPrefix(trimmed, "ctc_") ||
+		strings.HasPrefix(trimmed, "tsc_")
+}
+
 func normalizeCodexToolRoleMessages(input []any) ([]any, bool) {
 	if len(input) == 0 {
 		return input, false
@@ -476,7 +489,15 @@ func normalizeCodexToolRoleMessages(input []any) ([]any, bool) {
 			continue
 		}
 
-		callID := firstNonEmptyString(m["call_id"], m["tool_call_id"], m["id"])
+		// call_id 兜底链只接受工具调用 ID 形态的 id：把消息 ID（如 msg_xxx）当
+		// call_id 会生成无法配对的 function_call_output，被上游以
+		// "No tool call found for function call output" 400 拒绝。
+		callID := firstNonEmptyString(m["call_id"], m["tool_call_id"])
+		if callID == "" {
+			if fallbackID, ok := m["id"].(string); ok && looksLikeOpenAIToolCallID(fallbackID) {
+				callID = fallbackID
+			}
+		}
 		callID = strings.TrimSpace(callID)
 		if callID == "" {
 			// Responses does not accept role:"tool". If no call id is available,
@@ -694,8 +715,28 @@ func hasOpenAIImageGenerationTool(reqBody map[string]any) bool {
 }
 
 func hasCodexImageGenerationFunctionTool(reqBody map[string]any) bool {
-	return len(reqBody) > 0 &&
-		codexToolsContainFunctionName(reqBody["tools"], codexImageGenerationFunctionToolName)
+	if len(reqBody) == 0 {
+		return false
+	}
+	if codexToolsContainFunctionName(reqBody["tools"], codexImageGenerationFunctionToolName) {
+		return true
+	}
+	// 新版客户端（Responses Lite）把运行时工具放在 input 的 additional_tools 项
+	// 里：只查顶层 tools 会漏检，导致桥接重复注入 image_generation 工具。
+	input, _ := reqBody["input"].([]any)
+	for _, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmptyString(item["type"])) != "additional_tools" {
+			continue
+		}
+		if codexToolsContainFunctionName(item["tools"], codexImageGenerationFunctionToolName) {
+			return true
+		}
+	}
+	return false
 }
 
 func toolsContainImageGeneration(rawTools any) bool {
@@ -1147,7 +1188,12 @@ func validateOpenAIResponsesImageModel(reqBody map[string]any, model string) err
 	return fmt.Errorf("/v1/responses image_generation requests require a Responses-capable text model; image-only model %q is not allowed", model)
 }
 
-func normalizeOpenAIResponsesImageOnlyModel(reqBody map[string]any) bool {
+// normalizeOpenAIResponsesImageOnlyModel rewrites an image-only /responses
+// request into the image_generation tool form. mainModel is the Responses model
+// that will drive the tool: pass the per-account dynamically resolved main model
+// (CUSTOM-002) when the caller has one; an empty value falls back to the static
+// openAIImagesResponsesMainModelValue lookup.
+func normalizeOpenAIResponsesImageOnlyModel(reqBody map[string]any, mainModel string) bool {
 	if len(reqBody) == 0 {
 		return false
 	}
@@ -1216,7 +1262,10 @@ func normalizeOpenAIResponsesImageOnlyModel(reqBody map[string]any) bool {
 		reqBody["tool_choice"] = map[string]any{"type": "image_generation"}
 		modified = true
 	}
-	mainModel := openAIImagesResponsesMainModelValue()
+	mainModel = strings.TrimSpace(mainModel)
+	if mainModel == "" {
+		mainModel = openAIImagesResponsesMainModelValue()
+	}
 	if imageModel != mainModel {
 		modified = true
 	}
@@ -1477,8 +1526,9 @@ func applyCodexClientMetadata(reqBody map[string]any, account *Account) bool {
 	}
 }
 
-// applyInstructions 处理 instructions 字段：仅在 instructions 为空时填充默认值。
-func applyInstructions(reqBody map[string]any, isCodexCLI bool) bool {
+// applyInstructions 仅在 instructions 为空时按模型填充默认值（是否 Codex CLI
+// 已由调用方在选模板时决定，函数本身不需要该信息）。
+func applyInstructions(reqBody map[string]any) bool {
 	if !isInstructionsEmpty(reqBody) {
 		return false
 	}

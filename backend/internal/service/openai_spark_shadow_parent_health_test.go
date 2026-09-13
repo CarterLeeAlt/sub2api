@@ -176,6 +176,63 @@ func TestParentHealthyForShadow(t *testing.T) {
 			"母账号 TempUnschedulableUntil(凭据/传输坏死)冷却期内应挡住影子")
 	})
 
+	t.Run("threshold_paused_parent_does_not_block_shadow", func(t *testing.T) {
+		// CUSTOM-006:账号调度阈值停调写入 TempUnschedulableUntil,但语义是母账号 global
+		// 5h/7d Codex 窗口的主动停调(与 RateLimitResetAt 同一道),不代表凭据/传输坏死 →
+		// 不得连坐 spark 影子,否则阈值停调期间 spark 流量整体不可用。
+		until := time.Now().Add(15 * time.Minute)
+		thresholdPausedParent := &Account{
+			ID:                     100,
+			Platform:               PlatformOpenAI,
+			Type:                   AccountTypeOAuth,
+			Status:                 StatusActive,
+			Schedulable:            true,
+			TempUnschedulableUntil: &until,
+			TempUnschedulableReason: BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+				Platform:         PlatformOpenAI,
+				Window:           "7d",
+				Scope:            "account",
+				ThresholdPercent: 90,
+				UsedPercent:      92.5,
+				Until:            until,
+			}),
+		}
+		require.True(t, IsAccountSchedulingThresholdReason(thresholdPausedParent.TempUnschedulableReason),
+			"precondition: reason 必须被识别为阈值停调")
+		lookup := func(id int64) *Account {
+			if id == thresholdPausedParent.ID {
+				return thresholdPausedParent
+			}
+			return nil
+		}
+		require.True(t, parentHealthyForShadow(shadow, lookup),
+			"母账号阈值停调不应连坐 spark 影子(与 global 限流同口径)")
+	})
+
+	t.Run("non_threshold_temp_unsched_reason_still_blocks_shadow", func(t *testing.T) {
+		// 非阈值来源(如 token 刷新耗尽)的结构化 reason 仍代表共享凭据/传输坏死 → 连坐不变。
+		until := time.Now().Add(15 * time.Minute)
+		tokenRefreshParent := &Account{
+			ID:                      100,
+			Platform:                PlatformOpenAI,
+			Type:                    AccountTypeOAuth,
+			Status:                  StatusActive,
+			Schedulable:             true,
+			TempUnschedulableUntil:  &until,
+			TempUnschedulableReason: BuildTempUnschedReasonPayload("token_refresh", "refresh exhausted"),
+		}
+		require.False(t, IsAccountSchedulingThresholdReason(tokenRefreshParent.TempUnschedulableReason),
+			"precondition: 非阈值来源 reason 不应被误判")
+		lookup := func(id int64) *Account {
+			if id == tokenRefreshParent.ID {
+				return tokenRefreshParent
+			}
+			return nil
+		}
+		require.False(t, parentHealthyForShadow(shadow, lookup),
+			"母账号 token 刷新耗尽冷却期内仍应挡住影子")
+	})
+
 	t.Run("expired_parent_credentials_block_shadow", func(t *testing.T) {
 		// 凭据真正过期(AutoPauseOnExpired + ExpiresAt 已过)→ 透传 token 不可用 → 影子应被挡。
 		expiredAt := time.Now().Add(-1 * time.Hour)

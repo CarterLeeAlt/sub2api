@@ -33,6 +33,15 @@ func (f *fakeLeaderLockCache) TryAcquireLeaderLock(_ context.Context, key, owner
 	return true, nil
 }
 
+func (f *fakeLeaderLockCache) RenewLeaderLock(_ context.Context, key, owner string, _ time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.owners[key] != owner {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (f *fakeLeaderLockCache) ReleaseLeaderLock(_ context.Context, key, owner string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

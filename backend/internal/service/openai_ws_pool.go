@@ -1647,6 +1647,31 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 	maxAge := p.maxConnAge()
 
 	evicted := make([]*openAIWSConn, 0)
+	// tryEvictIdleConnLocked 只有在原子拿到租约令牌后才把连接移出账号池：判定与
+	// 占有必须是同一个动作（与 runBackgroundPingSweep 的剔除范式一致），否则
+	// "isLeased 瞬时读 → 删除出池 → 锁外 close"窗口内刚被借出的连接会被清理方
+	// 从借用者手里误杀。tryAcquire 不需要池锁，但令牌一旦被清理方占有，任何
+	// acquire 都拿不到该连接；close 时 closeWith 会回填令牌，等在 leaseCh 上的
+	// 排队者会按既有路径收到 closed 错误并重试。取令牌失败时若连接已关闭/已判脏
+	// （含 tryAcquire 现场判脏的脏连接），照旧按死连接剔除。
+	tryEvictIdleConnLocked := func(id string, conn *openAIWSConn) bool {
+		if !conn.tryAcquire() {
+			if conn.isClosed() || conn.isUnusable() {
+				delete(ap.conns, id)
+				if len(ap.pinnedConns) > 0 {
+					delete(ap.pinnedConns, id)
+				}
+				evicted = append(evicted, conn)
+			}
+			return false
+		}
+		delete(ap.conns, id)
+		if len(ap.pinnedConns) > 0 {
+			delete(ap.pinnedConns, id)
+		}
+		evicted = append(evicted, conn)
+		return true
+	}
 	for id, conn := range ap.conns {
 		if conn == nil {
 			delete(ap.conns, id)
@@ -1666,23 +1691,16 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 		if p.isConnPinnedLocked(ap, id) {
 			continue
 		}
-		if !conn.isLeased() && conn.waiters.Load() == 0 &&
+		if conn.waiters.Load() == 0 &&
 			!conn.supportsIdlePingWithoutReader() &&
 			conn.idleDuration(now) >= openAIWSConnIdleRecycleAfter {
-			delete(ap.conns, id)
-			if len(ap.pinnedConns) > 0 {
-				delete(ap.pinnedConns, id)
+			if tryEvictIdleConnLocked(id, conn) {
+				p.metrics.scaleDownTotal.Add(1)
 			}
-			evicted = append(evicted, conn)
-			p.metrics.scaleDownTotal.Add(1)
 			continue
 		}
-		if maxAge > 0 && !conn.isLeased() && conn.age(now) > maxAge {
-			delete(ap.conns, id)
-			if len(ap.pinnedConns) > 0 {
-				delete(ap.pinnedConns, id)
-			}
-			evicted = append(evicted, conn)
+		if maxAge > 0 && conn.age(now) > maxAge {
+			tryEvictIdleConnLocked(id, conn)
 		}
 	}
 
@@ -1704,7 +1722,19 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 				continue
 			}
 			// 有等待者的连接不能在清理阶段被淘汰，否则等待中的 acquire 会收到 closed 错误。
-			if conn.isLeased() || conn.waiters.Load() > 0 || p.isConnPinnedLocked(ap, conn.id) {
+			if conn.waiters.Load() > 0 || p.isConnPinnedLocked(ap, conn.id) {
+				continue
+			}
+			// 与空闲/年龄回收同范式：tryAcquire 成功才算空闲候选，令牌由清理方
+			// 暂持直到该连接出池关闭；失败即已被租用，跳过。现场被判脏的连接顺手按死连接剔除。
+			if !conn.tryAcquire() {
+				if conn.isClosed() || conn.isUnusable() {
+					delete(ap.conns, id)
+					if len(ap.pinnedConns) > 0 {
+						delete(ap.pinnedConns, id)
+					}
+					evicted = append(evicted, conn)
+				}
 				continue
 			}
 			idleConns = append(idleConns, conn)
@@ -1723,6 +1753,10 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 				delete(ap.pinnedConns, conn.id)
 			}
 			evicted = append(evicted, conn)
+		}
+		// 未被淘汰的候选连接归还清理方暂持的令牌，保持原有可借出状态不变。
+		for i := redundant; i < len(idleConns); i++ {
+			idleConns[i].release()
 		}
 		if redundant > 0 {
 			p.metrics.scaleDownTotal.Add(int64(redundant))

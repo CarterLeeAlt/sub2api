@@ -209,8 +209,11 @@ func (a *Account) IsSchedulable() bool {
 //   - 未处于 TempUnschedulableUntil 冷却期 —— 对 OpenAI 账号该字段由 401 鉴权失败 /
 //     token 刷新耗尽 / transport·proxy 故障写入(ratelimit/token_refresh/upstream_transport),
 //     都代表**共享凭据或传输通道坏死**;影子共享母 token+proxy,故母处于该冷却期时影子也不可用。
+//     例外:账号调度阈值停调(source=account_scheduling_threshold)虽然写入同一字段,
+//     但语义是母账号 global 5h/7d Codex 窗口的主动停调,与凭据/传输健康无关,不连坐影子。
 //
-// **刻意排除** global 维度的限流/过载窗口(RateLimitResetAt / OverloadUntil)与母账号自身的
+// **刻意排除** global 维度的限流/过载窗口(RateLimitResetAt / OverloadUntil)、账号调度阈值
+// 停调(TempUnschedulableUntil 的 account_scheduling_threshold 来源)与母账号自身的
 // 手动 Schedulable 开关:spark 影子拥有独立 spark 配额窗口,母账号 global 429(走 RateLimitResetAt)
 // 不应连坐 spark(否则重新耦合影子架构本应解耦的两条 429 道)。nil receiver 返回 false。
 func (a *Account) IsCredentialUsableForShadow() bool {
@@ -222,7 +225,8 @@ func (a *Account) IsCredentialUsableForShadow() bool {
 		return false
 	}
 	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
-		return false
+		// 例外放行:调度阈值停调不代表凭据/传输坏死,不连坐 spark 影子。
+		return IsAccountSchedulingThresholdReason(strings.TrimSpace(a.TempUnschedulableReason))
 	}
 	return true
 }

@@ -164,6 +164,14 @@ func StopOpenAICompactSSEKeepaliveCommitted(c *gin.Context) bool {
 	return committed
 }
 
+// StopOpenAISSEKeepaliveCommitted 与 StopOpenAICompactSSEKeepaliveCommitted 完全
+// 同机制：passthrough 的 startOpenAISSEKeepalive 与 compact 心跳共用同一 keepalive
+// 实例与上下文键，语义兼容，直接复用。供 passthrough 错误写回路径在提交终态
+// 错误前判定"200 已被心跳提交"，据此降级为流内 response.failed 终止事件。
+func StopOpenAISSEKeepaliveCommitted(c *gin.Context) bool {
+	return StopOpenAICompactSSEKeepaliveCommitted(c)
+}
+
 // OpenAICompactKeepaliveAdjustedWrittenSize 返回排除 compact 心跳注释字节后
 // 的响应已写字节数；无心跳的请求等价于 c.Writer.Size()。心跳字节不构成语义
 // 响应——handler 以"Forward 前后 Size 是否变化"判定是否已向客户端写出响应

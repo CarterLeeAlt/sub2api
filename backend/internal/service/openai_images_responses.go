@@ -21,6 +21,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// openAIImagesNoMainModelFailoverBody is the failover error body returned when
+// the OAuth models manifest has no API-supported image-capable Codex main
+// model. It marks an account-level capability gap so the handler fails over to
+// another account instead of surfacing a hard 502 to the client.
+var openAIImagesNoMainModelFailoverBody = []byte(`{"error":{"type":"upstream_error","code":"no_image_main_model","message":"OpenAI OAuth account has no API-supported image-capable Codex main model"}}`)
+
 type openAIResponsesImageResult struct {
 	Result        string
 	RevisedPrompt string
@@ -688,7 +694,10 @@ func extractOpenAIImagesModelText(body []byte) string {
 	text := strings.TrimSpace(b.String())
 	const maxText = 600
 	if len(text) > maxText {
-		return text[:maxText]
+		// Truncate on a rune boundary: model text is frequently multi-byte
+		// UTF-8 and a raw byte cut would split a rune into invalid bytes that
+		// then leak into client-facing error messages.
+		return truncateString(text, maxText)
 	}
 	return text
 }
@@ -778,11 +787,12 @@ func summarizeOpenAIImagesNoOutputBody(body []byte) string {
 	if incompleteReason != "" {
 		fmt.Fprintf(&b, " incomplete_reason=%s", incompleteReason)
 	}
-	// 附 body 截断片段（脱敏后），上限 1KB，避免日志膨胀。
+	// 附 body 截断片段（脱敏后），上限 1KB，避免日志膨胀。按 rune 边界截断，
+	// 避免切断多字节 UTF-8 字符产生乱码。
 	snippet := strings.TrimSpace(string(body))
 	const maxSnippet = 1024
 	if len(snippet) > maxSnippet {
-		snippet = snippet[:maxSnippet] + "...(truncated)"
+		snippet = truncateString(snippet, maxSnippet) + "...(truncated)"
 	}
 	if snippet != "" {
 		fmt.Fprintf(&b, " body=%s", snippet)
@@ -980,7 +990,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 	}
 
 	// 主控不可用不代表图片模型配额耗尽，直接透传，避免误冷却整个图片账号池。
-	if account.IsOpenAIOAuthLike() && isOpenAIImagesMainModelError(resp.StatusCode, body) {
+	if account.IsOpenAIOAuthLike() && isOpenAIImagesMainModelErrorForRequest(ctx, resp.StatusCode, body) {
 		upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
 		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
 		return nil, upErr
@@ -1175,7 +1185,26 @@ func (s *OpenAIGatewayService) parseOpenAIImagesSSEUsageBytes(data []byte, usage
 		return
 	}
 	if toolUsage, ok := openAIImagesToolUsageFromGJSON(gjson.GetBytes(data, "response.tool_usage.image_gen")); ok {
+		// tool_usage.image_gen only carries the four authoritative token
+		// counters; it has no cache detail fields, so adopting it wholesale
+		// would wipe the cache read/creation details parsed off earlier SSE
+		// frames. Adopt toolUsage wholesale first, then merge back the detail
+		// fields it does not express, mirroring how the direct path
+		// (codexDirectImagesUsage) rebuilds cache details and the semantics of
+		// mergeOpenAIUsageNonZero.
+		cacheRead := usage.CacheReadInputTokens
+		imageCacheRead := usage.ImageCacheReadTokens
+		cacheCreation := usage.CacheCreationInputTokens
 		*usage = toolUsage
+		if cacheRead > 0 && usage.CacheReadInputTokens == 0 {
+			usage.CacheReadInputTokens = cacheRead
+		}
+		if imageCacheRead > 0 && usage.ImageCacheReadTokens == 0 {
+			usage.ImageCacheReadTokens = imageCacheRead
+		}
+		if cacheCreation > 0 && usage.CacheCreationInputTokens == 0 {
+			usage.CacheCreationInputTokens = cacheCreation
+		}
 	}
 }
 
@@ -1432,7 +1461,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 		}
 		remaining := 600 - fallbackText.Len()
 		if len(text) > remaining {
-			text = text[:remaining]
+			// Rune-safe truncation: this text can flow into a client-facing
+			// error message and a raw byte cut would split multi-byte UTF-8.
+			text = truncateString(text, remaining)
 		}
 		_, _ = fallbackText.WriteString(text)
 	}
@@ -1829,8 +1860,25 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	} else {
 		responsesMainModel, resolveErr := s.resolveOpenAIImagesResponsesMainModel(upstreamCtx, account)
 		if resolveErr != nil {
-			return nil, resolveErr
+			// The models manifest parsed fine but carries no API-supported
+			// image-capable Codex main model: an account-level capability gap.
+			// Surface it as an account failover signal instead of a plain error,
+			// which the handler would turn into a hard 502 without switching
+			// accounts.
+			logger.LegacyPrintf(
+				"service.openai_gateway",
+				"[OpenAI] Images OAuth resolve main model failed account_id=%d request_model=%s error=%v",
+				account.ID,
+				requestModel,
+				resolveErr,
+			)
+			setOpsUpstreamError(c, http.StatusBadGateway, "no image main model", resolveErr.Error())
+			return nil, &UpstreamFailoverError{
+				StatusCode:   http.StatusBadGateway,
+				ResponseBody: openAIImagesNoMainModelFailoverBody,
+			}
 		}
+		upstreamCtx = withOpenAIImagesResolvedMainModel(upstreamCtx, responsesMainModel)
 		responsesBody, err = buildOpenAIImagesResponsesRequestForMainModel(parsed, responsesMainModel, requestModel)
 		targetURL = chatgptCodexURL
 	}
@@ -1896,7 +1944,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 			return s.forwardOpenAIImagesOAuth(markAgentIdentityTaskRecoveryTried(ctx), c, account, parsed, channelMappedModel)
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
-		if !direct && isOpenAIImagesMainModelError(resp.StatusCode, respBody) {
+		if !direct && isOpenAIImagesMainModelErrorForRequest(upstreamCtx, resp.StatusCode, respBody) {
 			return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, upstreamModel)
 		}
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
@@ -1942,7 +1990,10 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		if direct {
 			usage, imageCount, imageOutputSizes, firstTokenMs, err = s.handleOpenAIImagesStreamingResponse(resp, c, startTime, parsed)
 		} else {
-			usage, imageCount, imageOutputSizes, firstTokenMs, err = s.handleOpenAIImagesOAuthStreamingResponse(resp, c, startTime, parsed.ResponseFormat, openAIImagesStreamPrefix(parsed), upstreamModel)
+			// fallbackModel is the client-facing response meta fallback: use
+			// requestModel (the same contract as the non-streaming branch and
+			// the direct path), not the channel-mapped upstreamModel.
+			usage, imageCount, imageOutputSizes, firstTokenMs, err = s.handleOpenAIImagesOAuthStreamingResponse(resp, c, startTime, parsed.ResponseFormat, openAIImagesStreamPrefix(parsed), requestModel)
 		}
 		if err != nil {
 			if imageCount > 0 {
@@ -2118,7 +2169,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthResponseError(
 	if !errors.As(err, &upstreamErr) {
 		return err
 	}
-	if isOpenAIImagesMainModelError(upstreamErr.StatusCode, openAIImagesUpstreamErrorResponseBody(upstreamErr)) {
+	if isOpenAIImagesMainModelErrorForRequest(ctx, upstreamErr.StatusCode, openAIImagesUpstreamErrorResponseBody(upstreamErr)) {
 		if !responseWritten {
 			writeOpenAIImagesUpstreamErrorResponse(c, upstreamErr)
 		}

@@ -15,7 +15,7 @@ import (
 // with the account's live catalog without forcing a network round-trip for every
 // image request.
 func (s *OpenAIGatewayService) resolveOpenAIImagesResponsesMainModel(ctx context.Context, account *Account) (string, error) {
-	legacyFallback := strings.TrimSpace(openAIImagesResponsesMainModel)
+	legacyFallback := strings.TrimSpace(openAIImagesResponsesMainModelValue())
 	if s == nil || account == nil || !account.IsOpenAIOAuth() {
 		return legacyFallback, nil
 	}
@@ -87,4 +87,26 @@ func buildOpenAIImagesResponsesRequestForMainModel(parsed *OpenAIImagesRequest, 
 		return nil, fmt.Errorf("set OpenAI images Responses main model: %w", err)
 	}
 	return body, nil
+}
+
+// openAIImagesResolvedMainModelContextKey carries the Responses main model this
+// request actually selected via resolveOpenAIImagesResponsesMainModel. The
+// plan-gated model-error guard consumes it so the verdict matches the model the
+// upstream was asked to drive, not just the static default.
+type openAIImagesResolvedMainModelContextKey struct{}
+
+func withOpenAIImagesResolvedMainModel(ctx context.Context, mainModel string) context.Context {
+	mainModel = strings.TrimSpace(mainModel)
+	if mainModel == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, openAIImagesResolvedMainModelContextKey{}, mainModel)
+}
+
+func openAIImagesResolvedMainModelFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	model, _ := ctx.Value(openAIImagesResolvedMainModelContextKey{}).(string)
+	return strings.TrimSpace(model)
 }

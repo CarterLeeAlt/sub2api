@@ -1829,9 +1829,8 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs == 0 {
 		cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs = 15000
 	}
-	if cfg.Gateway.OpenAIScheduler.StickyEscapeErrorRate == 0 {
-		cfg.Gateway.OpenAIScheduler.StickyEscapeErrorRate = 0.5
-	}
+	// StickyEscapeErrorRate 的默认 0.5 已通过 SetDefault 注册（见
+	// setEnvReachableDefaults），显式 0 = 永不按错误率逃逸，是合法配置，不再改写。
 	// Kept as a backstop: setEnvReachableDefaults now registers this key with its
 	// effective default (true), so IsSet always reports true and this branch no
 	// longer fires. It still guards the default if that registration is dropped.
@@ -2597,8 +2596,13 @@ func setEnvReachableDefaults() {
 	// Registering false would make IsSet always report true and permanently
 	// disable sticky escape, so register the effective default instead. An
 	// explicit false in config or env still wins.
+	//
+	// sticky_escape_error_rate registers its EFFECTIVE default (0.5) directly so
+	// that an explicit 0 ("never escape on error rate") survives unmarshal — the
+	// former post-unmarshal `== 0 → 0.5` backstop made that legal value
+	// unexpressible. Validation still bounds the value to [0, 1].
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_enabled", true)
-	viper.SetDefault("gateway.openai_scheduler.sticky_escape_error_rate", 0.0)
+	viper.SetDefault("gateway.openai_scheduler.sticky_escape_error_rate", 0.5)
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_ttft_ms", 0)
 
 	// server.trusted_proxies and security.forwarded_client_ip_headers are the

@@ -741,7 +741,26 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			firstClientMessage = s.ReplaceModelInBody(firstClientMessage, mappedModel)
 		}
 	}
+	// capturedSessionModel 在拨号与首帧准备阶段由当前 goroutine 独占写入；relay
+	// 启动后它会被 c2u policy filter（session.update 刷新）与 u2c
+	// BeforeWriteClient（失败副作用 / 限流信号）跨 goroutine 读写，因此统一经
+	// atomic.Pointer 存取，与 usageMeta 的做法一致。
+	var capturedSessionModelPtr atomic.Pointer[string]
+	storeCapturedSessionModel := func(model string) {
+		if model == "" {
+			capturedSessionModelPtr.Store(nil)
+			return
+		}
+		capturedSessionModelPtr.Store(&model)
+	}
+	loadCapturedSessionModel := func() string {
+		if model := capturedSessionModelPtr.Load(); model != nil {
+			return *model
+		}
+		return ""
+	}
 	capturedSessionModel := openAIWSPassthroughPolicyModelForFrame(account, firstClientMessage)
+	storeCapturedSessionModel(capturedSessionModel)
 	if capturedSessionModel != "" && capturedSessionModel != strings.TrimSpace(gjson.GetBytes(firstClientMessage, "model").String()) {
 		firstClientMessage = s.ReplaceModelInBody(firstClientMessage, capturedSessionModel)
 	}
@@ -900,9 +919,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			statusCode,
 			truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
 		)
-		s.handleOpenAIWSDialTransientFailure(ctx, account, capturedSessionModel, dialErr)
+		s.handleOpenAIWSDialTransientFailure(ctx, account, loadCapturedSessionModel(), dialErr)
 		if statusCode == http.StatusTooManyRequests {
-			s.persistOpenAIWSRateLimitSignal(ctx, account, handshakeHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()), capturedSessionModel)
+			s.persistOpenAIWSRateLimitSignal(ctx, account, handshakeHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()), loadCapturedSessionModel())
 			return s.newOpenAIWSRateLimitFailoverError(account, handshakeHeaders, nil, err.Error())
 		}
 		return s.mapOpenAIWSPassthroughDialError(err, statusCode, handshakeHeaders)
@@ -972,10 +991,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	policyClientConn := &openAIWSPolicyEnforcingFrameConn{
 		inner: clientFrameConn,
-		// 注意线程安全：filter 仅在 runClientToUpstream 这一条
-		// goroutine 中被调用（passthrough_relay.go: ReadFrame loop），
-		// capturedSessionModel 的读写都发生在该 goroutine 内，因此无需
-		// 加锁/原子化。
+		// 注意线程安全：filter 在 runClientToUpstream goroutine 中执行
+		// （passthrough_relay.go: ReadFrame loop），BeforeWriteClient 回调则在
+		// runUpstreamToClient goroutine 中执行——两者都会读写
+		// capturedSessionModel，必须经上方的 atomic.Pointer 存取。
 		filter: func(msgType coderws.MessageType, payload []byte) (out []byte, blocked *OpenAIFastBlockedError, filterErr error) {
 			if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 				return payload, nil, nil
@@ -1047,7 +1066,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if isResponseCreate {
 				requestModelForThisFrame = usageMeta.requestModelForFrame(payload)
 				if requestModelForThisFrame == "" {
-					requestModelForThisFrame = capturedSessionModel
+					requestModelForThisFrame = loadCapturedSessionModel()
 				}
 				if hooks != nil && hooks.BeforeRequest != nil {
 					if err := hooks.BeforeRequest(turnNo, payload, requestModelForThisFrame); err != nil {
@@ -1077,7 +1096,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			// 绕过路径。这里只看 session.update 事件中的 session.model
 			// 字段，response.create 自己的 model 仍然由其本帧字段决定。
 			if updated := openAIWSPassthroughPolicyModelFromSessionFrame(account, payload); updated != "" {
-				capturedSessionModel = updated
+				storeCapturedSessionModel(updated)
 			}
 			usageMeta.updateSessionRequestModel(payload)
 			if requestModelForThisFrame == "" {
@@ -1090,7 +1109,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			// any whitelist and silently fall back to pass.
 			model := openAIWSPassthroughPolicyModelForFrame(account, payload)
 			if model == "" {
-				model = capturedSessionModel
+				model = loadCapturedSessionModel()
 			}
 			if isResponseCreate && model != "" && model != strings.TrimSpace(gjson.GetBytes(payload, "model").String()) {
 				payload = s.ReplaceModelInBody(payload, model)
@@ -1288,7 +1307,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(payload)
 				isPreOutputRateLimit := eventType == "error" && !wroteDownstream && isOpenAIWSRateLimitError(errCodeRaw, errTypeRaw, errMsgRaw)
 				if (eventType == "error" || eventType == "response.failed") && !failureAccountSideEffectsApplied && !isPreOutputRateLimit {
-					failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(ctx, account, capturedSessionModel, handshakeHeaders, payload)
+					failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(ctx, account, loadCapturedSessionModel(), handshakeHeaders, payload)
 				}
 				if eventType != "error" {
 					return nil
@@ -1296,7 +1315,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				if wroteDownstream || !isOpenAIWSRateLimitError(errCodeRaw, errTypeRaw, errMsgRaw) {
 					return nil
 				}
-				s.persistOpenAIWSRateLimitSignal(ctx, account, handshakeHeaders, payload, errCodeRaw, errTypeRaw, errMsgRaw, capturedSessionModel)
+				s.persistOpenAIWSRateLimitSignal(ctx, account, handshakeHeaders, payload, errCodeRaw, errTypeRaw, errMsgRaw, loadCapturedSessionModel())
 				logOpenAIWSV2Passthrough(
 					"relay_rate_limit_failover account_id=%d err_code=%s err_type=%s err_message=%s",
 					account.ID,

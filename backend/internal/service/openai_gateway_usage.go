@@ -1123,6 +1123,13 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 // ⚠️ 调用方必须排除 spark 影子账号(account.IsShadow()):影子的 codex_* 仅由 QueryUsage
 // (/wham/usage bengalfox 道)更新,不能被全局头口径污染(外审第7轮 P1)。本函数仅持 accountID,
 // 无法在此自检影子,故守卫前置到各调用点。
+// codexUsageExtraMonotonicWriter is the repository capability that applies
+// header-derived codex_* usage updates only when they are not older than the
+// stored observation. Repositories predating the guard fall back to UpdateExtra.
+type codexUsageExtraMonotonicWriter interface {
+	UpdateCodexUsageExtraIfNewer(ctx context.Context, accountID int64, updates map[string]any, observedAt time.Time) (bool, error)
+}
+
 func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
 	if snapshot == nil {
 		return
@@ -1132,6 +1139,7 @@ func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, acc
 	}
 
 	now := time.Now()
+	baseTime := codexSnapshotBaseTime(snapshot, now)
 	updates := buildCodexUsageExtraUpdates(snapshot, now)
 	if len(updates) == 0 {
 		return
@@ -1143,6 +1151,14 @@ func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, acc
 	go func() {
 		updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// 止血：响应头是被动观测样本，迟到的旧响应/乱序写入不得把已落库的
+		// 较新观测回退（P2-#7）。仓库不支持守卫时退回无条件写。
+		if writer, ok := s.accountRepo.(codexUsageExtraMonotonicWriter); ok {
+			if _, err := writer.UpdateCodexUsageExtraIfNewer(updateCtx, accountID, updates, baseTime); err != nil {
+				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] codex usage header snapshot write skipped account=%d err=%v", accountID, err)
+			}
+			return
+		}
 		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
 	}()
 }

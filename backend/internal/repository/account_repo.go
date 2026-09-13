@@ -1229,8 +1229,11 @@ func (r *accountRepository) ListActive(ctx context.Context) ([]service.Account, 
 
 // ListAccountsWithSchedulingThresholdPause keeps startup reconciliation
 // bounded by filtering the structured pause source in PostgreSQL and walking
-// the result set by account id. The generated reason payload always contains
-// this compact JSON fragment even when optional detail fields differ.
+// the result set by account id. Matching uses the JSON `source` field directly
+// instead of a serialized prefix: the payload struct's field order (and thus
+// the prefix shape) is an implementation detail that historical or hand-edited
+// rows may not honor. Rows with non-JSON freeform reasons cast to NULL and are
+// simply not selected.
 func (r *accountRepository) ListAccountsWithSchedulingThresholdPause(ctx context.Context, afterID int64, limit int) ([]service.Account, error) {
 	if afterID < 0 {
 		afterID = 0
@@ -1246,7 +1249,17 @@ func (r *accountRepository) ListAccountsWithSchedulingThresholdPause(ctx context
 		Where(
 			dbaccount.StatusEQ(service.StatusActive),
 			dbaccount.IDGT(afterID),
-			dbaccount.TempUnschedulableReasonHasPrefix(`{"source":"`+service.AccountSchedulingThresholdReasonSource+`"`),
+			dbpredicate.Account(func(s *entsql.Selector) {
+				col := s.C("temp_unschedulable_reason")
+				s.Where(entsql.P(func(b *entsql.Builder) {
+					b.WriteString("CASE WHEN ").
+						Ident(col).
+						WriteString(" LIKE '{%' THEN (").
+						Ident(col).
+						WriteString("::jsonb ->> 'source') END = ").
+						Arg(service.AccountSchedulingThresholdReasonSource)
+				}))
+			}),
 		).
 		Order(dbent.Asc(dbaccount.FieldID)).
 		Limit(limit).
@@ -2263,8 +2276,11 @@ func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetA
 }
 
 // SetOpenAICodexQuotaRateLimited stores the rate-limit timestamps and their
-// quota-window provenance in one statement. A generic later 429 removes this
-// marker through SetRateLimited, so WHAM recovery cannot clear another source.
+// quota-window provenance in one statement, and is extend-only: an already
+// active, later reset boundary is never shortened by a concurrent observation of
+// a different quota window (5h vs 7d writes race routinely). A generic later 429
+// removes this marker through SetRateLimited, so WHAM recovery cannot clear
+// another source.
 func (r *accountRepository) SetOpenAICodexQuotaRateLimited(ctx context.Context, id int64, resetAt time.Time, stateJSON string) error {
 	if !json.Valid([]byte(stateJSON)) {
 		return errors.New("invalid OpenAI Codex rate-limit state")
@@ -2281,6 +2297,7 @@ func (r *accountRepository) SetOpenAICodexQuotaRateLimited(ctx context.Context, 
 				AND deleted_at IS NULL
 				AND platform = $6
 				AND type = $7
+				AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at < $2)
 			RETURNING id
 		)
 		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
@@ -3016,15 +3033,47 @@ func (r *accountRepository) UpdateOpenAIResetCreditSnapshotIfNewer(
 }
 
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
+	applied, _, err := r.updateExtraGuarded(ctx, id, updates, nil)
+	if err == nil && !applied {
+		return service.ErrAccountNotFound
+	}
+	return err
+}
+
+// UpdateCodexUsageExtraIfNewer applies codex_* usage extra updates only when the
+// stored observation timestamp (extra.codex_usage_updated_at) is not newer than
+// observedAt. Out-of-order header writes (late-finishing long streams, concurrent
+// requests) must not regress a fresher snapshot already persisted by another
+// writer. Returns applied=false when the guard rejected the write (account
+// missing still yields an error).
+func (r *accountRepository) UpdateCodexUsageExtraIfNewer(ctx context.Context, id int64, updates map[string]any, observedAt time.Time) (bool, error) {
+	if observedAt.IsZero() {
+		applied, _, err := r.updateExtraGuarded(ctx, id, updates, nil)
+		if err == nil && !applied {
+			return false, service.ErrAccountNotFound
+		}
+		return applied, err
+	}
+	applied, skipped, err := r.updateExtraGuarded(ctx, id, updates, &observedAt)
+	if err != nil {
+		return false, err
+	}
+	if !applied && !skipped {
+		return false, service.ErrAccountNotFound
+	}
+	return applied, nil
+}
+
+func (r *accountRepository) updateExtraGuarded(ctx context.Context, id int64, updates map[string]any, notNewerThan *time.Time) (applied bool, skippedByGuard bool, err error) {
 	updates = stripCodexFingerprintSeedFromExtraUpdate(updates)
 	if len(updates) == 0 {
-		return nil
+		return true, false, nil
 	}
 
 	// 使用 JSONB 合并操作实现原子更新，避免读-改-写的并发丢失更新问题
 	payload, err := json.Marshal(updates)
 	if err != nil {
-		return err
+		return false, false, err
 	}
 
 	clearProbeSnapshot := upstreamBillingProbeExplicitlyDisabled(updates) || upstreamBillingProbeSnapshotClearRequested(updates)
@@ -3045,7 +3094,7 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 		var txErr error
 		tx, txErr = r.client.Tx(ctx)
 		if txErr != nil && !errors.Is(txErr, dbent.ErrTxStarted) {
-			return txErr
+			return false, false, txErr
 		}
 		if tx != nil {
 			defer func() { _ = tx.Rollback() }()
@@ -3060,30 +3109,57 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	if service.ShouldEnsureCodexFingerprintSeedForExtraUpdates(updates) {
 		extraExpression = ensureCodexFingerprintSeedSQL(extraExpression)
 	}
+	// RFC3339 带时区偏移，文本比较不可靠，统一转 timestamptz 后比较；缺列视为
+	// 可写（首次观测）。
+	freshnessGuardSQL := ""
+	queryArgs := []any{string(payload), id}
+	if notNewerThan != nil {
+		freshnessGuardSQL = " AND (extra->>'codex_usage_updated_at' IS NULL OR (extra->>'codex_usage_updated_at')::timestamptz <= $3::timestamptz)"
+		queryArgs = append(queryArgs, notNewerThan.Format(time.RFC3339))
+	}
 	result, err := client.ExecContext(
 		ctx,
-		"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL",
-		string(payload), id,
+		"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL"+freshnessGuardSQL,
+		queryArgs...,
 	)
 
 	if err != nil {
-		return err
+		return false, false, err
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	if affected == 0 {
-		return service.ErrAccountNotFound
+		if notNewerThan != nil && r.sql != nil {
+			// 区分「账号不存在」与「新鲜度守卫拒绝写入」。探测为尽力而为：
+			// 查询失败时按账号不存在处理（与无条件路径一致）。
+			var exists int
+			rows, probeErr := r.sql.QueryContext(
+				ctx,
+				"SELECT 1 FROM accounts WHERE id = $1 AND deleted_at IS NULL",
+				id,
+			)
+			if probeErr == nil {
+				if rows.Next() {
+					_ = rows.Scan(&exists)
+					_ = rows.Close()
+					return false, true, nil
+				}
+				_ = rows.Close()
+				return false, false, service.ErrAccountNotFound
+			}
+		}
+		return false, false, service.ErrAccountNotFound
 	}
 	if durableSchedulerChange {
 		if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, outboxPayload); err != nil {
-			return err
+			return false, false, err
 		}
 		if tx != nil {
 			if err := tx.Commit(); err != nil {
-				return err
+				return false, false, err
 			}
 		}
 		if contextTx == nil {
@@ -3097,7 +3173,7 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 			r.syncSchedulerAccountSnapshot(ctx, id)
 		}
 	}
-	return nil
+	return true, false, nil
 }
 
 // UpdateUpstreamBillingProbeSnapshot stores a probe result only while the

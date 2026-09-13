@@ -171,14 +171,30 @@ func codexDirectImageURL(body []byte, path, outputFormat string) []byte {
 	return body
 }
 
-func isOpenAIImagesMainModelError(status int, body []byte) bool {
+// isOpenAIImagesMainModelErrorForRequest extends the plan-gated guard with the
+// Responses main model this request actually selected. The dynamic selection can
+// return any manifest slug, so a guard keyed on the static name alone would miss
+// the rejection and classify a deterministic main-model failure as an image-model
+// failure — walking the whole pool and cooling every account's (account,
+// gpt-image-2) pair for 30 minutes. When the context carries no resolved main
+// model (direct endpoint errors, API-key accounts, unit tests), the static
+// lookup applies unchanged.
+func isOpenAIImagesMainModelErrorForRequest(ctx context.Context, status int, body []byte) bool {
 	if !isOpenAICodexPlanGatedModelError(status, body) {
 		return false
 	}
 	message := extractUpstreamErrorMessage(body)
-	model := openAIImagesResponsesMainModelValue()
-	return strings.Contains(message, "'"+model+"'") ||
-		strings.Contains(message, `"`+model+`"`)
+	for _, model := range []string{
+		openAIImagesResolvedMainModelFromContext(ctx),
+		openAIImagesResponsesMainModelValue(),
+	} {
+		model = strings.TrimSpace(model)
+		if model != "" &&
+			(strings.Contains(message, "'"+model+"'") || strings.Contains(message, `"`+model+`"`)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Images 端点只输出图片；未提供输出分类时，output_tokens 全部是图片 token。

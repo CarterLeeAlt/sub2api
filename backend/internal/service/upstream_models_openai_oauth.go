@@ -29,6 +29,15 @@ type openAICodexManifestModel struct {
 // request stays observable and injectable (tests, TLS fingerprinting, proxy
 // handling parity with the other platforms); otherwise the gateway's manifest
 // client remains the transport of record.
+//
+// Known limitation of the fallback transport: the half-initialized gateway
+// instance below only carries accountRepo. Account-auth failures (e.g. 401)
+// that reach handleCodexModelsManifestAccountAuthError →
+// handleOpenAIAccountUpstreamError deliberately skip every account-state side
+// effect because those are gated on rateLimitService != nil. This admin sync
+// path therefore never trips account circuit breakers; that responsibility
+// stays with the main request path, which runs on a fully initialized gateway
+// (httpUpstream configured, rateLimitService wired).
 func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, []byte, error) {
 	credentialAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
@@ -79,6 +88,13 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		// Codex backend gates manifest entries by client_version (e.g. gpt-6 models
 		// only ship to >= 0.153.0), so pinning the compiled constant would freeze the
 		// synced catalog at whatever models shipped with that historical version.
+		// Half-initialized fallback transport: only accountRepo is injected.
+		// handleCodexModelsManifestAccountAuthError may still fire on a 401,
+		// but every account-state side effect inside
+		// handleOpenAIAccountUpstreamError is gated on rateLimitService != nil,
+		// so this path intentionally performs no account circuit breaking. The
+		// main gateway path (httpUpstream configured) owns that duty; injecting
+		// a full dependency graph here is deliberately avoided.
 		gateway := &OpenAIGatewayService{accountRepo: s.accountRepo}
 		manifest, err := gateway.FetchCodexModelsManifest(ctx, account, "", "")
 		if err != nil {
@@ -165,11 +181,12 @@ func openAICodexManifestModelSupportsImage(model openAICodexManifestModel) bool 
 }
 
 // selectOpenAICodexImageMainModel chooses the Responses model that orchestrates
-// the image_generation tool. Keep the historical gpt-5.4-mini preference while
-// it is actually available, but do not make image capability depend on that
-// specific slug. Otherwise follow the Codex catalog priority order.
+// the image_generation tool. Honor the operator's preferred main model
+// (openAIImagesResponsesMainModelValue, env-overridable) while it is actually
+// available, but do not make image capability depend on that specific slug.
+// Otherwise follow the Codex catalog priority order.
 func selectOpenAICodexImageMainModel(manifestModels []openAICodexManifestModel) string {
-	preferred := strings.TrimSpace(openAIImagesResponsesMainModel)
+	preferred := strings.TrimSpace(openAIImagesResponsesMainModelValue())
 	var (
 		selected            string
 		selectedPriority    int

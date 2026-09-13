@@ -45,13 +45,13 @@ func TestOpenAIImagesResponsesDriverAndImageModels(t *testing.T) {
 					}
 				}
 				req := map[string]any{"model": model, "input": "draw a red cup"}
-				require.True(t, normalizeOpenAIResponsesImageOnlyModel(req))
+				require.True(t, normalizeOpenAIResponsesImageOnlyModel(req, ""))
 				require.Equal(t, driver, req["model"])
 				require.Equal(t, model, req["tools"].([]any)[0].(map[string]any)["model"])
-				require.False(t, normalizeOpenAIResponsesImageOnlyModel(req), "a valid driver must not be overwritten")
+				require.False(t, normalizeOpenAIResponsesImageOnlyModel(req, ""), "a valid driver must not be overwritten")
 			}
 			req := map[string]any{"model": "gpt-6-astra", "tools": []any{map[string]any{"type": "image_generation", "model": "gpt-image-2.5-sunburst"}}}
-			require.False(t, normalizeOpenAIResponsesImageOnlyModel(req))
+			require.False(t, normalizeOpenAIResponsesImageOnlyModel(req, ""))
 			require.Equal(t, "gpt-6-astra", req["model"])
 		})
 	}
@@ -71,6 +71,39 @@ func TestOpenAIImagesRejectedDriverDoesNotCoolImageModel(t *testing.T) {
 			_, err := svc.handleOpenAIImagesErrorResponse(WithOpenAIImagesEndpoint(context.Background()), resp, c, openAICodexPlanGatedOAuthAccount(), "gpt-image-2.5-flare")
 			require.Error(t, err)
 			if rejected == "gpt-5.4-mini" {
+				var upstreamErr *OpenAIImagesUpstreamError
+				require.ErrorAs(t, err, &upstreamErr)
+				require.Equal(t, 400, upstreamErr.StatusCode)
+				require.Contains(t, upstreamErr.Message, rejected)
+				require.Empty(t, repo.modelRateLimitCalls)
+				require.Zero(t, repo.tempCalls)
+			} else {
+				require.Len(t, repo.modelRateLimitCalls, 1, "actual image-model rejection still needs bounded failover")
+			}
+		})
+	}
+}
+
+func TestOpenAIImagesRejectedDynamicDriverDoesNotCoolImageModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// 动态主模型（CUSTOM-002）与静态值不同：守卫必须命中动态名并透传 400，
+	// 不得把它当成图片模型失败触发 failover + 全池冷却（P1 回归）。
+	t.Setenv("SUB2API_IMAGES_MAIN_MODEL", "gpt-5.6-luna")
+	for _, rejected := range []string{"gpt-5.3-lumen", "gpt-image-2.5-flare"} {
+		t.Run(rejected, func(t *testing.T) {
+			repo := &modelNotFoundAccountRepoStub{}
+			svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, openAIImagesGenerationsEndpoint, nil)
+			body := fmt.Sprintf(`{"error":{"message":"The '%s' model is not supported when using Codex with a ChatGPT account.","type":"invalid_request_error"}}`, rejected)
+			resp := &http.Response{StatusCode: 400, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+			ctx := withOpenAIImagesResolvedMainModel(
+				WithOpenAIImagesEndpoint(context.Background()),
+				"gpt-5.3-lumen",
+			)
+			_, err := svc.handleOpenAIImagesErrorResponse(ctx, resp, c, openAICodexPlanGatedOAuthAccount(), "gpt-image-2.5-flare")
+			require.Error(t, err)
+			if rejected == "gpt-5.3-lumen" {
 				var upstreamErr *OpenAIImagesUpstreamError
 				require.ErrorAs(t, err, &upstreamErr)
 				require.Equal(t, 400, upstreamErr.StatusCode)
