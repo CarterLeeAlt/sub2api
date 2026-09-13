@@ -64,19 +64,37 @@ func TestOpenAIWSStateStore_ResponseConnTTL(t *testing.T) {
 
 func TestOpenAIWSStateStore_SessionTurnStateTTL(t *testing.T) {
 	store := NewOpenAIWSStateStore(nil)
-	store.BindSessionTurnState(9, "session_hash_1", "turn_state_1", 30*time.Millisecond)
+	store.BindSessionTurnState(9, "session_hash_1", "turn_state_1", 5, 30*time.Millisecond)
 
-	state, ok := store.GetSessionTurnState(9, "session_hash_1")
+	state, ok := store.GetSessionTurnState(9, "session_hash_1", 5)
 	require.True(t, ok)
 	require.Equal(t, "turn_state_1", state)
 
 	// group 隔离
-	_, ok = store.GetSessionTurnState(10, "session_hash_1")
+	_, ok = store.GetSessionTurnState(10, "session_hash_1", 5)
 	require.False(t, ok)
 
 	time.Sleep(60 * time.Millisecond)
-	_, ok = store.GetSessionTurnState(9, "session_hash_1")
+	_, ok = store.GetSessionTurnState(9, "session_hash_1", 5)
 	require.False(t, ok)
+}
+
+// 账号维度守卫：blob 只注入铸造它的账号；accountID=0 的历史数据保持放行。
+func TestOpenAIWSStateStore_SessionTurnStateAccountScoped(t *testing.T) {
+	store := NewOpenAIWSStateStore(nil)
+	store.BindSessionTurnState(9, "session_hash_1", "turn_state_1", 42, time.Hour)
+
+	_, ok := store.GetSessionTurnState(9, "session_hash_1", 42)
+	require.True(t, ok)
+
+	_, ok = store.GetSessionTurnState(9, "session_hash_1", 43)
+	require.False(t, ok, "异账号不得恢复其他账号铸造的 turn-state")
+
+	// accountID=0（账号维度引入前的历史数据）保持旧行为放行。
+	store.BindSessionTurnState(9, "legacy_hash", "legacy_state", 0, time.Hour)
+	state, ok := store.GetSessionTurnState(9, "legacy_hash", 43)
+	require.True(t, ok)
+	require.Equal(t, "legacy_state", state)
 }
 
 func TestOpenAIWSStateStore_SessionConnTTL(t *testing.T) {

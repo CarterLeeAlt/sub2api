@@ -114,6 +114,18 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}()
 	}
 
+	// 生图并发槽（turn 粒度）的持有状态：主循环与 http_bridge 循环各自在
+	// sendAndRelay / bridge turn 前占槽、AfterTurn 后释放；此 defer 仅作全出口
+	// 兜底，防止任何提前 return 漏释放（HTTP 路径由 handler defer 承担同职责）。
+	var currentImageSlotRelease func()
+	releaseImageSlot := func() {
+		if currentImageSlotRelease != nil {
+			currentImageSlotRelease()
+			currentImageSlotRelease = nil
+		}
+	}
+	defer releaseImageSlot()
+
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	forceHTTPBridge := account.Platform == PlatformGrok ||
 		(s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account))
@@ -545,7 +557,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return
 		}
 		if turnState == "" && stateStore != nil && sessionHash != "" {
-			if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, sessionHash); ok {
+			if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, sessionHash, account.ID); ok {
 				turnState = savedTurnState
 			}
 		}
@@ -690,6 +702,19 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					return fmt.Errorf("resolve Grok websocket cache identity: %w", err)
 				}
 			}
+			// 生图并发槽（http_bridge 分支）：与主循环同语义，turn 粒度占槽。
+			releaseImageSlot()
+			if currentBridgePayload.imageBillingModel != "" && hooks != nil && hooks.ImageSlotAcquire != nil {
+				imageRelease, imageAcquired := hooks.ImageSlotAcquire(turn)
+				if !imageAcquired {
+					return NewOpenAIWSClientCloseError(
+						coderws.StatusTryAgainLater,
+						"Image generation concurrency limit exceeded, please retry later",
+						nil,
+					)
+				}
+				currentImageSlotRelease = imageRelease
+			}
 			result, bridgeErr := s.proxyOpenAIWSHTTPBridgeTurn(
 				ctx,
 				c,
@@ -710,11 +735,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				if hooks != nil && hooks.AfterTurn != nil {
 					hooks.AfterTurn(turn, nil, errOpenAIWSSessionPreempted)
 				}
+				releaseImageSlot()
 				return errOpenAIWSSessionPreempted
 			}
 			if hooks != nil && hooks.AfterTurn != nil {
 				hooks.AfterTurn(turn, result, bridgeErr)
 			}
+			releaseImageSlot()
 			if bridgeErr != nil {
 				var failoverErr *UpstreamFailoverError
 				if turn > 1 && errors.As(bridgeErr, &failoverErr) && failoverErr != nil {
@@ -790,6 +817,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	firstRoutingFields := gjson.GetManyBytes(firstPayload.payloadRaw, "model", "service_tier")
+	// 指纹收敛生产点：与 HTTP Forward 同源，本函数内 buildOpenAIWSHeaders 的两处
+	// 头消费点（首次握手与后续 turn 刷新）共享同一份 IDs。此前 WS 原生路径只有
+	// 消费没有生产，收敛静默失效。无条件覆写（含 nil）防 failover 残留。
+	var fingerprintClientHeaders http.Header
+	if c != nil && c.Request != nil {
+		fingerprintClientHeaders = c.Request.Header
+	}
+	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(account, fingerprintClientHeaders))
 	wsHeaders, _, buildHdrErr := s.buildOpenAIWSHeaders(
 		ctx,
 		c,
@@ -947,8 +982,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		connID := strings.TrimSpace(lease.ConnID())
 		if handshakeTurnState := strings.TrimSpace(lease.HandshakeHeader(openAIWSTurnStateHeader)); handshakeTurnState != "" {
 			turnState = handshakeTurnState
+			// 绑定铸造账号：后续 turn 异账号恢复时 GetSessionTurnState 会拒绝
+			// 注入。该 blob 未下发客户端（无 c.Header），因此不记 HTTP 侧语义的
+			// 溯源表——溯源只登记客户端确定收到的值。
 			if stateStore != nil && sessionHash != "" {
-				stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, s.openAIWSSessionStickyTTL())
+				stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, account.ID, s.openAIWSSessionStickyTTL())
 			}
 			updatedHeaders := cloneHeader(baseAcquireReq.Headers)
 			if updatedHeaders == nil {
@@ -1874,6 +1912,21 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			)
 		}
 
+		// 生图并发槽：HTTP 路径对生图意图占 ImageConcurrency 槽位，此处补齐
+		// WS 原生路径（桥接注入升级的意图已在 payload 规范化时计入
+		// currentImageBillingModel）。占槽失败按并发超限语义关闭连接。
+		releaseImageSlot()
+		if currentImageBillingModel != "" && hooks != nil && hooks.ImageSlotAcquire != nil {
+			imageRelease, imageAcquired := hooks.ImageSlotAcquire(turn)
+			if !imageAcquired {
+				return NewOpenAIWSClientCloseError(
+					coderws.StatusTryAgainLater,
+					"Image generation concurrency limit exceeded, please retry later",
+					nil,
+				)
+			}
+			currentImageSlotRelease = imageRelease
+		}
 		result, relayErr := sendAndRelay(turn, sessionLease, currentPayload, currentPayloadBytes, currentOriginalModel, currentImageBillingModel, currentImageSizeTier, currentImageInputSize, currentRequestedReasoningEffort)
 		if relayErr != nil {
 			lastTurnClean = false
@@ -1884,6 +1937,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				if hooks != nil && hooks.AfterTurn != nil {
 					hooks.AfterTurn(turn, nil, errOpenAIWSSessionPreempted)
 				}
+				releaseImageSlot()
 				return errOpenAIWSSessionPreempted
 			}
 			var rejectedFieldErr *openAIWSRejectedFieldRetryError
@@ -1908,6 +1962,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				// 的 usage 入账；其余错误路径 result 为 nil，行为不变。
 				hooks.AfterTurn(turn, result, finalErr)
 			}
+			releaseImageSlot()
 			sessionLease.MarkBroken()
 			return finalErr
 		}
@@ -1918,6 +1973,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if hooks != nil && hooks.AfterTurn != nil {
 			hooks.AfterTurn(turn, result, nil)
 		}
+		releaseImageSlot()
 		if result == nil {
 			return errors.New("websocket turn result is nil")
 		}

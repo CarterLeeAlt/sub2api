@@ -37,8 +37,13 @@ type openAIWSConnBinding struct {
 	expiresAt time.Time
 }
 
+// openAIWSTurnStateBinding 记录会话最近一次上游铸造的 turn-state blob。
+// accountID 是铸造该 blob 的账号：与 HTTP 路径的 turn-state 溯源表同源语义，
+// 跨账号 failover 后异账号不得注入旧 blob（真实 Codex 不会产生该信号）。
+// 0 表示历史数据（账号维度引入前写入），查询时放行以保持兼容。
 type openAIWSTurnStateBinding struct {
 	turnState string
+	accountID int64
 	expiresAt time.Time
 }
 
@@ -76,8 +81,8 @@ type OpenAIWSStateStore interface {
 	GetResponseConn(responseID string) (string, bool)
 	DeleteResponseConn(responseID string)
 
-	BindSessionTurnState(groupID int64, sessionHash, turnState string, ttl time.Duration)
-	GetSessionTurnState(groupID int64, sessionHash string) (string, bool)
+	BindSessionTurnState(groupID int64, sessionHash, turnState string, accountID int64, ttl time.Duration)
+	GetSessionTurnState(groupID int64, sessionHash string, accountID int64) (string, bool)
 	DeleteSessionTurnState(groupID int64, sessionHash string)
 
 	BindSessionConn(groupID int64, sessionHash, connID string, ttl time.Duration)
@@ -331,7 +336,7 @@ func (s *defaultOpenAIWSStateStore) DeleteResponseConn(responseID string) {
 	s.responseToConnMu.Unlock()
 }
 
-func (s *defaultOpenAIWSStateStore) BindSessionTurnState(groupID int64, sessionHash, turnState string, ttl time.Duration) {
+func (s *defaultOpenAIWSStateStore) BindSessionTurnState(groupID int64, sessionHash, turnState string, accountID int64, ttl time.Duration) {
 	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
 	state := strings.TrimSpace(turnState)
 	if key == "" || state == "" {
@@ -344,12 +349,13 @@ func (s *defaultOpenAIWSStateStore) BindSessionTurnState(groupID int64, sessionH
 	ensureBindingCapacity(s.sessionToTurnState, key, openAIWSStateStoreMaxEntriesPerMap)
 	s.sessionToTurnState[key] = openAIWSTurnStateBinding{
 		turnState: state,
+		accountID: accountID,
 		expiresAt: time.Now().Add(ttl),
 	}
 	s.sessionToTurnStateMu.Unlock()
 }
 
-func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHash string) (string, bool) {
+func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHash string, accountID int64) (string, bool) {
 	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
 	if key == "" {
 		return "", false
@@ -361,6 +367,11 @@ func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHa
 	binding, ok := s.sessionToTurnState[key]
 	s.sessionToTurnStateMu.RUnlock()
 	if !ok || now.After(binding.expiresAt) || strings.TrimSpace(binding.turnState) == "" {
+		return "", false
+	}
+	// 账号维度守卫：blob 只注入铸造它的账号（0 为账号维度引入前的历史数据，
+	// 保持旧行为放行）。与 guardOpenAICodexTurnStateEcho 的溯源判定同源。
+	if binding.accountID != 0 && accountID != 0 && binding.accountID != accountID {
 		return "", false
 	}
 	return binding.turnState, true

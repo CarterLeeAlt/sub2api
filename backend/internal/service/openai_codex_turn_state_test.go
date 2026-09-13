@@ -322,7 +322,7 @@ func TestForwardOpenAIWSV2_GuardsTurnStateEcho(t *testing.T) {
 		})
 		sessionHash := h.svc.GenerateSessionHash(h.c, nil)
 		require.NotEmpty(t, sessionHash, "session 头存在时必须能算出会话哈希")
-		stateStore.BindSessionTurnState(9, sessionHash, "blob-stale-from-42", time.Hour)
+		stateStore.BindSessionTurnState(9, sessionHash, "blob-stale-from-42", 42, time.Hour)
 
 		runForward(t, h, newAccount(43))
 		require.Empty(t, h.dialer.lastHeaders.Get("x-codex-turn-state"),
