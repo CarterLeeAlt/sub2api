@@ -72,6 +72,13 @@ func normalizeKnownOpenAICodexModel(model string) string {
 		return "gpt-5.3-codex"
 	case strings.Contains(normalized, "gpt-5.3"):
 		return "gpt-5.3-codex"
+	case strings.HasPrefix(normalized, "codex-auto-"):
+		// The Codex models manifest allowlist deliberately preserves any
+		// codex-auto-* slug (openai_codex_models_service.go). Pass the
+		// canonical lowercase slug through unchanged so scheduling, outbound
+		// payloads and usage billing all keep the real model name instead of
+		// collapsing onto gpt-5.3-codex.
+		return normalized
 	case strings.Contains(normalized, "codex"):
 		return "gpt-5.3-codex"
 	case strings.Contains(normalized, "gpt-5"):

@@ -312,6 +312,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		imageSizeTier = imageCfg.SizeTier
 		imageInputSize = imageCfg.InputSize
 	}
+	// 槽位治理口径说明（勿当 bug 修复）：上方的被动 image_gen namespace 判定为
+	// 生图意图，仅用于权限门（GroupAllowsImageGeneration）与计费配置；在并发槽位
+	// 治理上与上游 #4476 保持一致——被动 namespace 不占 ImageConcurrency 槽位。
+	// Forward 路径的服务层补偿（openai_gateway_forward.go 调用的
+	// acquireOpenAIImageSlotForForward，见 openai_image_slot.go）是本 fork 特有
+	// 扩展，passthrough 刻意不对齐该行为。
 
 	logger.LegacyPrintf("service.openai_gateway",
 		"[OpenAI 自动透传] 命中自动透传分支: account=%d name=%s type=%s model=%s stream=%v",
@@ -862,6 +868,16 @@ func writeOpenAIPassthroughErrorEnvelope(c *gin.Context, downstreamStatus int, u
 		},
 	})
 	if writeOpenAICompactSSEBridge(c, downstreamStatus, body) {
+		return
+	}
+	// passthrough SSE keepalive（startOpenAISSEKeepalive，与 compact 心跳共用同一
+	// keepalive 实例与上下文键）拍出首拍即已 WriteHeader(200)：状态码固化后再
+	// c.Data(4xx) 只会让客户端收到"假 200 + JSON 错误体"（failover 换号后下一
+	// 账号返回不可 failover 的 4xx 时正是此场景）。与 compact 路径的降级链
+	// （writeOpenAINonStreamingProtocolError 经 StopOpenAICompactSSEKeepaliveCommitted
+	// 判定）对齐：改为向流内写 response.failed 终止事件，只写错误体、不重写状态码。
+	if StopOpenAISSEKeepaliveCommitted(c) {
+		writeOpenAICompactSSEFailureMessage(c, downstreamStatus, "upstream_error", message)
 		return
 	}
 	writeOpenAIPassthroughErrorHeaders(c.Writer.Header(), upstreamHeaders)

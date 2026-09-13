@@ -11,15 +11,31 @@ import (
 // maxRedactDepth 限制递归深度以防止栈溢出
 const maxRedactDepth = 32
 
+// defaultSensitiveKeys 是通用日志兜底脱敏的默认键集合：除 OAuth 通用键外，并入
+// service 层 SensitiveCredentialKeys 的全部条目（键名统一小写，匹配经 normalizeKey
+// 大小写不敏感），保证新增平台引入 api_key/cookie/session_key 类凭证时兜底脱敏不漏防。
 var defaultSensitiveKeys = map[string]struct{}{
-	"authorization_code": {},
-	"code":               {},
-	"code_verifier":      {},
-	"access_token":       {},
-	"refresh_token":      {},
-	"id_token":           {},
-	"client_secret":      {},
-	"password":           {},
+	"authorization_code":    {},
+	"code":                  {},
+	"code_verifier":         {},
+	"access_token":          {},
+	"refresh_token":         {},
+	"id_token":              {},
+	"client_secret":         {},
+	"password":              {},
+	"agent_private_key":     {},
+	"api_key":               {},
+	"session_key":           {},
+	"cookie":                {},
+	"sso_token":             {},
+	"sso":                   {},
+	"sso-rw":                {},
+	"cleartextpassword":     {},
+	"aws_secret_access_key": {},
+	"aws_session_token":     {},
+	"service_account_json":  {},
+	"service_account":       {},
+	"private_key":           {},
 }
 
 var defaultSensitiveKeyList = []string{
@@ -31,6 +47,19 @@ var defaultSensitiveKeyList = []string{
 	"id_token",
 	"client_secret",
 	"password",
+	"agent_private_key",
+	"api_key",
+	"session_key",
+	"cookie",
+	"sso_token",
+	"sso",
+	"sso-rw",
+	"cleartextpassword",
+	"aws_secret_access_key",
+	"aws_session_token",
+	"service_account_json",
+	"service_account",
+	"private_key",
 }
 
 type textRedactPatterns struct {

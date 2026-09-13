@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
@@ -167,4 +169,59 @@ func TestForwardOpenAIWSV2_MarksCyberPolicyForFailureEventShapes(t *testing.T) {
 			require.Equal(t, tt.wantOutput, mark.UpstreamOutTok)
 		})
 	}
+}
+
+// pre-token 缓冲必须有累计字节上限（对齐 HTTP 首输出暂存的 8MB 硬限
+// openAIFirstOutputStageMaxBytes）：上游在首个 token 前无限倾倒非 token 事件时，
+// 应转为"上游异常"走既有 HTTP 回退路径，而不是无上限缓冲撑爆进程内存。
+func TestForwardOpenAIWSV2_PreTokenBufferOverflowFallsBack(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "unit-test-agent/1.0")
+
+	cfg := newOpenAIWSV2TestConfig()
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+
+	// 两个各约 4MB+ 的 pre-token 事件：第二拍必然突破 8MB 上限
+	padding := strings.Repeat("a", openAIFirstOutputStageMaxBytes/2)
+	hugePreTokenEvent := []byte(`{"type":"response.created","response":{"id":"resp_buf","padding":"` + padding + `"}}`)
+	captureConn := &openAIWSCaptureConn{
+		events: [][]byte{hugePreTokenEvent, hugePreTokenEvent},
+	}
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(&openAIWSCaptureDialer{conn: captureConn})
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     &httpUpstreamRecorder{},
+		cache:            &stubGatewayCache{},
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:    NewCodexToolCorrector(),
+		openaiWSPool:     pool,
+	}
+	account := &Account{
+		ID: 5884, Name: "openai-ws-v2-buffer-overflow", Platform: PlatformOpenAI,
+		Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test"},
+		Extra:       map[string]any{"responses_websockets_v2_enabled": true},
+	}
+
+	reqBody := map[string]any{"model": "gpt-5.5", "stream": true, "input": "hello"}
+	decision := OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}
+	recoveryTried := false
+	result, err := svc.forwardOpenAIWSV2(
+		context.Background(), c, account, reqBody, "", "", "test-token",
+		decision, true, true, "gpt-5.5", "gpt-5.5", time.Now(), 1, "", &recoveryTried,
+	)
+	require.Error(t, err)
+	require.Nil(t, result, "缓冲超限时不得把半截流交给下游，应回退 HTTP")
+
+	var fbErr *openAIWSFallbackError
+	require.ErrorAs(t, err, &fbErr, "超限应按未写下游的 WS 回退错误返回")
+	require.Equal(t, "pretoken_buffer_limit", fbErr.Reason)
+	require.ErrorIs(t, err, errOpenAIFirstOutputStageLimit, "与 HTTP 首输出暂存上限同源")
 }

@@ -564,6 +564,20 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 	refreshIngressRouteState(firstPayload)
 
+	// turn-state 跨账号回带守卫：与 HTTP Forward/Passthrough 的出站守卫
+	// （guardOpenAICodexTurnStateEcho）同源，此处补齐 WS 原生拨号路径。此刻客户端
+	// 回带（请求头）与 stateStore 恢复两个来源已汇合到 turnState，统一剥离已知由
+	// 其他账号铸造的回带值，避免 failover 换号后把旧账号 blob 发给新账号上游。
+	// HTTP bridge 分支随后把 turnState 写回请求头，其 Forward 内守卫与本守卫判定
+	// 一致（幂等）；后续由本账号上游握手刷新的值（acquireTurnLease 内）不属于
+	// 回带，不再重复判定。
+	if turnState != "" {
+		guardedTurnState := http.Header{}
+		guardedTurnState.Set(openAIWSTurnStateHeader, turnState)
+		s.guardOpenAICodexTurnStateEcho(c, account, guardedTurnState)
+		turnState = strings.TrimSpace(guardedTurnState.Get(openAIWSTurnStateHeader))
+	}
+
 	if useHTTPBridge {
 		logOpenAIWSModeInfo(
 			"ingress_ws_http_bridge_start account_id=%d account_type=%s payload_bytes=%d threshold_bytes=%d has_session_hash=%v store_disabled=%v",
@@ -692,6 +706,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				writeClientMessage,
 			)
 			if bridgeErr != nil && isOpenAIWSSessionPreempted(ctx) {
+				// 与 ctx_pool 抢占分支一致：抢占也要回调 AfterTurn，保证 turn 级统计不跳号。
+				if hooks != nil && hooks.AfterTurn != nil {
+					hooks.AfterTurn(turn, nil, errOpenAIWSSessionPreempted)
+				}
 				return errOpenAIWSSessionPreempted
 			}
 			if hooks != nil && hooks.AfterTurn != nil {
@@ -998,6 +1016,36 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		lastEventType := ""
 		needModelReplace := false
 		clientDisconnected := false
+		// 断连排水状态：客户端断开（或请求上下文被取消且非抢占）后，读上下文切换为
+		// context.WithoutCancel 继续有界排水，直到终端事件或预算耗尽——对齐 v2 路径
+		// markClientDisconnected → WithoutCancel + 有界排水的语义。这样已收集的
+		// usage 能组装成 result 提交 AfterTurn 入账，而不是以 result==nil 丢弃整轮用量。
+		upstreamReadCtx := ctx
+		upstreamReadDetached := false
+		clientDisconnectDrainStartedAt := time.Time{}
+		clientRequestCanceled := func() bool {
+			return ctx != nil && errors.Is(ctx.Err(), context.Canceled)
+		}
+		markClientDisconnected := func(cause string) {
+			if clientDisconnected {
+				return
+			}
+			clientDisconnected = true
+			clientDisconnectDrainStartedAt = time.Now()
+			if !upstreamReadDetached {
+				upstreamReadCtx = context.WithoutCancel(ctx)
+				upstreamReadDetached = true
+			}
+			logOpenAIWSModeInfo(
+				"ingress_ws_client_disconnected account_id=%d turn=%d conn_id=%s cause=%s events=%d token_events=%d",
+				account.ID,
+				turn,
+				truncateOpenAIWSLogValue(lease.ConnID(), openAIWSIDValueMaxLen),
+				cause,
+				eventCount,
+				tokenEventCount,
+			)
+		}
 		mappedModel := ""
 		var mappedModelBytes []byte
 		if originalModel != "" {
@@ -1010,10 +1058,83 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				mappedModelBytes = []byte(mappedModel)
 			}
 		}
+		// buildTurnResult 组装 turn 结果：终端分支与断连排水收尾共用，保证两条
+		// 路径提交给 AfterTurn 的 result 形状一致。
+		buildTurnResult := func(terminalEvent string, clientDisconnect bool) *OpenAIForwardResult {
+			result := &OpenAIForwardResult{
+				RequestID:                     responseID,
+				Usage:                         usage,
+				Model:                         originalModel,
+				UpstreamModel:                 mappedModel,
+				UpstreamResponseModel:         responseModelObserver.Model(),
+				UpstreamResponseModelConflict: responseModelObserver.Conflict(),
+				UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
+				ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(payload)),
+				ReasoningEffort:               ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(payload, mappedModel, originalModel), payload, mappedModel),
+				RequestedReasoningEffort:      requestedReasoningEffort,
+				Stream:                        reqStream,
+				OpenAIWSMode:                  true,
+				UpstreamTerminalEvent:         terminalEvent,
+				ResponseHeaders:               lease.HandshakeHeaders(),
+				Duration:                      time.Since(turnStart),
+				FirstTokenMs:                  firstTokenMs,
+				ClientDisconnect:              clientDisconnect,
+			}
+			if replayInput := replayCollector.Items(); len(replayInput) > 0 {
+				result.wsReplayInput = replayInput
+				result.wsReplayInputExists = true
+			}
+			if imageCount := imageCounter.Count(); imageCount > 0 {
+				result.ImageCount = imageCount
+				result.ImageSize = imageSizeTier
+				result.ImageInputSize = imageInputSize
+				result.ImageOutputSizes = imageCounter.Sizes()
+				result.BillingModel = imageBillingModel
+			}
+			return result
+		}
+		// returnDrainIncomplete 断连排水收尾：预算耗尽或排水期读失败时，仍把已收集
+		// 的 usage 交给 AfterTurn 入账。stage 用 client_disconnect_drain（非
+		// read_upstream）确保不会被判定为可重试——客户端已断开，重放整轮上游请求
+		// 只会重复消耗上游配额。
+		returnDrainIncomplete := func(cause error) (*OpenAIForwardResult, error) {
+			return buildTurnResult("", true), wrapOpenAIWSIngressTurnError(
+				"client_disconnect_drain",
+				fmt.Errorf("upstream websocket stream incomplete after client disconnect: %w", cause),
+				wroteDownstream,
+			)
+		}
 		for {
-			upstreamMessage, readErr := lease.ReadMessageWithContextTimeout(ctx, s.openAIWSReadTimeout())
+			if !clientDisconnected && !isOpenAIWSSessionPreempted(ctx) && clientRequestCanceled() {
+				markClientDisconnected("request_context_canceled")
+			}
+			currentReadTimeout := s.openAIWSReadTimeout()
+			if clientDisconnected && !clientDisconnectDrainStartedAt.IsZero() {
+				// 排水预算与单次读超时同源（openAIWSReadTimeout）：预算耗尽立即收尾，
+				// 不无限等待，保持"客户端已断开就尽快收尾"的现有体验。
+				remaining := currentReadTimeout - time.Since(clientDisconnectDrainStartedAt)
+				if remaining <= 0 {
+					lease.MarkBroken()
+					result, drainErr := returnDrainIncomplete(context.Canceled)
+					return result, drainErr
+				}
+				if remaining < currentReadTimeout {
+					currentReadTimeout = remaining
+				}
+			}
+			upstreamMessage, readErr := lease.ReadMessageWithContextTimeout(upstreamReadCtx, currentReadTimeout)
 			if readErr != nil {
+				// 首次观测到取消（非抢占）时切换排水上下文并继续读，而不是直接放弃本轮
+				// 用量。注意此分支不能先 MarkBroken：排水还要在这条连接上继续读终端事件。
+				if !clientDisconnected && !isOpenAIWSSessionPreempted(ctx) && clientRequestCanceled() {
+					markClientDisconnected("read_context_canceled")
+					continue
+				}
 				lease.MarkBroken()
+				if clientDisconnected {
+					result, drainErr := returnDrainIncomplete(readErr)
+					return result, drainErr
+				}
 				return nil, wrapOpenAIWSIngressTurnError(
 					"read_upstream",
 					fmt.Errorf("read upstream websocket event: %w", readErr),
@@ -1187,7 +1308,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				}
 				if err := writeClientMessage(clientMessage); err != nil {
 					if isOpenAIWSClientDisconnectError(err) {
-						clientDisconnected = true
+						// 标记断连并切换读上下文进入排水；已收集 usage 在终端事件或
+						// 排水预算耗尽时统一经 buildTurnResult 提交 AfterTurn。
+						markClientDisconnected("downstream_write_error")
 						closeStatus, closeReason := summarizeOpenAIWSReadCloseError(err)
 						logOpenAIWSModeInfo(
 							"ingress_ws_client_disconnected_drain account_id=%d turn=%d conn_id=%s close_status=%s close_reason=%s",
@@ -1236,36 +1359,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 						clientDisconnected,
 					)
 				}
-				imageCount := imageCounter.Count()
-				result := &OpenAIForwardResult{
-					RequestID:                     responseID,
-					Usage:                         usage,
-					Model:                         originalModel,
-					UpstreamModel:                 mappedModel,
-					UpstreamResponseModel:         responseModelObserver.Model(),
-					UpstreamResponseModelConflict: responseModelObserver.Conflict(),
-					UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
-					ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(payload)),
-					ReasoningEffort:               ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(payload, mappedModel, originalModel), payload, mappedModel),
-					RequestedReasoningEffort:      requestedReasoningEffort,
-					Stream:                        reqStream,
-					OpenAIWSMode:                  true,
-					UpstreamTerminalEvent:         terminalEvent,
-					ResponseHeaders:               lease.HandshakeHeaders(),
-					Duration:                      time.Since(turnStart),
-					FirstTokenMs:                  firstTokenMs,
-				}
-				if replayInput := replayCollector.Items(); len(replayInput) > 0 {
-					result.wsReplayInput = replayInput
-					result.wsReplayInputExists = true
-				}
-				if imageCount > 0 {
-					result.ImageCount = imageCount
-					result.ImageSize = imageSizeTier
-					result.ImageInputSize = imageInputSize
-					result.ImageOutputSizes = imageCounter.Sizes()
-					result.BillingModel = imageBillingModel
-				}
+				result := buildTurnResult(terminalEvent, clientDisconnected)
 				return result, nil
 			}
 		}
@@ -1785,6 +1879,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			lastTurnClean = false
 			if isOpenAIWSSessionPreempted(ctx) {
 				sessionLease.MarkBroken()
+				// 抢占同样要回调 AfterTurn：保证 handler 的 turn 级统计与并发槽位
+				// 释放不因抢占跳号（BeforeTurn 已为该 turn 计数）。
+				if hooks != nil && hooks.AfterTurn != nil {
+					hooks.AfterTurn(turn, nil, errOpenAIWSSessionPreempted)
+				}
 				return errOpenAIWSSessionPreempted
 			}
 			var rejectedFieldErr *openAIWSRejectedFieldRetryError
@@ -1805,7 +1904,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				finalErr = unwrapped
 			}
 			if hooks != nil && hooks.AfterTurn != nil {
-				hooks.AfterTurn(turn, nil, finalErr)
+				// result 非 nil（断连排水收尾）时必须一并提交，handler 才能把已计量
+				// 的 usage 入账；其余错误路径 result 为 nil，行为不变。
+				hooks.AfterTurn(turn, result, finalErr)
 			}
 			sessionLease.MarkBroken()
 			return finalErr
@@ -1819,6 +1920,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		if result == nil {
 			return errors.New("websocket turn result is nil")
+		}
+		if result.ClientDisconnect {
+			// 断连排水收尾的 turn：客户端连接已不可用（或请求上下文已取消），
+			// 立即结束会话，不再进入下一轮 readClientMessage——那里对已死连接
+			// 的礼貌关闭握手（等对端回 close 帧）会拖慢收尾，违背
+			// "客户端已断开就尽快收尾"的既有体验。
+			return nil
 		}
 		responseID := strings.TrimSpace(result.RequestID)
 		lastTurnResponseID = responseID

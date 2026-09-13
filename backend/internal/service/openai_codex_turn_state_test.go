@@ -217,6 +217,119 @@ func TestGuardOpenAICodexTurnStateEcho(t *testing.T) {
 	})
 }
 
+// WS 原生路径（forwardOpenAIWSV2）必须在 turn-state 两个来源（客户端回带头与
+// stateStore 恢复）汇合后过出站守卫：跨账号回带剥离、同账号保留，与 HTTP
+// Forward/Passthrough 出站守卫口径一致。
+func TestForwardOpenAIWSV2_GuardsTurnStateEcho(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	type guardHarness struct {
+		svc    *OpenAIGatewayService
+		dialer *openAIWSCaptureDialer
+		c      *gin.Context
+	}
+	newHarness := func(t *testing.T) *guardHarness {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		c.Request.Header.Set("User-Agent", "unit-test-agent/1.0")
+		c.Request.Header.Set("session_id", "sess-ws-guard")
+		groupID := int64(9)
+		c.Set("api_key", &APIKey{ID: 7, GroupID: &groupID})
+
+		cfg := newOpenAIWSV2TestConfig()
+		cfg.Security.URLAllowlist.Enabled = false
+		cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+		cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+
+		captureConn := &openAIWSCaptureConn{
+			events: [][]byte{
+				[]byte(`{"type":"response.completed","response":{"id":"resp_ws_guard","model":"gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`),
+			},
+		}
+		dialer := &openAIWSCaptureDialer{conn: captureConn}
+		pool := newOpenAIWSConnPool(cfg)
+		t.Cleanup(pool.Close)
+		pool.setClientDialerForTest(dialer)
+		svc := &OpenAIGatewayService{
+			cfg:              cfg,
+			httpUpstream:     &httpUpstreamRecorder{},
+			cache:            &stubGatewayCache{},
+			openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+			toolCorrector:    NewCodexToolCorrector(),
+			openaiWSPool:     pool,
+		}
+		return &guardHarness{svc: svc, dialer: dialer, c: c}
+	}
+	newAccount := func(id int64) *Account {
+		return &Account{
+			ID: id, Name: "openai-ws-guard", Platform: PlatformOpenAI,
+			Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1,
+			Credentials: map[string]any{"api_key": "sk-test"},
+			Extra:       map[string]any{"responses_websockets_v2_enabled": true},
+		}
+	}
+	runForward := func(t *testing.T, h *guardHarness, account *Account) {
+		t.Helper()
+		reqBody := map[string]any{"model": "gpt-5.5", "stream": true, "input": "hello"}
+		decision := OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}
+		recoveryTried := false
+		result, err := h.svc.forwardOpenAIWSV2(
+			context.Background(), h.c, account, reqBody, "", "", "test-token",
+			decision, true, true, "gpt-5.5", "gpt-5.5", time.Now(), 1, "", &recoveryTried,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+	}
+
+	t.Run("foreign_account_echo_stripped", func(t *testing.T) {
+		h := newHarness(t)
+		// blob 由账号 42 铸造，客户端回带到账号 43 的 WS 出站请求
+		h.svc.openaiCodexTurnStateOrigins.Store("7\x00sess-ws-guard", openAICodexTurnStateOrigin{
+			accountID: 42,
+			expiresAt: time.Now().Add(time.Hour),
+		})
+		h.c.Request.Header.Set("x-codex-turn-state", "blob-from-42")
+
+		runForward(t, h, newAccount(43))
+		require.Empty(t, h.dialer.lastHeaders.Get("x-codex-turn-state"),
+			"跨账号回带的 turn-state 必须在 WS 出站前剥离")
+	})
+
+	t.Run("same_account_echo_kept", func(t *testing.T) {
+		h := newHarness(t)
+		account := newAccount(43)
+		h.svc.openaiCodexTurnStateOrigins.Store("7\x00sess-ws-guard", openAICodexTurnStateOrigin{
+			accountID: account.ID,
+			expiresAt: time.Now().Add(time.Hour),
+		})
+		h.c.Request.Header.Set("x-codex-turn-state", "blob-from-same")
+
+		runForward(t, h, account)
+		require.Equal(t, "blob-from-same", h.dialer.lastHeaders.Get("x-codex-turn-state"),
+			"本账号铸造的回带值应原样保留")
+	})
+
+	t.Run("state_store_foreign_blob_stripped", func(t *testing.T) {
+		h := newHarness(t)
+		// 无客户端回带头；stateStore 中保存着其他账号铸造的 blob（failover 换号残留）
+		stateStore := NewOpenAIWSStateStore(nil)
+		h.svc.openaiWSStateStore = stateStore
+		h.svc.openaiCodexTurnStateOrigins.Store("7\x00sess-ws-guard", openAICodexTurnStateOrigin{
+			accountID: 42,
+			expiresAt: time.Now().Add(time.Hour),
+		})
+		sessionHash := h.svc.GenerateSessionHash(h.c, nil)
+		require.NotEmpty(t, sessionHash, "session 头存在时必须能算出会话哈希")
+		stateStore.BindSessionTurnState(9, sessionHash, "blob-stale-from-42", time.Hour)
+
+		runForward(t, h, newAccount(43))
+		require.Empty(t, h.dialer.lastHeaders.Get("x-codex-turn-state"),
+			"stateStore 恢复的跨账号 turn-state 必须被剥离")
+	})
+}
+
 func TestSweepOpenAICodexTurnStateOrigins_PrunesExpiredEntries(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	svc.openaiCodexTurnStateOrigins.Store("expired", openAICodexTurnStateOrigin{

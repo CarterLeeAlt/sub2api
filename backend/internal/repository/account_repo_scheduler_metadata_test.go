@@ -177,7 +177,7 @@ func TestAccountRepository_ListAccountsWithSchedulingThresholdPause_FiltersAndPa
 	repo := newAccountRepositoryWithSQL(client, db, nil)
 
 	mock.ExpectQuery("threshold pause page").
-		WithArgs(service.StatusActive, int64(41), `{"source":"account\_scheduling\_threshold"%`).
+		WithArgs(service.StatusActive, int64(41), service.AccountSchedulingThresholdReasonSource).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	accounts, err := repo.ListAccountsWithSchedulingThresholdPause(context.Background(), 41, 50)
 
@@ -187,7 +187,9 @@ func TestAccountRepository_ListAccountsWithSchedulingThresholdPause_FiltersAndPa
 	normalized := normalizeSQLWhitespace(capturedSQL)
 	require.Contains(t, normalized, `"status" = $1`)
 	require.Contains(t, normalized, `"id" > $2`)
-	require.Contains(t, normalized, `"temp_unschedulable_reason" LIKE $3`)
+	// reason 匹配走 JSON source 字段等值比较（对序列化字段序变化稳健），
+	// 非法/自由文本 reason 的行经 CASE 落 NULL 不入选。
+	require.Contains(t, normalized, `::jsonb ->> 'source') END = $3`)
 	require.Contains(t, normalized, `ORDER BY "accounts"."id" ASC`)
 	require.Contains(t, strings.ToUpper(normalized), "LIMIT 50")
 }

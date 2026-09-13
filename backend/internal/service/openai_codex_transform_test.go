@@ -451,6 +451,62 @@ func TestApplyCodexOAuthTransform_ConvertsToolRoleMessageToFunctionCallOutput(t 
 	require.False(t, hasRole)
 }
 
+// tool 消息只有 id 且为消息 ID（msg_ 前缀）时，不能把消息 ID 当 call_id——
+// 那会生成无法配对的 function_call_output，被上游 400 拒绝；应降级为 user 消息。
+func TestApplyCodexOAuthTransform_ToolRoleMessageIDFallsBackToUserMessage(t *testing.T) {
+	reqBody := map[string]any{
+		"model": "gpt-5.4",
+		"input": []any{
+			map[string]any{
+				"type":    "message",
+				"role":    "tool",
+				"id":      "msg_abc",
+				"content": "ok",
+			},
+		},
+	}
+
+	applyCodexOAuthTransform(reqBody, true, false)
+
+	input, ok := reqBody["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+
+	item, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "user", item["role"])
+	require.NotEqual(t, "function_call_output", item["type"])
+	_, hasCallID := item["call_id"]
+	require.False(t, hasCallID)
+}
+
+// tool 消息的 id 若形如工具调用 ID（call_ 前缀），仍可作为 call_id 兜底配对。
+func TestApplyCodexOAuthTransform_ToolRoleMessageCallShapedIDUsedAsCallID(t *testing.T) {
+	reqBody := map[string]any{
+		"model": "gpt-5.4",
+		"input": []any{
+			map[string]any{
+				"type":    "message",
+				"role":    "tool",
+				"id":      "call_abc",
+				"content": "ok",
+			},
+		},
+	}
+
+	applyCodexOAuthTransform(reqBody, true, false)
+
+	input, ok := reqBody["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+
+	item, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "function_call_output", item["type"])
+	require.Equal(t, "fc_abc", item["call_id"])
+	require.Equal(t, "ok", item["output"])
+}
+
 func TestApplyCodexOAuthTransform_StringifiesNonStringMessageContentText(t *testing.T) {
 	reqBody := map[string]any{
 		"model": "gpt-5.4",
@@ -1012,6 +1068,39 @@ func TestCodexImageGenerationBridge_PreservesClientImageFunctionTools(t *testing
 			},
 			wantClient: false,
 		},
+		{
+			// Responses Lite：运行时工具放在 input 的 additional_tools 项里，
+			// 必须识别为客户端自带工具，否则桥接会重复注入 hosted 工具。
+			name: "image_gen function inside additional_tools carrier",
+			reqBody: map[string]any{
+				"model": "gpt-5.5",
+				"input": []any{
+					map[string]any{"type": "message", "role": "user", "content": "draw a cat"},
+					map[string]any{
+						"type": "additional_tools",
+						"tools": []any{
+							map[string]any{"type": "function", "name": "image_gen.imagegen"},
+						},
+					},
+				},
+			},
+			wantClient: true,
+		},
+		{
+			name: "similar function name inside additional_tools carrier",
+			reqBody: map[string]any{
+				"model": "gpt-5.5",
+				"input": []any{
+					map[string]any{
+						"type": "additional_tools",
+						"tools": []any{
+							map[string]any{"type": "function", "name": "image_gen.imagegenerator"},
+						},
+					},
+				},
+			},
+			wantClient: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1353,9 +1442,9 @@ func TestNormalizeOpenAIResponsesImageOnlyModel_BuildsImageToolRequest(t *testin
 		"output_format": "png",
 	}
 
-	modified := normalizeOpenAIResponsesImageOnlyModel(reqBody)
+	modified := normalizeOpenAIResponsesImageOnlyModel(reqBody, "")
 	require.True(t, modified)
-	require.Equal(t, openAIImagesResponsesMainModel, reqBody["model"])
+	require.Equal(t, openAIImagesResponsesMainModelValue(), reqBody["model"])
 	require.Equal(t, "draw a cat", reqBody["input"])
 	_, hasPrompt := reqBody["prompt"]
 	require.False(t, hasPrompt)
@@ -1390,9 +1479,9 @@ func TestNormalizeOpenAIResponsesImageOnlyModel_PreservesExistingImageTool(t *te
 		"tool_choice": "auto",
 	}
 
-	modified := normalizeOpenAIResponsesImageOnlyModel(reqBody)
+	modified := normalizeOpenAIResponsesImageOnlyModel(reqBody, "")
 	require.True(t, modified)
-	require.Equal(t, openAIImagesResponsesMainModel, reqBody["model"])
+	require.Equal(t, openAIImagesResponsesMainModelValue(), reqBody["model"])
 	require.Equal(t, "auto", reqBody["tool_choice"])
 
 	tools, ok := reqBody["tools"].([]any)
@@ -1401,6 +1490,13 @@ func TestNormalizeOpenAIResponsesImageOnlyModel_PreservesExistingImageTool(t *te
 	tool, ok := tools[0].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "gpt-image-1.5", tool["model"])
+}
+
+func TestNormalizeOpenAIResponsesImageOnlyModel_UsesDynamicMainModel(t *testing.T) {
+	reqBody := map[string]any{"model": "gpt-image-2", "input": "draw a cat"}
+	modified := normalizeOpenAIResponsesImageOnlyModel(reqBody, "gpt-5.3-lumen")
+	require.True(t, modified)
+	require.Equal(t, "gpt-5.3-lumen", reqBody["model"])
 }
 
 func TestValidateOpenAIResponsesImageModel_RejectsImageOnlyModel(t *testing.T) {

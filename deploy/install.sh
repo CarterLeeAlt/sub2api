@@ -1,8 +1,12 @@
 #!/bin/bash
 #
-# Sub2API Installation Script
+# Sub2API Installation Script (fork: CarterLeeAlt/sub2api)
 # Sub2API 安装脚本
-# Usage: curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/CarterLeeAlt/sub2api/main/deploy/install.sh | bash
+#
+# 注意：本脚本通过 GitHub Releases 下载二进制。fork 通过 GHCR 发布 Docker 镜像
+# （ghcr.io/carterleealt/sub2api），Docker 部署请优先使用 deploy/ 下的 compose 文件；
+# 二进制通道需要 fork 发布 Release 后才可用。
 #
 
 set -e
@@ -31,7 +35,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-GITHUB_REPO="Wei-Shaw/sub2api"
+GITHUB_REPO="CarterLeeAlt/sub2api"
 INSTALL_DIR="/opt/sub2api"
 SERVICE_NAME="sub2api"
 SERVICE_USER="sub2api"
@@ -718,7 +722,7 @@ install_service() {
     cat > /etc/systemd/system/sub2api.service << EOF
 [Unit]
 Description=Sub2API - AI API Gateway Platform
-Documentation=https://github.com/Wei-Shaw/sub2api
+Documentation=https://github.com/CarterLeeAlt/sub2api
 After=network.target postgresql.service redis.service
 Wants=postgresql.service redis.service
 

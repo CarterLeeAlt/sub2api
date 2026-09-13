@@ -4735,3 +4735,453 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_InvalidEncrypted
 	require.Equal(t, "rs_1", gjson.Get(secondUpstream, "input.0.id").String())
 	require.Equal(t, "again", gjson.Get(secondUpstream, "input.2.text").String())
 }
+
+// openAIWSDrainProbeConn 模拟"上游先发一个事件后挂起"的连接：第二次读在
+// ctx 取消与 gate 之间选择，供测试精确控制取消/排水时机。
+type openAIWSDrainProbeConn struct {
+	mu       sync.Mutex
+	closed   bool
+	consumed int
+	gate     chan struct{}
+	event1   []byte
+	event2   []byte
+}
+
+func (c *openAIWSDrainProbeConn) WriteJSON(ctx context.Context, value any) error {
+	_ = ctx
+	_ = value
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errOpenAIWSConnClosed
+	}
+	return nil
+}
+
+func (c *openAIWSDrainProbeConn) ReadMessage(ctx context.Context) ([]byte, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, errOpenAIWSConnClosed
+	}
+	c.consumed++
+	n := c.consumed
+	c.mu.Unlock()
+	if n == 1 {
+		return c.event1, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.gate:
+		return c.event2, nil
+	}
+}
+
+func (c *openAIWSDrainProbeConn) Ping(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+func (c *openAIWSDrainProbeConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
+}
+
+// 客户端断连/请求上下文取消时，turn 不得再以 result==nil 结束：切 WithoutCancel
+// 有界排水到终端事件，把已收集 usage 组装成 result 提交 AfterTurn 入账。
+func TestOpenAIWSIngressProxy_DisconnectDrainSubmitsUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 8
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+
+	probeConn := &openAIWSDrainProbeConn{
+		gate:   make(chan struct{}),
+		event1: []byte(`{"type":"response.created","response":{"id":"resp_drain"}}`),
+		event2: []byte(`{"type":"response.completed","response":{"id":"resp_drain","model":"gpt-5.1","usage":{"input_tokens":3,"output_tokens":5}}}`),
+	}
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(&openAIWSSingleConnDialer{conn: probeConn})
+	defer pool.Close()
+
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     &httpUpstreamRecorder{},
+		cache:            &stubGatewayCache{},
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:    NewCodexToolCorrector(),
+		openaiWSPool:     pool,
+	}
+	account := &Account{
+		ID:          115,
+		Name:        "openai-ingress-disconnect-drain",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test"},
+		Extra:       map[string]any{"responses_websockets_v2_enabled": true},
+	}
+
+	type afterTurnCall struct {
+		result *OpenAIForwardResult
+		err    error
+	}
+	afterTurnCh := make(chan afterTurnCall, 4)
+	hooks := &OpenAIWSIngressHooks{
+		AfterTurn: func(_ int, result *OpenAIForwardResult, turnErr error) {
+			afterTurnCh <- afterTurnCall{result: result, err: turnErr}
+		},
+	}
+
+	serverErrCh := make(chan error, 1)
+	cancelCh := make(chan context.CancelFunc, 1)
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := coderws.Accept(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		req := r.Clone(r.Context())
+		req.Header = req.Header.Clone()
+		req.Header.Set("User-Agent", "unit-test-agent/1.0")
+		ginCtx.Request = req
+		readCtx, cancelRead := context.WithTimeout(r.Context(), 3*time.Second)
+		_, firstMessage, readErr := conn.Read(readCtx)
+		cancelRead()
+		if readErr != nil {
+			serverErrCh <- readErr
+			return
+		}
+		ctx, cancelTest := context.WithCancel(r.Context())
+		defer cancelTest()
+		cancelCh <- cancelTest
+		serverErrCh <- svc.ProxyResponsesWebSocketFromClient(ctx, ginCtx, conn, account, "sk-test", firstMessage, hooks)
+	}))
+	defer wsServer.Close()
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http"), nil)
+	cancelDial()
+	require.NoError(t, err)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
+	require.NoError(t, clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1","stream":false,"input":[{"role":"user","content":"hi"}]}`)))
+	cancelWrite()
+
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
+	_, created, readErr := clientConn.Read(readCtx)
+	cancelRead()
+	require.NoError(t, readErr)
+	require.Equal(t, "response.created", gjson.GetBytes(created, "type").String())
+
+	// 模拟断连引发的上下文取消，随后放行上游终端事件，验证排水把 usage 带回 AfterTurn。
+	cancel := <-cancelCh
+	cancel()
+	close(probeConn.gate)
+
+	select {
+	case call := <-afterTurnCh:
+		require.NoError(t, call.err, "排水收到终端事件后 turn 应正常收尾")
+		require.NotNil(t, call.result)
+		require.True(t, call.result.ClientDisconnect, "断连排水收尾的 result 必须携带 ClientDisconnect 标记")
+		require.Equal(t, 3, call.result.Usage.InputTokens)
+		require.Equal(t, 5, call.result.Usage.OutputTokens, "断连排水的已计量 usage 必须入账")
+		require.Equal(t, "response.completed", call.result.UpstreamTerminalEvent)
+	case <-time.After(5 * time.Second):
+		t.Fatal("AfterTurn 未被回调")
+	}
+
+	select {
+	case serverErr := <-serverErrCh:
+		require.NoError(t, serverErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待 ingress websocket 结束超时")
+	}
+}
+
+// 抢占分支不得跳过 AfterTurn：BeforeTurn 已为该 turn 计数，AfterTurn 必须以
+// 抢占错误被回调，保证 handler 的 turn 级统计与并发槽位释放不跳号。
+func TestOpenAIWSIngressProxy_PreemptedTurnStillCallsAfterTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := newOpenAIWSExecutionScopeTestConfig()
+
+	gatedConn := newOpenAIWSGatedConn(`{"type":"response.completed","response":{"id":"resp_preempt_a","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`)
+	fastConn := &openAIWSCaptureConn{
+		events: [][]byte{
+			[]byte(`{"type":"response.completed","response":{"id":"resp_preempt_b","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+		},
+	}
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(&openAIWSQueueDialer{conns: []openAIWSClientConn{gatedConn, fastConn}})
+	defer pool.Close()
+
+	svc := &OpenAIGatewayService{
+		cfg:                cfg,
+		httpUpstream:       &httpUpstreamRecorder{},
+		cache:              &stubGatewayCache{},
+		openaiWSResolver:   NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:      NewCodexToolCorrector(),
+		openaiWSPool:       pool,
+		openaiWSStateStore: NewOpenAIWSStateStore(nil),
+	}
+	groupID := int64(9)
+	account := &Account{
+		ID:          457,
+		Name:        "openai-ingress-preempt-after-turn",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 2,
+		Credentials: map[string]any{"access_token": "test-token"},
+		Extra:       map[string]any{"openai_oauth_responses_websockets_v2_enabled": true},
+	}
+
+	type afterTurnCall struct {
+		result *OpenAIForwardResult
+		err    error
+	}
+	afterTurnCh := make(chan afterTurnCall, 4)
+	hooks := &OpenAIWSIngressHooks{
+		AfterTurn: func(_ int, result *OpenAIForwardResult, turnErr error) {
+			afterTurnCh <- afterTurnCall{result: result, err: turnErr}
+		},
+	}
+
+	serverErrCh := make(chan error, 2)
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{CompressionMode: coderws.CompressionContextTakeover})
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		req := r.Clone(r.Context())
+		req.Header = req.Header.Clone()
+		req.Header.Set("User-Agent", "unit-test-agent/1.0")
+		ginCtx.Request = req
+		ginCtx.Set("api_key", &APIKey{ID: 21, GroupID: &groupID})
+		readCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		_, firstMessage, readErr := conn.Read(readCtx)
+		cancel()
+		if readErr != nil {
+			serverErrCh <- readErr
+			return
+		}
+		serverErrCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "test-token", firstMessage, hooks)
+	}))
+	defer wsServer.Close()
+
+	dial := func(t *testing.T, threadID string) *coderws.Conn {
+		t.Helper()
+		header := http.Header{}
+		header.Set("session-id", "root-session")
+		if threadID != "" {
+			header.Set(openAIWSTurnMetadataHeader, `{"session_id":"root-session","thread_id":"`+threadID+`"}`)
+		}
+		dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		conn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http"), &coderws.DialOptions{HTTPHeader: header})
+		require.NoError(t, err)
+		return conn
+	}
+	write := func(t *testing.T, conn *coderws.Conn, body string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		require.NoError(t, conn.Write(ctx, coderws.MessageText, []byte(body)))
+	}
+
+	connA := dial(t, "thread-a")
+	defer func() { _ = connA.CloseNow() }()
+	write(t, connA, `{"type":"response.create","model":"gpt-5.1","stream":false,"input":[{"role":"user","content":"thread a"}]}`)
+	select {
+	case <-gatedConn.sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("A 的请求应先到达上游")
+	}
+
+	// B 以同线程身份接入，抢占 A 的会话上下文。
+	connB := dial(t, "thread-a")
+	defer func() { _ = connB.CloseNow() }()
+	write(t, connB, `{"type":"response.create","model":"gpt-5.1","stream":false,"input":[{"role":"user","content":"thread b"}]}`)
+	readCtxB, cancelB := context.WithTimeout(context.Background(), 3*time.Second)
+	_, completedB, readErrB := connB.Read(readCtxB)
+	cancelB()
+	require.NoError(t, readErrB, "B 必须正常完成")
+	require.Equal(t, "resp_preempt_b", gjson.GetBytes(completedB, "response.id").String())
+	require.NoError(t, connB.Close(coderws.StatusNormalClosure, "done"))
+
+	serverErrs := make([]error, 0, 2)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-serverErrCh:
+			serverErrs = append(serverErrs, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 ingress websocket 结束超时")
+		}
+	}
+	preempted := 0
+	for _, err := range serverErrs {
+		if IsOpenAIWSSessionPreemptedError(err) {
+			preempted++
+		} else {
+			require.NoError(t, err)
+		}
+	}
+	require.Equal(t, 1, preempted, "应恰好有一条会话被抢占")
+
+	// 被抢占一侧的 AfterTurn 必须以抢占错误被回调（result 为 nil 属预期）。
+	// A 与 B 的 AfterTurn 到达顺序不确定，这里阻塞等待抢占调用本身。
+	preemptAfterTurnSeen := false
+	waitDeadline := time.After(5 * time.Second)
+	for !preemptAfterTurnSeen {
+		select {
+		case call := <-afterTurnCh:
+			if call.err != nil && IsOpenAIWSSessionPreemptedError(call.err) {
+				preemptAfterTurnSeen = true
+				require.Nil(t, call.result, "被抢占的 turn 没有可提交的 result")
+			} else {
+				require.NoError(t, call.err)
+			}
+		case <-waitDeadline:
+			t.Fatal("AfterTurn 未被抢占分支回调")
+		}
+	}
+}
+
+// ingress 原生 WS 拨号组头必须过 turn-state 跨账号回带守卫（对齐 HTTP 出站守卫）。
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_GuardsTurnStateEcho(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	run := func(t *testing.T, provenanceAccountID int64) http.Header {
+		t.Helper()
+		cfg := newOpenAIWSExecutionScopeTestConfig()
+		captureConn := &openAIWSCaptureConn{
+			events: [][]byte{
+				[]byte(`{"type":"response.completed","response":{"id":"resp_ts_guard","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+			},
+		}
+		dialer := &openAIWSCaptureDialer{conn: captureConn}
+		pool := newOpenAIWSConnPool(cfg)
+		pool.setClientDialerForTest(dialer)
+		defer pool.Close()
+
+		svc := &OpenAIGatewayService{
+			cfg:              cfg,
+			httpUpstream:     &httpUpstreamRecorder{},
+			cache:            &stubGatewayCache{},
+			openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+			toolCorrector:    NewCodexToolCorrector(),
+			openaiWSPool:     pool,
+		}
+		account := &Account{
+			ID:          456,
+			Name:        "openai-ingress-ts-guard",
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Schedulable: true,
+			Concurrency: 1,
+			Credentials: map[string]any{"api_key": "sk-test"},
+			Extra:       map[string]any{"responses_websockets_v2_enabled": true},
+		}
+		groupID := int64(9)
+
+		serverErrCh := make(chan error, 1)
+		wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := coderws.Accept(w, r, nil)
+			if err != nil {
+				serverErrCh <- err
+				return
+			}
+			defer func() { _ = conn.CloseNow() }()
+			rec := httptest.NewRecorder()
+			ginCtx, _ := gin.CreateTestContext(rec)
+			req := r.Clone(r.Context())
+			req.Header = req.Header.Clone()
+			req.Header.Set("User-Agent", "unit-test-agent/1.0")
+			ginCtx.Request = req
+			ginCtx.Set("api_key", &APIKey{ID: 21, GroupID: &groupID})
+			readCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			_, firstMessage, readErr := conn.Read(readCtx)
+			cancel()
+			if readErr != nil {
+				serverErrCh <- readErr
+				return
+			}
+			serverErrCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, nil)
+		}))
+		defer wsServer.Close()
+
+		header := http.Header{}
+		header.Set("session-id", "root-session")
+		header.Set("x-codex-turn-state", "blob-from-42")
+		dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+		clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http"), &coderws.DialOptions{HTTPHeader: header})
+		cancelDial()
+		require.NoError(t, err)
+		defer func() { _ = clientConn.CloseNow() }()
+
+		// 溯源在首帧发出前登记，避免与 handler 读取起点竞态
+		svc.openaiCodexTurnStateOrigins.Store("21\x00root-session", openAICodexTurnStateOrigin{
+			accountID: provenanceAccountID,
+			expiresAt: time.Now().Add(time.Hour),
+		})
+
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
+		require.NoError(t, clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1","stream":false,"input":[{"role":"user","content":"hi"}]}`)))
+		cancelWrite()
+
+		readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
+		_, completed, readErr := clientConn.Read(readCtx)
+		cancelRead()
+		require.NoError(t, readErr)
+		require.Equal(t, "resp_ts_guard", gjson.GetBytes(completed, "response.id").String())
+		require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+
+		select {
+		case serverErr := <-serverErrCh:
+			require.NoError(t, serverErr)
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 ingress websocket 结束超时")
+		}
+		return dialer.lastHeaders
+	}
+
+	t.Run("foreign_account_stripped", func(t *testing.T) {
+		headers := run(t, 42)
+		require.Empty(t, headers.Get("x-codex-turn-state"),
+			"跨账号回带的 turn-state 必须在原生 WS 拨号组头前剥离")
+	})
+
+	t.Run("same_account_kept", func(t *testing.T) {
+		headers := run(t, 456)
+		require.Equal(t, "blob-from-42", headers.Get("x-codex-turn-state"),
+			"本账号铸造的回带值应原样保留")
+	})
+}

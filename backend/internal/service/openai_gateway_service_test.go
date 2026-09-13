@@ -3550,7 +3550,20 @@ func TestParseSSEUsage_TerminalUsageReplacesFallback(t *testing.T) {
 
 	require.Equal(t, 19, usage.InputTokens)
 	require.Equal(t, 7, usage.OutputTokens)
-	require.Zero(t, usage.CacheReadInputTokens)
+	// terminal usage 缺失的明细字段保留 progressive 已见值：缺失 ≠ 显式 0，
+	// 兼容上游常在 terminal 省略 cache/image 明细，整体替换会造成漏收。
+	require.Equal(t, 4, usage.CacheReadInputTokens)
+}
+
+func TestParseSSEUsage_TerminalExplicitZeroDetailWins(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	usage := &OpenAIUsage{}
+
+	svc.parseSSEUsage(`{"type":"response.output_text.done","usage":{"input_tokens":17,"output_tokens":5,"input_tokens_details":{"cached_tokens":4}}}`, usage)
+	svc.parseSSEUsage(`{"type":"response.completed","response":{"usage":{"input_tokens":19,"output_tokens":7,"input_tokens_details":{"cached_tokens":0}}}}`, usage)
+
+	require.Equal(t, 19, usage.InputTokens)
+	require.Zero(t, usage.CacheReadInputTokens, "terminal 显式上报 0 的明细字段是权威值，不回退 progressive 值")
 }
 
 func TestParseSSEUsage_TerminalWithoutUsageKeepsFallback(t *testing.T) {

@@ -1219,10 +1219,68 @@ func (s *OpenAIGatewayService) parseSSEUsageBytesWithType(data []byte, eventType
 		if !openAIUsageHasTokens(&parsedUsage) && openAIUsageHasTokens(usage) {
 			return
 		}
+		prior := *usage
 		*usage = parsedUsage
+		preserveOpenAIUsageDetailsMissingFromTerminal(data, &prior, usage)
 		return
 	}
 	mergeOpenAIUsageNonZero(usage, parsedUsage)
+}
+
+// preserveOpenAIUsageDetailsMissingFromTerminal keeps progressive-stage detail
+// fields that the terminal usage payload does not report at all. OpenAIUsage
+// cannot distinguish "explicitly zero" from "absent", so presence is checked
+// against the terminal payload's raw JSON: a detail field the payload omits
+// falls back to the value already observed on this turn — compatible upstreams
+// often leave image/cache details out of terminal usage, and wholesale
+// replacement would erase the progressive observation and under-charge the
+// image surcharge. A field the terminal payload reports (even as zero) stays
+// authoritative.
+func preserveOpenAIUsageDetailsMissingFromTerminal(terminalPayload []byte, prior, merged *OpenAIUsage) {
+	if prior == nil || merged == nil || len(terminalPayload) == 0 {
+		return
+	}
+	usage := gjson.GetBytes(terminalPayload, "usage")
+	if !usage.Exists() {
+		// 候选路径与 extractOpenAIUsageFromJSONBytes 的包装形态保持一致。
+		for _, path := range []string{"response.usage", "data.usage", "data.response.usage"} {
+			if usage = gjson.GetBytes(terminalPayload, path); usage.Exists() {
+				break
+			}
+		}
+		if !usage.Exists() {
+			return
+		}
+	}
+	if prior.ImageInputTokens > 0 && merged.ImageInputTokens == 0 &&
+		!usage.Get("input_tokens_details.image_tokens").Exists() &&
+		!usage.Get("prompt_tokens_details.image_tokens").Exists() {
+		merged.ImageInputTokens = prior.ImageInputTokens
+	}
+	if prior.ImageOutputTokens > 0 && merged.ImageOutputTokens == 0 &&
+		!usage.Get("output_tokens_details.image_tokens").Exists() &&
+		!usage.Get("completion_tokens_details.image_tokens").Exists() {
+		merged.ImageOutputTokens = prior.ImageOutputTokens
+	}
+	if prior.CacheReadInputTokens > 0 && merged.CacheReadInputTokens == 0 &&
+		!usage.Get("input_tokens_details.cached_tokens").Exists() &&
+		!usage.Get("prompt_tokens_details.cached_tokens").Exists() &&
+		!usage.Get("cache_read_input_tokens").Exists() &&
+		!usage.Get("cache_read_tokens").Exists() &&
+		!usage.Get("cached_tokens").Exists() {
+		merged.CacheReadInputTokens = prior.CacheReadInputTokens
+	}
+	if prior.CacheCreationInputTokens > 0 && merged.CacheCreationInputTokens == 0 &&
+		!usage.Get("input_tokens_details.cache_write_tokens").Exists() &&
+		!usage.Get("prompt_tokens_details.cache_write_tokens").Exists() &&
+		!usage.Get("input_tokens_details.cache_creation_tokens").Exists() &&
+		!usage.Get("prompt_tokens_details.cache_creation_tokens").Exists() &&
+		!usage.Get("cache_write_tokens").Exists() &&
+		!usage.Get("cache_creation_input_tokens").Exists() &&
+		!usage.Get("cache_write_input_tokens").Exists() &&
+		!usage.Get("cache_creation_tokens").Exists() {
+		merged.CacheCreationInputTokens = prior.CacheCreationInputTokens
+	}
 }
 
 // Compatible Responses upstreams may report usage before the terminal event.

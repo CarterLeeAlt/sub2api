@@ -792,3 +792,137 @@ func TestOpenAIWSConnPool_AcquireSkipsDirtyIdleConn(t *testing.T) {
 	require.Len(t, dialer.dialed(), 2)
 	requireConnClosed(t, first.conn)
 }
+
+// ── cleanup 路径租约范式（与 ping sweep 对称）────────────────────────────────
+
+// 年龄回收分支：清理方必须原子地"判定空闲 + 占有令牌"才允许剔除。从剔除决策
+// 到锁外 close 之间令牌由清理方暂持，其他获取者不能再借出该连接。
+func TestOpenAIWSConnPool_CleanupAgeEvictHoldsLeaseUntilClose(t *testing.T) {
+	fake := newOpenAIWSReaderLoopFakeConn()
+	conn := newOpenAIWSConn("cl_age_token", 320, fake, nil)
+	defer conn.close()
+	// 有常驻读循环的连接不参与空闲回收，走年龄回收分支
+	conn.createdAtNano.Store(time.Now().Add(-openAIWSConnMaxAge - time.Minute).UnixNano())
+	pool, ap := newSweepTestPool(conn, 320)
+
+	ap.mu.Lock()
+	evicted := pool.cleanupAccountLocked(ap, time.Now(), 2)
+	ap.mu.Unlock()
+
+	require.Len(t, evicted, 1, "超过最大年龄的空闲连接应被年龄回收分支剔除")
+	requireInPool(t, ap, conn.id, false)
+	require.False(t, conn.isClosed(), "剔除决策后、锁外 close 前连接尚未关闭")
+	require.False(t, conn.tryAcquire(), "清理方暂持租约令牌期间其他获取者不得借出")
+	closeOpenAIWSConns(evicted)
+	requireConnClosed(t, conn)
+}
+
+// 已被借出的连接在空闲回收与年龄回收分支中都必须被跳过，绝不能被清理关闭。
+func TestOpenAIWSConnPool_CleanupSkipsLeasedConn(t *testing.T) {
+	fake := newOpenAIWSReaderLoopFakeConn()
+	conn := newOpenAIWSConn("cl_leased_skip", 321, fake, nil)
+	defer conn.close()
+	require.True(t, conn.tryAcquire(), "借用者先持有租约")
+	// 同时满足年龄回收与空闲回收（若不考虑租约）的触发条件
+	conn.createdAtNano.Store(time.Now().Add(-openAIWSConnMaxAge - time.Minute).UnixNano())
+	conn.lastUsedNano.Store(time.Now().Add(-openAIWSConnIdleRecycleAfter - time.Minute).UnixNano())
+	pool, ap := newSweepTestPool(conn, 321)
+
+	ap.mu.Lock()
+	evicted := pool.cleanupAccountLocked(ap, time.Now(), 2)
+	ap.mu.Unlock()
+
+	require.Empty(t, evicted, "已租出的连接不得被清理剔除")
+	requireInPool(t, ap, conn.id, true)
+	require.False(t, conn.isClosed(), "已租出的连接不得被清理关闭")
+}
+
+// 容量收缩分支：只淘汰空闲候选且淘汰出的连接由清理方暂持令牌；已租出连接跳过；
+// 未被淘汰的候选必须归还令牌、保持可借出。
+func TestOpenAIWSConnPool_CapacityShrinkHoldsLeaseAndKeepsRestAcquirable(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 8
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 2
+	pool := &openAIWSConnPool{cfg: cfg}
+
+	makeIdle := func(id string, idleFor time.Duration) *openAIWSConn {
+		conn := newOpenAIWSConn(id, 323, newOpenAIWSReaderLoopFakeConn(), nil)
+		conn.lastUsedNano.Store(time.Now().Add(-idleFor).UnixNano())
+		return conn
+	}
+	idle1 := makeIdle("cl_shrink_1", 4*time.Minute)
+	idle2 := makeIdle("cl_shrink_2", 3*time.Minute)
+	idle3 := makeIdle("cl_shrink_3", 2*time.Minute)
+	idle4 := makeIdle("cl_shrink_4", 1*time.Minute)
+	leased := newOpenAIWSConn("cl_shrink_leased", 323, newOpenAIWSReaderLoopFakeConn(), nil)
+	require.True(t, leased.tryAcquire(), "借用者持有租约")
+	t.Cleanup(func() {
+		for _, conn := range []*openAIWSConn{idle1, idle2, idle3, idle4, leased} {
+			conn.close()
+		}
+		leased.release()
+	})
+
+	ap := &openAIWSAccountPool{conns: map[string]*openAIWSConn{
+		idle1.id: idle1, idle2.id: idle2, idle3.id: idle3, idle4.id: idle4, leased.id: leased,
+	}}
+	pool.accounts.Store(int64(323), ap)
+
+	ap.mu.Lock()
+	evicted := pool.cleanupAccountLocked(ap, time.Now(), 8)
+	ap.mu.Unlock()
+
+	// 5 条连接超出 maxIdle=2 三条：淘汰最旧的 3 条空闲连接，已租出连接跳过，
+	// 最新的空闲连接保留（其令牌由清理方归还）。
+	require.Len(t, evicted, 3, "maxIdle=2 时应淘汰最旧的 3 条空闲连接并跳过已租出连接")
+	for _, conn := range []*openAIWSConn{idle1, idle2, idle3} {
+		require.False(t, conn.tryAcquire(), "淘汰出的连接在锁外 close 前令牌应由清理方持有")
+	}
+	requireInPool(t, ap, idle4.id, true)
+	requireInPool(t, ap, leased.id, true)
+	require.True(t, idle4.tryAcquire(), "未淘汰的候选应归还令牌保持可借出")
+	idle4.release()
+	require.False(t, leased.isClosed(), "已租出的连接不得被容量收缩淘汰")
+	require.EqualValues(t, 3, pool.metrics.scaleDownTotal.Load(), "容量收缩指标只统计淘汰出的空闲连接")
+	closeOpenAIWSConns(evicted)
+	requireConnClosed(t, idle1)
+}
+
+// 清理判定窗口内被借出的连接绝不能被清理方关闭：与
+// TestOpenAIWSConnPool_BackgroundPingSweepNeverClosesConnLeasedInEvictWindow 对称，
+// 覆盖 runBackgroundCleanupSweep 的剔除路径。
+func TestOpenAIWSConnPool_BackgroundCleanupSweepNeverClosesConnLeasedInEvictWindow(t *testing.T) {
+	fake := newOpenAIWSReaderLoopFakeConn()
+	conn := newOpenAIWSConn("cl_evict_window", 324, fake, nil)
+	defer conn.close()
+	// 走年龄回收分支触发剔除
+	conn.createdAtNano.Store(time.Now().Add(-openAIWSConnMaxAge - time.Minute).UnixNano())
+	pool, ap := newSweepTestPool(conn, 324)
+
+	leased := false
+	leaseDone := make(chan struct{})
+	go func() {
+		defer close(leaseDone)
+		// 清理判定窗口内反复尝试借出
+		for {
+			if conn.tryAcquire() {
+				leased = true
+				return
+			}
+			if conn.isClosed() {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	pool.runBackgroundCleanupSweep(time.Now())
+	<-leaseDone
+
+	if leased {
+		require.False(t, conn.isClosed(), "借用者拿到租约后，清理不得关闭该连接")
+		requireInPool(t, ap, conn.id, true)
+		conn.release()
+	} else {
+		require.True(t, conn.isClosed(), "清理方持有令牌后才允许剔除")
+	}
+}

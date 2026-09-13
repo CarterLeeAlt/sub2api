@@ -33,6 +33,7 @@ type OpenAIQuotaSnapshotRefreshRepository interface {
 		groupID int64,
 		privacyMode string,
 	) ([]Account, *pagination.PaginationResult, error)
+	GetByID(ctx context.Context, id int64) (*Account, error)
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 	UpdateOpenAICodexWhamSnapshotIfNewer(
 		ctx context.Context,
@@ -52,6 +53,15 @@ type openAIQuotaUsageReader interface {
 	QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error)
 }
 
+// OpenAIQuotaSnapshotRecoveryReconciler triggers persisted-state recovery from an
+// authoritative WHAM snapshot right after the periodic refresher persists a newer
+// generation. Implementations must fail closed unless the database row still
+// carries the expected snapshot generation.
+type OpenAIQuotaSnapshotRecoveryReconciler interface {
+	AccountSchedulingThresholdSnapshotPolicyReconciler
+	OpenAICodexQuotaRateLimitSnapshotReconciler
+}
+
 // OpenAIQuotaSnapshotRefreshService periodically refreshes read-only quota
 // snapshots. It never calls ResetCredit or any other consumption API.
 type OpenAIQuotaSnapshotRefreshService struct {
@@ -60,6 +70,11 @@ type OpenAIQuotaSnapshotRefreshService struct {
 	lockCache    LeaderLockCache
 	db           *sql.DB
 	instanceID   string
+
+	// reconciler triggers scheduling-threshold pause and quota-429 recovery
+	// after a fresh authoritative WHAM snapshot has been persisted. It is
+	// optional: without it the refresher stays read-only display plumbing.
+	reconciler OpenAIQuotaSnapshotRecoveryReconciler
 
 	parentCtx    context.Context
 	parentCancel context.CancelFunc
@@ -101,6 +116,17 @@ func (s *OpenAIQuotaSnapshotRefreshService) SetLeaderLock(lockCache LeaderLockCa
 	}
 	s.lockCache = lockCache
 	s.db = db
+}
+
+// SetRecoveryReconciler wires the quota-driven recovery reconciler (usually
+// *RateLimitService). The refresher itself never mutates account state directly;
+// recovery is delegated to the same CAS-guarded entry points used by the
+// account-usage query path.
+func (s *OpenAIQuotaSnapshotRefreshService) SetRecoveryReconciler(reconciler OpenAIQuotaSnapshotRecoveryReconciler) {
+	if s == nil {
+		return
+	}
+	s.reconciler = reconciler
 }
 
 func (s *OpenAIQuotaSnapshotRefreshService) Start() {
@@ -217,10 +243,45 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 			}
 		}
 
+		// A full serial sweep can outlive the leader lock TTL (each account may
+		// burn two upstream attempts plus a cooldown). Renew the lock after
+		// every page so leadership is not silently lost mid-cycle; abort
+		// immediately when a peer has taken over.
+		if !s.renewLeaderLock(ctx) {
+			return fmt.Errorf("OpenAI quota snapshot refresh leader lock lost after page %d; aborting cycle to avoid double leadership", page)
+		}
+
 		if len(accounts) < openAIQuotaSnapshotRefreshPageSize || result == nil || page >= result.Pages {
 			return nil
 		}
 	}
+}
+
+// renewLeaderLock extends the leader lock TTL once per page. It returns false
+// when the lock was lost (expired or re-acquired by a peer) or when renewal
+// errored, in which case the caller must stop the cycle: continuing without a
+// verified lease risks two instances sweeping concurrently. Backends without a
+// TTL (DB advisory lock, no coordination backend) have nothing to renew.
+func (s *OpenAIQuotaSnapshotRefreshService) renewLeaderLock(ctx context.Context) bool {
+	if s.lockCache == nil {
+		return true
+	}
+	renewCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	renewed, err := s.lockCache.RenewLeaderLock(
+		renewCtx,
+		openAIQuotaSnapshotRefreshLeaderLockKey,
+		s.instanceID,
+		openAIQuotaSnapshotRefreshLeaderLockTTL,
+	)
+	if err != nil {
+		slog.Warn("openai_quota_snapshot_refresh_leader_lock_renew_failed", "error", err)
+		return false
+	}
+	if !renewed {
+		slog.Warn("openai_quota_snapshot_refresh_leader_lock_lost")
+	}
+	return renewed
 }
 
 // waitOutOpenAIQuotaSnapshotRetryDelay sleeps for the retry delay but wakes up
@@ -273,12 +334,23 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccount(ctx context.Context, 
 	}
 	observedAt := s.now().UTC()
 
+	whamUpdates := buildCodexWhamWindowExtraUpdates(usage, observedAt, false)
 	var firstErr error
-	if err := s.persistWhamSnapshot(ctx, account.ID, buildCodexWhamWindowExtraUpdates(usage, observedAt, false)); err != nil {
+	whamPersisted, err := s.persistWhamSnapshot(ctx, account.ID, whamUpdates)
+	if err != nil {
 		firstErr = err
 	}
 	if err := s.persistResetCreditSnapshot(ctx, account.ID, usage.RateLimitResetCredits, observedAt); err != nil && firstErr == nil {
 		firstErr = err
+	}
+
+	// A freshly persisted authoritative WHAM generation can prove that a
+	// threshold-triggered pause or a quota-derived 429 has already recovered.
+	// Trigger the same CAS-guarded recovery as the account-usage query path so
+	// gateway-only deployments are not stuck until an admin opens the usage
+	// panel. Failures never interrupt the refresh cycle.
+	if whamPersisted {
+		s.reconcileQuotaRecoveryAfterPersist(ctx, account.ID, codexWhamSnapshotGeneration(whamUpdates))
 	}
 
 	shadows, err := s.repo.ListShadowsByParent(ctx, account.ID)
@@ -292,7 +364,7 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccount(ctx context.Context, 
 		if shadow == nil || !shadow.IsShadow() {
 			continue
 		}
-		if err := s.persistWhamSnapshot(ctx, shadow.ID, buildCodexSparkWindowExtraUpdates(usage, observedAt)); err != nil && firstErr == nil {
+		if _, err := s.persistWhamSnapshot(ctx, shadow.ID, buildCodexSparkWindowExtraUpdates(usage, observedAt)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err := s.persistResetCreditSnapshot(ctx, shadow.ID, usage.RateLimitResetCredits, observedAt); err != nil && firstErr == nil {
@@ -302,13 +374,43 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccount(ctx context.Context, 
 	return firstErr
 }
 
-func (s *OpenAIQuotaSnapshotRefreshService) persistWhamSnapshot(ctx context.Context, accountID int64, updates map[string]any) error {
+// reconcileQuotaRecoveryAfterPersist reloads the canonical account row and asks
+// the reconciler to clear a scheduling-threshold pause and/or a quota-derived
+// 429 using the exact WHAM generation that was just persisted. The expected
+// generation deliberately comes from the persisted updates (not from any
+// in-memory account copy) so the repository CAS matches the query-path
+// semantics. Individual reconcile failures are logged and never abort the
+// refresh cycle.
+func (s *OpenAIQuotaSnapshotRefreshService) reconcileQuotaRecoveryAfterPersist(ctx context.Context, accountID int64, expectedGeneration string) {
+	if s.reconciler == nil || accountID <= 0 || expectedGeneration == "" {
+		return
+	}
+	canonical, err := s.repo.GetByID(ctx, accountID)
+	if err != nil || canonical == nil {
+		slog.Warn("openai_quota_snapshot_recovery_reload_failed", "account_id", accountID, "error", err)
+		return
+	}
+
+	if shouldClearOpenAISchedulingThresholdPause(canonical, s.now()) {
+		if err := s.reconciler.ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(ctx, canonical, expectedGeneration); err != nil {
+			slog.Warn("openai_quota_snapshot_threshold_recovery_reconcile_failed", "account_id", canonical.ID, "error", err)
+		}
+	}
+	if canonical.RateLimitedAt != nil && canonical.RateLimitResetAt != nil {
+		if _, _, quota429 := parseOpenAICodexQuota429State(canonical.Extra); quota429 {
+			if err := s.reconciler.ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged(ctx, canonical, expectedGeneration); err != nil {
+				slog.Warn("openai_quota_snapshot_quota_429_recovery_reconcile_failed", "account_id", canonical.ID, "error", err)
+			}
+		}
+	}
+}
+
+func (s *OpenAIQuotaSnapshotRefreshService) persistWhamSnapshot(ctx context.Context, accountID int64, updates map[string]any) (bool, error) {
 	generation := codexWhamSnapshotGeneration(updates)
 	if generation == "" {
-		return nil
+		return false, nil
 	}
-	_, err := s.repo.UpdateOpenAICodexWhamSnapshotIfNewer(ctx, accountID, generation, updates)
-	return err
+	return s.repo.UpdateOpenAICodexWhamSnapshotIfNewer(ctx, accountID, generation, updates)
 }
 
 func (s *OpenAIQuotaSnapshotRefreshService) persistResetCreditSnapshot(

@@ -105,3 +105,33 @@ func TestPassthroughKeepaliveDisabledKeepsWriterUntouched(t *testing.T) {
 	require.False(t, StopOpenAICompactSSEKeepaliveCommitted(c))
 	_ = time.Now
 }
+
+// keepalive 提交 200 后，终态 4xx 必须降级为流内 response.failed 终止事件：
+// 状态码已固化，c.Data(4xx) 只会让客户端收到"假 200 + JSON 错误体"
+// （failover 换号后下一账号返回不可 failover 的 4xx 时正是此场景）。
+func TestPassthroughErrorEnvelopeDegradesToInStreamFailureAfterKeepaliveCommit(t *testing.T) {
+	c, rec := newPassthroughKeepaliveTestContext(t)
+	stop := startOpenAISSEKeepalive(c, keepaliveTestInterval)
+	waitForKeepaliveBeats()
+	require.True(t, StopOpenAISSEKeepaliveCommitted(c), "心跳应已提交响应头为 200")
+	stop()
+
+	writeOpenAIPassthroughErrorEnvelope(c, http.StatusBadRequest, http.Header{}, "Upstream request failed")
+
+	require.Equal(t, http.StatusOK, rec.Code, "状态码已由心跳固化，不得改写")
+	body := stripKeepaliveComments(rec.Body.String())
+	require.Contains(t, body, "event: response.failed", "终态错误必须降级为流内 response.failed 事件")
+	require.Contains(t, body, "Upstream request failed")
+	require.NotContains(t, body, `"type":"upstream_error"`, "不得再写 JSON 错误信封")
+}
+
+// 对照：无 keepalive（从未提交 200）时保持原 JSON+状态码链路不变。
+func TestPassthroughErrorEnvelopeWithoutKeepaliveKeepsStatusAndJSON(t *testing.T) {
+	c, rec := newPassthroughKeepaliveTestContext(t)
+
+	writeOpenAIPassthroughErrorEnvelope(c, http.StatusBadRequest, http.Header{}, "Upstream request failed")
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), `"type":"upstream_error"`)
+	require.NotContains(t, rec.Body.String(), "response.failed")
+}

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -888,6 +889,10 @@ func truncateForLog(b []byte, maxBytes int) string {
 		b = b[:maxBytes]
 	}
 	s := string(b)
+	// 截断落在多字节 UTF-8 中间时丢弃残缺尾部，避免日志出现非法字节序列。
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "")
+	}
 	// 保持一行，避免污染日志格式
 	s = strings.ReplaceAll(s, "\n", "\\n")
 	s = strings.ReplaceAll(s, "\r", "\\r")

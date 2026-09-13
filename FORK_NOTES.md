@@ -537,3 +537,58 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 - `.github/workflows/custom-docker.yml`
 - `Dockerfile`
 - `frontend/src/components/common/VersionBadge.vue`
+
+## 2026-09-13 全面审查修复轮
+
+本轮对全仓做了一次分区深度审查（生图链路 / Codex 核心协议 / 调度限流配额 / 网关管道与 WS / 横切面），并按三批修复。与上游语义相关的决策记录如下，后续上游同步时必须复核：
+
+### 生图主模型守卫同源（修复 P1）
+
+- `isOpenAIImagesMainModelError` 增加 request-scoped 变体 `isOpenAIImagesMainModelErrorForRequest`：除静态主模型（env `SUB2API_IMAGES_MAIN_MODEL` 或常量）外，同时匹配 `resolveOpenAIImagesResponsesMainModel` 本请求动态选中的主模型（经 `withOpenAIImagesResolvedMainModel` 写入 ctx）。动态主模型遭遇 plan-gated 400 时透传给客户端，不 failover、不冷却任何账号的图片模型——与上游"静态守卫命中即透传"的行为对齐（上游无动态主模型，本条是 fork 动态选择引入后的必要同步）。
+- `selectOpenAICodexImageMainModel` 与 `resolveOpenAIImagesResponsesMainModel` 的 preferred/legacy 回退统一改用 env 感知的 `openAIImagesResponsesMainModelValue()`。
+- `/v1/responses` 的 image-only 归一化 `normalizeOpenAIResponsesImageOnlyModel` 增加 mainModel 参数，由 `/v1/responses` 转发路径按账号动态解析后传入（仅 image-only 请求触发解析，普通文本请求零开销），消除与 `/v1/images` 的入口分裂。
+
+### Spark 影子健康检查豁免阈值停调（修复 P1）
+
+- `IsCredentialUsableForShadow` 对 `TempUnschedulableUntil` 的连坐增加来源判断：`TempUnschedulableReason` 命中 `IsAccountSchedulingThresholdReason`（CUSTOM-006 账号调度阈值停调）时**不连坐**影子；401/token 刷新/transport 等来源保持连坐。阈值停调在语义上属于母账号 global 窗口停调，与 `RateLimitResetAt` 同一道，遵守 shadow_routing 的"global 不连坐 spark"承诺。
+
+### WS v2 passthrough `capturedSessionModel` 原子化（修复 P1）
+
+- relay 启动后 c2u policy filter 与 u2c BeforeWriteClient 回调跨 goroutine 读写该值，改为 `atomic.Pointer[string]` 存取（对齐 usageMeta 模式），原"单 goroutine"注释失实已修正。
+
+### passthrough 生图槽位豁免（记录为有意差异）
+
+- 上游 #4476 的设计：handler 仅对**显式** image_generation 意图占 ImageConcurrency 槽位，被动 namespace 声明不参与并发治理，服务层无补偿。fork 的 `acquireOpenAIImageSlotForForward`（openai_gateway_forward.go）是 fork 特有的宽口径补偿扩展；passthrough 路径**刻意**保持与上游一致（不占槽），不得当 bug 恢复。
+
+### 停调恢复证据已知偏差（先止血，留待下轮）
+
+- 已修：x-codex-* 响应头路径的窗口键写入加单调保护，迟到旧响应不再覆盖新状态。
+- 已知偏差（下轮处理）：`shouldClearOpenAISchedulingThresholdPause` 的恢复门槛读秒级多来源 `codex_usage_updated_at`，而权威性校验只存在于 WHAM 纳秒代际 CAS；按 CUSTOM-006 的表述，恢复判定应只认 `codex_wham_usage_updated_at`。
+
+### 部署资产指向 fork（CUSTOM-003 补全）
+
+- `deploy/` 下全部 compose、文档与脚本（install.sh、docker-deploy.sh、apple-container、sub2api.service、config.example.yaml）及三个 Dockerfile 的 OCI source label 改指 `CarterLeeAlt/sub2api` 与 `ghcr.io/carterleealt/sub2api`。
+- 已知代价：fork 尚未发布任何 GitHub Releases，install.sh 的二进制下载通道在 fork 发布首个 Release 前不可用；Docker 部署走 GHCR 镜像不受影响。后续若配置 goreleaser 发布即可启用。
+
+### 其他修复（简列）
+
+- 周期快照刷新落库后触发 429/阈值停调的权威恢复 Reconcile（补齐 CUSTOM-014 与 CUSTOM-006 的联动）。
+- 快照刷新 leader lock 增加轮内按页续期（RenewLeaderLock），防止长轮次双 leader。
+- WS 连接池 cleanup 路径改用租约令牌原子判定（对齐 ping sweep 范式），不再误杀刚借出的连接。
+- WS 原生路径（v2 forwarder 与 ingress）接入 turn-state 跨账号回带守卫，与 HTTP 路径对齐。
+- ingress ctx_pool 断连/抢占路径补 turn 用量排水与 AfterTurn 记账。
+- WS v2 pre-token 缓冲加 8MB 上限；passthrough keepalive 提交 200 后终态错误降级为流内事件。
+- `/v1/images` 动态主模型解析为空时返回账号级 failover 信号（换号）而非硬 502。
+- `codex-auto-*`（除 review 外）转发归一化透传，不再被 `codex` 兜底改写为 gpt-5.3-codex。
+- 管理端同步回退裸 gateway 显式声明不做账号熔断（半初始化实例局限）。
+- 生图 usage 替换保留 cache-read 明细；terminal usage 非零字段合并；SSE 多行 data 拼接回调；429 reset 只延长；logredact 默认集合并入服务层敏感键清单；错误文本按 rune 截断；若干死代码与失实注释清理。
+
+### 已知限制（记录不改）
+
+- 进程内 per-account sync.Map（`openaiAccountRuntimeBlockLocks`、`openAIAccountRuntimeStats.accounts` 等）：账号删除后条目不回收。单条目约 50-100 字节，万级账号全生命周期增量约 1MB，且运行态 block 状态表本有过期自清理；锁表分片化重构需触碰错误路径并发语义，收益/风险比不划算，明确不做。
+
+### 已知限制：包级测试 -race 噪声（既有，非本轮引入）
+
+- `internal/service` 包大量测试文件在并行测试中直调 `gin.SetMode(gin.TestMode)`，写 gin 包级模式变量；`-race` 下并行执行互报数据竞争（生产无此模式，项目门禁 `go test -tags=unit` 不带 `-race` 故从未暴露）。`openai_compat_model_test.go` 已改为 `sync.Once` helper 作为示范，包级统一改造留待与上游协调（机械替换会在每次上游同步时制造冲突面）。
+- `grok_free_quota_gate_test.go:241` 整体重赋值全局 `openaiGrokFreeQuotaGateCache`，与先前测试残留的后台刷新 goroutine 构成竞争（仅测试环境；生产路径从不重赋值该全局）。
+- 本轮全部改动区域（WS 连接池/透传 adapter/ingress/生图守卫/配额刷新/SSE 解析/影子健康）经 `-race` 定向验证干净。

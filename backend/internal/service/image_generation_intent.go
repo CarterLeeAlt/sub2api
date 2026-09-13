@@ -424,6 +424,11 @@ type OpenAIResponsesImageBillingConfig struct {
 	InputSize string
 }
 
+// resolveOpenAIResponsesImageBillingConfigDetailed 及其 FromBody 变体的 error
+// 返回值当前恒为 nil（非法 size 静默落入默认档位，不报 400）。这是上游既有
+// 签名：保留 error 形态以维持与上游实现的签名一致，调用方的错误分支属防御性
+// 死代码，不要据此"修复"——真正恢复校验（对未知 size 报 400）会破坏发送非
+// 标准尺寸的合法客户端请求，须先单独评审。
 func resolveOpenAIResponsesImageBillingConfigDetailed(reqBody map[string]any, fallbackModel string) (OpenAIResponsesImageBillingConfig, error) {
 	imageModel := ""
 	imageSize := ""
