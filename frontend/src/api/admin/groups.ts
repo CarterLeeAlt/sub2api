@@ -463,7 +463,6 @@ export const groupsAPI = {
   update,
   delete: deleteGroup,
   toggleStatus,
-  getStats,
   getGroupApiKeys,
   listCompositeRoutes,
   createCompositeRoute,
