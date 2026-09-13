@@ -1183,6 +1183,26 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				upstreamMessage = normalized
 			}
 
+			// 畸形帧守卫（与 forwarder_v2 口径一致）：非 JSON 上游帧是连接级
+			// 异常信号。此前 ctx_pool 原样转发给客户端（客户端解析失败）且不计
+			// 入 eventCount、连接不判脏——当前 turn 已被污染。
+			if !json.Valid(upstreamMessage) {
+				lease.MarkBroken()
+				logOpenAIWSModeInfo(
+					"ingress_ws_invalid_event_json account_id=%d conn_id=%s turn=%d bytes=%d wrote_downstream=%v",
+					account.ID,
+					truncateOpenAIWSLogValue(lease.ConnID(), openAIWSLogValueMaxLen),
+					turn,
+					len(upstreamMessage),
+					wroteDownstream,
+				)
+				return nil, NewOpenAIWSClientCloseError(
+					coderws.StatusBadGateway,
+					"upstream sent a malformed event",
+					fmt.Errorf("invalid json frame from upstream (conn %s)", lease.ConnID()),
+				)
+			}
+
 			eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
 			responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
 			if responseID == "" && eventResponseID != "" {

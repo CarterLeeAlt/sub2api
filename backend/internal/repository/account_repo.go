@@ -111,7 +111,10 @@ func codexFingerprintSeedValidSQL(extraExpr string) string {
 }
 
 func ensureCodexFingerprintSeedSQL(extraExpr string) string {
-	return "CASE WHEN platform = 'openai' AND type = 'oauth' THEN " +
+	// 与运行时判定（IsOpenAIOAuthLike = oauth + setup-token）保持同一口径：
+	// setup-token 账号开启收敛模式时同样需要 seed，否则 resolveCodexFingerprintIDs
+	// 因缺 seed 静默失效。
+	return "CASE WHEN platform = 'openai' AND type IN ('oauth', 'setup-token') THEN " +
 		"jsonb_set(" + extraExpr + ", '{codex_fingerprint_seed}', " +
 		"CASE WHEN " + codexFingerprintSeedValidSQL("extra") +
 		" THEN to_jsonb(extra ->> 'codex_fingerprint_seed') ELSE to_jsonb(gen_random_uuid()::text) END, true) " +

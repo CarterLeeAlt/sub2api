@@ -197,16 +197,16 @@ func TestAnthropicToResponses_ThinkingSignatureBecomesReasoning(t *testing.T) {
 	assert.Equal(t, "function_call", items[3].Type)
 }
 
-func TestAnthropicToResponses_MaxTokensFloor(t *testing.T) {
+func TestAnthropicToResponses_MaxTokensPassthrough(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "gpt-5.2",
-		MaxTokens: 10, // below minMaxOutputTokens (128)
+		MaxTokens: 10, // explicit small value must pass through unclamped
 		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
 	}
 
 	resp, err := AnthropicToResponses(req)
 	require.NoError(t, err)
-	assert.Equal(t, 128, *resp.MaxOutputTokens)
+	assert.Equal(t, 10, *resp.MaxOutputTokens)
 }
 
 // ---------------------------------------------------------------------------

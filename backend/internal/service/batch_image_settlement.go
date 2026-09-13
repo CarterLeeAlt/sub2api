@@ -20,6 +20,9 @@ const (
 	batchImageSettlementRetryDelay    = time.Minute
 	batchImageSettlementMaxRetries    = 5
 	batchImageCostEpsilon             = 0.00000001
+	// indexing 阶段持久性故障（输出丢失/provider 摘除）的重试上界，
+	// 与 settlement 一致；超限转 failed 并释放冻结余额。
+	batchImageIndexingMaxRetries = 5
 )
 
 type BatchImagePricingResolver interface {
@@ -47,9 +50,11 @@ func (r *BatchImageModelPricingResolver) BatchImageUnitPrice(ctx context.Context
 			return *resolved.RequestTiers[0].PerRequestPrice, nil
 		}
 	case BillingModeToken:
-		if resolved.BasePricing != nil && (resolved.BasePricing.ImageOutputPriceExplicit || resolved.BasePricing.ImageOutputPricePerToken > 0) {
-			return resolved.BasePricing.ImageOutputPricePerToken, nil
-		}
+		// 批量生图只支持按张计费。此前这里把"每 token 单价"当"每张单价"
+		// 返回（如 $40/1M tokens 变成 0.00004/张），估价、冻结、结算全链路
+		// 按错误口径执行，等于近乎免费出图。显式拒绝：模型不出现在可用
+		// 列表，提交即报错；此类模型走普通生图入口（token 计价正确）。
+		return 0, ErrBatchImageSettlementPricingMissing
 	}
 	return 0, ErrBatchImageSettlementPricingMissing
 }

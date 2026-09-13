@@ -184,6 +184,24 @@ func (s *ImageTaskService) Get(ctx context.Context, owner ImageTaskOwner, id str
 		// Do not reveal whether a random task ID exists for another caller.
 		return nil, ErrImageTaskNotFound
 	}
+	// 惰性 reaper：任务执行是进程内 goroutine，进程崩溃/重启后 processing 记录
+	// 会永久滞留（只能等 TTL 过期）。轮询时超过执行时限仍未终态的任务按超时
+	// 标 failed，使文档"任务最多执行 executionTimeout"的承诺在崩溃场景下同样
+	// 成立，客户端也不会无限轮询。
+	if task.Status == ImageTaskStatusProcessing && task.CreatedAt > 0 &&
+		time.Now().UTC().After(time.Unix(task.CreatedAt, 0).Add(s.executionTimeout)) {
+		now := time.Now().UTC()
+		completedAt := now.Unix()
+		task.Status = ImageTaskStatusFailed
+		task.HTTPStatus = http.StatusInternalServerError
+		task.Error = imageTaskErrorJSON("api_error", "image task timed out")
+		task.CompletedAt = &completedAt
+		task.ExpiresAt = now.Add(s.ttl).Unix()
+		if err := s.store.Save(ctx, task, s.ttl); err != nil {
+			return nil, ErrImageTaskUnavailable.WithCause(err)
+		}
+		logger.L().Warn("image_task_stale_processing_reaped", zap.String("task_id", task.ID))
+	}
 	return imageTaskToPublic(task), nil
 }
 

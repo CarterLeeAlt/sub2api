@@ -445,15 +445,28 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			markDecodedModified()
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Normalized /responses image_generation tool payload")
 		}
-		// 只对 image-only 请求做动态主模型解析：manifest 已由 FetchCodexModelsManifest
-		// 缓存，但普通文本请求不应为归一化付出任何查找成本。解析失败时回落静态主模型，
-		// 与 /v1/images 非直调路径的失败语义保持一致。
-		if imageOnlyModel := strings.TrimSpace(firstNonEmptyString(decoded["model"])); isOpenAIImageGenerationModel(imageOnlyModel) {
-			responsesMainModel := ""
-			if resolved, resolveErr := s.resolveOpenAIImagesResponsesMainModel(ctx, account); resolveErr == nil {
-				responsesMainModel = resolved
+		// 只对 image-only 请求做动态主模型归一化，且仅限 OAuth（Codex 后端）
+		// 账号：非 OAuth 账号的 /responses 端点不提供 Codex slug，改写成
+		// gpt-5.6-luna 只会制造注定 404 的请求并误冷却 (account, slug)。
+		// OAuth 账号确认"没有可用图片主模型"时与 /v1/images 同源返回账号级
+		// failover（换号），而不是吞掉错误硬发注定失败的请求。
+		if imageOnlyModel := strings.TrimSpace(firstNonEmptyString(decoded["model"])); isOpenAIImageGenerationModel(imageOnlyModel) && account.IsOpenAIOAuth() {
+			resolved, resolveErr := s.resolveOpenAIImagesResponsesMainModel(ctx, account)
+			if resolveErr != nil {
+				logger.LegacyPrintf(
+					"service.openai_gateway",
+					"[OpenAI] /responses image-only resolve main model failed account_id=%d inbound_model=%s error=%v",
+					account.ID,
+					imageOnlyModel,
+					resolveErr,
+				)
+				setOpsUpstreamError(c, http.StatusBadGateway, "no image main model", resolveErr.Error())
+				return nil, &UpstreamFailoverError{
+					StatusCode:   http.StatusBadGateway,
+					ResponseBody: openAIImagesNoMainModelFailoverBody,
+				}
 			}
-			if normalizeOpenAIResponsesImageOnlyModel(decoded, responsesMainModel) {
+			if normalizeOpenAIResponsesImageOnlyModel(decoded, resolved) {
 				markDecodedModified()
 				if model, ok := decoded["model"].(string); ok {
 					upstreamModel = strings.TrimSpace(model)

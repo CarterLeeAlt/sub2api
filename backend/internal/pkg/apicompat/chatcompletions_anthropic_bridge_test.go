@@ -243,14 +243,14 @@ func TestAnthropicToChatCompletionsRequest_TemperaturePreservedForNonReasoningMo
 func TestAnthropicToChatCompletionsRequest_MaxTokensFloor(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "claude-sonnet-4-20250514",
-		MaxTokens: 10, // below minMaxOutputTokens (128)
+		MaxTokens: 10, // explicit small value must pass through unclamped
 		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 	}
 
 	out, err := AnthropicToChatCompletionsRequest(req)
 	require.NoError(t, err)
 	require.NotNil(t, out.MaxCompletionTokens)
-	require.Equal(t, minMaxOutputTokens, *out.MaxCompletionTokens)
+	require.Equal(t, 10, *out.MaxCompletionTokens)
 }
 
 func TestAnthropicToChatCompletionsRequest_ReasoningEffortMapping(t *testing.T) {

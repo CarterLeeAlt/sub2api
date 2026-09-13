@@ -139,12 +139,15 @@ func (s *OpenAIGatewayService) guardOpenAICodexTurnStateEcho(c *gin.Context, acc
 		s.openaiCodexTurnStateOrigins.Delete(seed)
 		return
 	}
-	if !origin.expiresAt.IsZero() && time.Now().After(origin.expiresAt) {
-		s.openaiCodexTurnStateOrigins.Delete(seed)
-		return
-	}
+	// 过期只影响记录的留存，不影响本次判定：手里已有铸造账号，过期后仍按
+	// 异账号剥离（sticky TTL 过期 + 客户端回带旧 blob + 调度切号三者同时
+	// 发生时，放行正是本守卫要防的跨账号矛盾信号）。删除仅让后续透传语义
+	// 回退到"无溯源记录"，不改变本请求的结论。
 	if origin.accountID != account.ID {
 		h.Del(openAICodexTurnStateHeader)
+	}
+	if !origin.expiresAt.IsZero() && time.Now().After(origin.expiresAt) {
+		s.openaiCodexTurnStateOrigins.Delete(seed)
 	}
 }
 

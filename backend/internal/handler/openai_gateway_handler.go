@@ -2801,6 +2801,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				c.Set(securityAuditWSTurnContextKey, turn)
 				service.BeginOpsStreamTurn(c, turn)
 				setCyberTurnBody(turn, payload)
+				// turn 2+ 每轮刷新用量审计哈希：闭包捕获的 requestPayloadHash
+				// 若只在首包算一次，后续 turn 的 RecordUsage 全部记成第 1 轮
+				// 哈希，按哈希做重复请求检测/审计时会漏。
 				// 连接级 cyber session gate 也在 BeforeRequest 先执行，使 native 与
 				// passthrough ingress 都能在 BeforeTurn 及上游写入前无副作用地拒绝。
 				// BeforeTurn 中保留同一检查作为防御式兜底。
@@ -2813,6 +2816,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if !gjson.ValidBytes(payload) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 				}
+				requestPayloadHash = service.HashUsageRequestPayload(payload)
 				model := strings.TrimSpace(originalModel)
 				if model == "" {
 					model = strings.TrimSpace(gjson.GetBytes(payload, "model").String())
