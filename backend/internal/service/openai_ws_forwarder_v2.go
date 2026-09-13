@@ -71,6 +71,16 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
 	setOpenAIWSTurnMetadata(payload, turnMetadata)
+	// 指纹收敛生产点：与 HTTP Forward（openai_gateway_forward.go）同源——每账号
+	// attempt 解析一次收敛 ID 并暂存，供下方 payload 消费点与本 attempt 的
+	// buildOpenAIWSHeaders 头消费点共享同一份 IDs。此前 WS 原生路径只有消费没有
+	// 生产，staged 值恒为 nil，收敛静默失效。无条件覆写（含 nil）：failover 切到
+	// off 账号时上一账号的 IDs 不得残留。
+	var clientHeaders http.Header
+	if c != nil && c.Request != nil {
+		clientHeaders = c.Request.Header
+	}
+	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(account, clientHeaders))
 	applyStagedCodexFingerprintClientMetadata(c, account, payload)
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
 	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
@@ -132,7 +142,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		sessionHash = executionScope
 	}
 	if turnState == "" && stateStore != nil && sessionHash != "" {
-		if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, sessionHash); ok {
+		if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, sessionHash, account.ID); ok {
 			turnState = savedTurnState
 		}
 	}
@@ -332,11 +342,16 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	)
 	if handshakeTurnState != "" {
 		if stateStore != nil && sessionHash != "" {
-			stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, s.openAIWSSessionStickyTTL())
+			stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, account.ID, s.openAIWSSessionStickyTTL())
 		}
 		if c != nil {
 			c.Header(http.CanonicalHeaderKey(openAIWSTurnStateHeader), handshakeTurnState)
 		}
+		// 溯源记录：该 blob 已确定下发客户端（与 HTTP staged 提交点同语义），
+		// 必须登记铸造账号，guardOpenAICodexTurnStateEcho 与 stateStore 的
+		// 账号维度过滤才能在后续回带时识别异账号值。此前 WS 铸造从不记录，
+		// 守卫对 WS 铸造的 blob 永久盲区。
+		s.noteOpenAICodexTurnStateProvenance(c, account)
 	}
 
 	if err := s.performOpenAIWSGeneratePrewarm(

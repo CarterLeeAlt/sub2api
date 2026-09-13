@@ -266,7 +266,14 @@ type OpenAIWSIngressHooks struct {
 	// MapRequestModel resolves the current turn's client model to the model
 	// that must be written into the upstream response.create frame.
 	MapRequestModel func(turn int, originalModel string) (string, error)
-	AfterTurn       func(turn int, result *OpenAIForwardResult, turnErr error)
+	// ImageSlotAcquire 在本 turn 被判定为生图意图（imageBillingModel 非空）时，
+	// 于 sendAndRelay 前调用；返回 release 回调与是否占槽成功，false 时该 turn
+	// 以"生图并发超限"关闭。与 HTTP 路径的 ImageConcurrency 槽位同源（桥接注入
+	// 的升级意图已在 payload 规范化时计入），防止 WS ingress 绕过生图并发治理。
+	// 按 turn 粒度 acquire/release：ingress 在每个 turn 收尾（AfterTurn 之后）
+	// 与函数返回前释放。
+	ImageSlotAcquire func(turn int) (release func(), ok bool)
+	AfterTurn        func(turn int, result *OpenAIForwardResult, turnErr error)
 }
 
 func (s *OpenAIGatewayService) getOpenAIWSConnPool() *openAIWSConnPool {

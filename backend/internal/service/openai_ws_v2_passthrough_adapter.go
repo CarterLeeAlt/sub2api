@@ -859,6 +859,24 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		turnState = strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
 		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
+	// turn-state 跨账号回带守卫：passthrough 在 modeRouter 提前 return，绕开了
+	// ingress 主流程 577 行的守卫；此处是拨号头组装前唯一的汇合点，必须补齐，
+	// 否则 failover 换号后客户端回带的旧账号 blob 会原样发给新账号上游。
+	if turnState != "" {
+		guardedTurnState := http.Header{}
+		guardedTurnState.Set(openAIWSTurnStateHeader, turnState)
+		s.guardOpenAICodexTurnStateEcho(c, account, guardedTurnState)
+		turnState = strings.TrimSpace(guardedTurnState.Get(openAIWSTurnStateHeader))
+	}
+	// 指纹收敛生产点：buildOpenAIWSHeaders 内部统一消费 staged IDs（与
+	// HTTP/其他 WS 路径同源）。passthrough 虽为最小干预透传，但账号身份头
+	// （applyCodexAccountIdentityHeaders）同样应用，收敛是账号 opt-in 配置，
+	// 不应因传输模式而分裂。此前此处只有消费没有生产，收敛静默失效。
+	var fingerprintClientHeaders http.Header
+	if c != nil && c.Request != nil {
+		fingerprintClientHeaders = c.Request.Header
+	}
+	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(account, fingerprintClientHeaders))
 	headers, _, buildHdrErr := s.buildOpenAIWSHeaders(
 		ctx,
 		c,

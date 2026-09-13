@@ -2854,6 +2854,31 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				turnChannelMapping.Store(&openAIWSTurnChannelMappingSnapshot{turn: turn, mapping: mapping})
 				return mapping.MappedModel, nil
 			},
+			// 生图并发槽（turn 粒度）：与 HTTP Responses 路径共用 imageLimiter 配置。
+			// WS 已完成升级，占槽失败不能走 handleStreamingAwareErrorWithCode 的
+			// HTTP 429 响应，改由 ingress 转为 WS close(TryAgainLater)。
+			ImageSlotAcquire: func(turn int) (func(), bool) {
+				if h == nil || h.cfg == nil || h.imageLimiter == nil {
+					return nil, true
+				}
+				imageConcurrency := h.cfg.Gateway.ImageConcurrency
+				wait := strings.TrimSpace(imageConcurrency.OverflowMode) == config.ImageConcurrencyOverflowModeWait
+				release, acquired := h.imageLimiter.Acquire(
+					ctx,
+					imageConcurrency.Enabled,
+					imageConcurrency.MaxConcurrentRequests,
+					wait,
+					time.Duration(imageConcurrency.WaitTimeoutSeconds)*time.Second,
+					imageConcurrency.MaxWaitingRequests,
+				)
+				if acquired {
+					return release, true
+				}
+				reqLog.Info("openai.websocket_image_slot_exhausted",
+					zap.Int("turn", turn),
+					zap.Int64("account_id", account.ID))
+				return nil, false
+			},
 			BeforeTurn: func(turn int) error {
 				// turn==1 的会话屏蔽已由握手层检查覆盖；连接内 flag 只拦截后续 turn。
 				if cyberBlockedThisConn {
