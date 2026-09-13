@@ -331,13 +331,15 @@ func TestShouldClearOpenAISchedulingThresholdPause_WhenFreshSnapshotFallsBelowTh
 		TempUnschedulableUntil:  &until,
 		TempUnschedulableReason: reason,
 		Extra: map[string]any{
-			"codex_7d_used_percent":  0.0,
-			"codex_7d_reset_at":      until.Format(time.RFC3339),
-			"codex_usage_updated_at": now.Format(time.RFC3339),
+			"codex_7d_used_percent":      0.0,
+			"codex_7d_reset_at":          until.Format(time.RFC3339),
+			"codex_usage_updated_at":     now.Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey:   now.UTC().Format(codexWhamGenerationLayout),
+			codexWham7dUsedPercentKey:    0.0,
 		},
 	}
 
-	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now))
+	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now, nil))
 }
 
 func TestShouldClearOpenAISchedulingThresholdPause_UsesCurrentAccountOverride(t *testing.T) {
@@ -359,16 +361,89 @@ func TestShouldClearOpenAISchedulingThresholdPause_UsesCurrentAccountOverride(t 
 		TempUnschedulableUntil:  &until,
 		TempUnschedulableReason: reason,
 		Extra: map[string]any{
-			"codex_7d_used_percent":  97.0,
-			"codex_7d_reset_at":      until.Format(time.RFC3339),
-			"codex_usage_updated_at": now.Format(time.RFC3339),
+			"codex_7d_used_percent":      97.0,
+			"codex_7d_reset_at":          until.Format(time.RFC3339),
+			"codex_usage_updated_at":     now.Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey:   now.UTC().Format(codexWhamGenerationLayout),
+			codexWham7dUsedPercentKey:    97.0,
 		},
 	}
 
-	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now))
+	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now, nil))
 
 	account.Credentials[accountSchedulingThresholdCredentialKey] = 96
-	require.False(t, shouldClearOpenAISchedulingThresholdPause(account, now))
+	require.False(t, shouldClearOpenAISchedulingThresholdPause(account, now, nil))
+}
+
+// 全局阈值放宽立即生效：触发时按 90% 停调，管理员放宽到 95% 后，
+// 权威观测 94% 低于新阈值即恢复（旧行为会继续按旧阈值 90% 卡住）。
+func TestShouldClearOpenAISchedulingThresholdPause_GlobalThresholdRelaxationApplies(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
+	until := now.Add(5 * 24 * time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform:         PlatformOpenAI,
+		Window:           "7d",
+		ThresholdPercent: 90,
+		UsedPercent:      94,
+		Until:            until,
+		Now:              now.Add(-time.Hour),
+	})
+	account := &Account{
+		Platform:                PlatformOpenAI,
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			"codex_7d_used_percent":    94.0,
+			"codex_7d_reset_at":        until.Format(time.RFC3339),
+			codexWhamUsageUpdatedAtKey: now.UTC().Format(codexWhamGenerationLayout),
+			codexWham7dUsedPercentKey:  94.0,
+		},
+	}
+
+	// 全局仍是 90：94 >= 90，不恢复。
+	require.False(t, shouldClearOpenAISchedulingThresholdPause(account, now, map[string]int{PlatformOpenAI: 90}))
+	// 放宽到 95：94 < 95，立即恢复。
+	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now, map[string]int{PlatformOpenAI: 95}))
+}
+
+// 头快照不得触发恢复：共享键（codex_usage_updated_at / codex_7d_used_percent）
+// 被在途请求的旧观测刷新，但 WHAM 代际停留在停调之前 —— 恢复判定必须拒绝。
+func TestShouldClearOpenAISchedulingThresholdPause_HeaderSnapshotAloneCannotRecover(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
+	until := now.Add(5 * 24 * time.Hour)
+	triggeredAt := now.Add(-time.Hour)
+	reason := BuildDetailedAccountSchedulingThresholdReason(AccountSchedulingThresholdReasonInput{
+		Platform:         PlatformOpenAI,
+		Window:           "7d",
+		ThresholdPercent: 70,
+		UsedPercent:      80,
+		Until:            until,
+		Now:              triggeredAt,
+	})
+	account := &Account{
+		Platform:                PlatformOpenAI,
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: reason,
+		Extra: map[string]any{
+			// 在途请求落库的头快照：共享键显示"60%、观测新鲜"。
+			"codex_7d_used_percent":  60.0,
+			"codex_7d_reset_at":      until.Format(time.RFC3339),
+			"codex_usage_updated_at": now.Format(time.RFC3339),
+			// WHAM 权威侧：代际早于停调触发时刻，且没有 WHAM 专写百分比。
+			codexWhamUsageUpdatedAtKey: triggeredAt.Add(-time.Minute).UTC().Format(codexWhamGenerationLayout),
+		},
+	}
+
+	require.False(t, shouldClearOpenAISchedulingThresholdPause(account, now, map[string]int{PlatformOpenAI: 70}))
+
+	// WHAM 代际推进到停调之后 + 权威百分比回落 → 才允许恢复。
+	account.Extra[codexWhamUsageUpdatedAtKey] = now.Add(-time.Second).UTC().Format(codexWhamGenerationLayout)
+	account.Extra[codexWham7dUsedPercentKey] = 60.0
+	require.True(t, shouldClearOpenAISchedulingThresholdPause(account, now, map[string]int{PlatformOpenAI: 70}))
 }
 
 func TestShouldClearOpenAISchedulingThresholdPause_DoesNotClearUnrecoveredOrUnrelatedState(t *testing.T) {
@@ -404,12 +479,14 @@ func TestShouldClearOpenAISchedulingThresholdPause_DoesNotClearUnrecoveredOrUnre
 				TempUnschedulableUntil:  &until,
 				TempUnschedulableReason: tc.reason,
 				Extra: map[string]any{
-					"codex_7d_used_percent":  tc.used,
-					"codex_7d_reset_at":      until.Format(time.RFC3339),
-					"codex_usage_updated_at": tc.updated.Format(time.RFC3339),
+					"codex_7d_used_percent":    tc.used,
+					"codex_7d_reset_at":        until.Format(time.RFC3339),
+					"codex_usage_updated_at":   tc.updated.Format(time.RFC3339),
+					codexWhamUsageUpdatedAtKey: tc.updated.UTC().Format(codexWhamGenerationLayout),
+					codexWham7dUsedPercentKey:  tc.used,
 				},
 			}
-			require.Equal(t, tc.want, shouldClearOpenAISchedulingThresholdPause(account, now))
+			require.Equal(t, tc.want, shouldClearOpenAISchedulingThresholdPause(account, now, nil))
 		})
 	}
 }

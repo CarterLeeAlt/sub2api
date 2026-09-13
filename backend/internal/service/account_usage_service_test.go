@@ -402,6 +402,7 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 	repo := &accountUsageCodexProbeRepo{}
 	reconciler := &accountUsageThresholdReconciler{}
 	svc := &AccountUsageService{accountRepo: repo, thresholdReconciler: reconciler}
+	whamGeneration := formatCodexWhamSnapshotGeneration(now)
 	account := &Account{
 		ID:                      3211,
 		Platform:                PlatformOpenAI,
@@ -414,7 +415,8 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 			"codex_7d_used_percent":    0.0,
 			"codex_7d_reset_at":        until.Format(time.RFC3339),
 			"codex_usage_updated_at":   now.Format(time.RFC3339),
-			codexWhamUsageUpdatedAtKey: "2026-08-17T07:00:00.123456789Z",
+			codexWhamUsageUpdatedAtKey: whamGeneration,
+			codexWham7dUsedPercentKey:  0.0,
 		},
 	}
 
@@ -424,8 +426,8 @@ func TestAccountUsageService_GetOpenAIUsage_ClearsRecoveredSchedulingThresholdPa
 	if reconciler.calls != 1 {
 		t.Fatalf("threshold reconciler calls = %d, want 1", reconciler.calls)
 	}
-	if reconciler.expectedWhamUpdatedAt != "2026-08-17T07:00:00.123456789Z" {
-		t.Fatalf("expected WHAM generation = %q", reconciler.expectedWhamUpdatedAt)
+	if reconciler.expectedWhamUpdatedAt != whamGeneration {
+		t.Fatalf("expected WHAM generation = %q, want %q", reconciler.expectedWhamUpdatedAt, whamGeneration)
 	}
 	if repo.clearTempCalls != 0 {
 		t.Fatalf("legacy ClearTempUnschedulable calls = %d, want 0", repo.clearTempCalls)

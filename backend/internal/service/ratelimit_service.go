@@ -2239,8 +2239,20 @@ func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, accou
 	if snapshot == nil {
 		return
 	}
-	updates := buildCodexUsageExtraUpdates(snapshot, time.Now())
+	now := time.Now()
+	updates := buildCodexUsageExtraUpdates(snapshot, now)
 	if len(updates) == 0 {
+		return
+	}
+	// 与成功路径（updateCodexUsageSnapshot）同口径：429 的头快照同样是被动观测
+	// 样本，落库走单调守卫。否则并发场景下（成功的守卫写先落、429 的无条件写
+	// 后落），429 头里较旧的窗口百分比会覆盖较新观测——该键正是阈值停调恢复
+	// 判定的输入，会放大误恢复窗口。仓库不支持守卫时退回无条件写。
+	baseTime := codexSnapshotBaseTime(snapshot, now)
+	if writer, ok := s.accountRepo.(codexUsageExtraMonotonicWriter); ok {
+		if _, err := writer.UpdateCodexUsageExtraIfNewer(ctx, account.ID, updates, baseTime); err != nil {
+			slog.Warn("openai_codex_snapshot_persist_failed", "account_id", account.ID, "error", err)
+		}
 		return
 	}
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {

@@ -2255,6 +2255,11 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 
 func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
+	// OpenAI OAuth 账号加"只延长"守卫：runtime block 激活期间，配额 429 的数天级
+	// reset 已落库，而在途请求的瞬时 429（兜底 5s / 短 resets_in_seconds）会随后
+	// 落库——无守卫时它把数天边界覆盖成秒级并删除 quota marker，WHAM 权威恢复
+	// 随之失效，账号提前复活引发 429 震荡。守卫下瞬时 429 不覆盖更晚边界、不误删
+	// marker；非 OpenAI 平台与"更晚的通用 429"行为不变（仍覆盖并删除 marker）。
 	_, err := r.sql.ExecContext(ctx, `
 		WITH updated AS (
 			UPDATE accounts
@@ -2263,11 +2268,17 @@ func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetA
 				extra = COALESCE(extra, '{}'::jsonb) - $3,
 				updated_at = NOW()
 			WHERE id = $4 AND deleted_at IS NULL
+				AND (
+					NOT (platform = $6 AND type = $7)
+					OR rate_limit_reset_at IS NULL
+					OR rate_limit_reset_at < $2
+				)
 			RETURNING id
 		)
 		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
 		SELECT $5, updated.id, NULL, NULL FROM updated
-	`, now, resetAt, service.OpenAICodexRateLimitStateExtraKey, id, service.SchedulerOutboxEventAccountChanged)
+	`, now, resetAt, service.OpenAICodexRateLimitStateExtraKey, id, service.SchedulerOutboxEventAccountChanged,
+		service.PlatformOpenAI, service.AccountTypeOAuth)
 	if err != nil {
 		return err
 	}
@@ -2926,7 +2937,21 @@ func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
-		SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb,
+		SET extra = CASE
+				-- codex_usage_updated_at 是次要时间戳（头路径与 WHAM 都写）。
+				-- 慢 WHAM 的观测可早于已落库的较新头快照，整体 || 合并会把头
+				-- 路径刚推进的时间戳回退，影响窗口 reset 兜底锚与停调恢复的
+				-- TriggeredAt 比较。仅当 WHAM 自带时间戳更新（或旧值缺失/非法）
+				-- 时才覆盖；否则合并后保留旧值。
+				WHEN NOT $1::jsonb ? 'codex_usage_updated_at'
+					OR COALESCE(extra->>'codex_usage_updated_at', '') = ''
+					OR extra->>'codex_usage_updated_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+					OR (extra->>'codex_usage_updated_at')::timestamptz
+						<= ($1::jsonb->>'codex_usage_updated_at')::timestamptz
+				THEN COALESCE(extra, '{}'::jsonb) || $1::jsonb
+				ELSE (COALESCE(extra, '{}'::jsonb) || $1::jsonb)
+					|| jsonb_build_object('codex_usage_updated_at', extra->>'codex_usage_updated_at')
+			END,
 			updated_at = NOW()
 		WHERE id = $2
 			AND deleted_at IS NULL

@@ -1404,6 +1404,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	currentPayload := firstPayload.payloadRaw
+	// 当前 turn 的账号无关原始帧：跨账号 failover 构造 current-turn 重放载荷时
+	// 作为基准（与 http_bridge 的 accountIdentitySourceRaw 同角色），避免把
+	// 上一账号 namespace 改写过的帧交给新账号。
+	currentAccountIdentitySourceRaw := append([]byte(nil), firstPayload.accountIdentitySourceRaw...)
 	currentOriginalModel := firstPayload.originalModel
 	currentImageBillingModel := firstPayload.imageBillingModel
 	currentImageSizeTier := firstPayload.imageSizeTier
@@ -1957,6 +1961,29 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if unwrapped := errors.Unwrap(relayErr); unwrapped != nil {
 				finalErr = unwrapped
 			}
+			// ctx_pool 的 current-turn failover 载荷：sendAndRelay 的 429 分支返回
+			// 裸 UpstreamFailoverError，此前 handler 拿不到当前 turn 的重放载荷，
+			// 只能把"会话首包"重放给新账号——第 N>1 轮被 429 换号后客户端会收到
+			// 第 1 轮的错位回答。此处与 http_bridge 的 failover 分支同构：以账号
+			// 无关原始帧为基准、全量 input 序列（去 previous_response_id）构造
+			// current-turn 载荷包装进错误，handler 端 OpenAIWSCurrentTurnRetryPayload
+			// 即可重放当前轮。
+			var failoverProbe *UpstreamFailoverError
+			if errors.As(finalErr, &failoverProbe) && failoverProbe != nil && len(currentAccountIdentitySourceRaw) > 0 {
+				retryPayload, retrySafe, retryPayloadErr := buildOpenAIWSCurrentTurnRetryPayload(
+					currentAccountIdentitySourceRaw,
+					currentTurnReplayInput,
+					currentTurnReplayInputExists,
+					currentOriginalModel,
+				)
+				if retryPayloadErr != nil {
+					logOpenAIWSModeInfo(
+						"ingress_ws_current_turn_retry_payload_error account_id=%d turn=%d err=%v",
+						account.ID, turn, retryPayloadErr)
+				} else if retrySafe {
+					finalErr = newOpenAIWSCurrentTurnFailoverError(finalErr, retryPayload)
+				}
+			}
 			if hooks != nil && hooks.AfterTurn != nil {
 				// result 非 nil（断连排水收尾）时必须一并提交，handler 才能把已计量
 				// 的 usage 入账；其余错误路径 result 为 nil，行为不变。
@@ -2106,6 +2133,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		currentPayload = nextPayload.payloadRaw
 		currentOriginalModel = nextPayload.originalModel
+		currentAccountIdentitySourceRaw = append([]byte(nil), nextPayload.accountIdentitySourceRaw...)
 		currentImageBillingModel = nextPayload.imageBillingModel
 		currentImageSizeTier = nextPayload.imageSizeTier
 		currentImageInputSize = nextPayload.imageInputSize

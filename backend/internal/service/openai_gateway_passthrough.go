@@ -2214,6 +2214,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			failureDelivered = true
 		}
 	}
+	// 收尾写终态前必须无条件停拍：keepalive 从未停拍的唯一剩余场景是"零语义
+	// 输出"（如上游 bare error 被抑制），而 ensureResponseFailedTerminal 写的
+	// w 是包装器外的原始 ResponseWriter（在 startOpenAISSEKeepalive 之前捕获），
+	// 不经过包装器的 suspend 互斥——不停拍就会与 beat() 并发写同一对象，轻则
+	// 心跳注释插进 response.failed 事件中间，重则 chunked 编码状态损坏。
+	// stopKeepalive 幂等且建立 happens-before，对已停拍路径零影响。
+	stopKeepalive()
 	ensureResponseFailedTerminal()
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
