@@ -204,6 +204,7 @@ func ProvideOpenAIQuotaSnapshotRefreshService(
 	lockCache LeaderLockCache,
 	db *sql.DB,
 	rateLimitService *RateLimitService,
+	settingService *SettingService,
 ) (*OpenAIQuotaSnapshotRefreshService, error) {
 	refreshRepo, ok := accountRepo.(OpenAIQuotaSnapshotRefreshRepository)
 	if !ok {
@@ -211,6 +212,7 @@ func ProvideOpenAIQuotaSnapshotRefreshService(
 	}
 	service := NewOpenAIQuotaSnapshotRefreshService(refreshRepo, quotaService)
 	service.SetLeaderLock(lockCache, db)
+	service.SetSettingService(settingService)
 	if rateLimitService != nil {
 		service.SetRecoveryReconciler(rateLimitService)
 	}
@@ -233,6 +235,7 @@ func ProvideAccountUsageService(
 	openAIGatewayService *OpenAIGatewayService,
 	tempUnschedCache TempUnschedCache,
 	rateLimitService *RateLimitService,
+	settingService *SettingService,
 ) *AccountUsageService {
 	service := NewAccountUsageService(
 		accountRepo,
@@ -249,6 +252,7 @@ func ProvideAccountUsageService(
 	)
 	service.agentIdentityWS = openAIGatewayService
 	service.SetTempUnschedCache(tempUnschedCache)
+	service.SetSettingService(settingService)
 	if rateLimitService != nil {
 		service.SetAccountSchedulingThresholdPolicyReconciler(rateLimitService)
 		rateLimitService.StartAccountSchedulingThresholdReconciliation()

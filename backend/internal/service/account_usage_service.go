@@ -123,6 +123,12 @@ const (
 	codexWhamPresenceSchemaKey  = "codex_wham_presence_schema"
 	codexWhamPresenceSchemaV1   = "wham-usage-v1"
 	codexWhamGenerationLayout   = "2006-01-02T15:04:05.000000000Z"
+	// WHAM 专写的窗口百分比键：x-codex-* 响应头路径只写共享的
+	// codex_<w>_used_percent（观测时刻可早于落库时刻，单调守卫拦不住在途
+	// 请求的旧观测），不写本组键。阈值停调的恢复判定只读本组键，配合
+	// codex_wham_usage_updated_at 代际锚，彻底隔离头快照的误恢复。
+	codexWham5hUsedPercentKey = "codex_wham_5h_used_percent"
+	codexWham7dUsedPercentKey = "codex_wham_7d_used_percent"
 )
 
 // UsageCache 封装账户使用量相关的缓存
@@ -315,6 +321,14 @@ type AccountUsageService struct {
 	thresholdReconciler     AccountSchedulingThresholdPolicyReconciler
 	agentIdentityTaskMu     sync.Mutex
 	agentIdentityWS         agentIdentityWSConnectionInvalidator
+	settingService          *SettingService
+}
+
+// SetSettingService wires the settings source for the current global
+// account-scheduling thresholds. Optional: without it the threshold recovery
+// falls back to the threshold recorded at trigger time.
+func (s *AccountUsageService) SetSettingService(settingService *SettingService) {
+	s.settingService = settingService
 }
 
 // SetTempUnschedCache wires the Redis mirror used for temporary scheduling
@@ -835,7 +849,11 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	// A successful Codex snapshot can prove that a threshold-triggered pause
 	// has recovered before the original cooldown timestamp. Clear only that
 	// structured pause source; unrelated temporary blocks remain intact.
-	if allowThresholdRecovery && shouldClearOpenAISchedulingThresholdPause(account, now) {
+	var currentThresholds map[string]int
+	if s.settingService != nil {
+		currentThresholds = s.settingService.GetAccountSchedulingThresholds(ctx)
+	}
+	if allowThresholdRecovery && shouldClearOpenAISchedulingThresholdPause(account, now, currentThresholds) {
 		expectedWhamUpdatedAt := codexWhamSnapshotGeneration(account.Extra)
 		reconciler, ok := s.thresholdReconciler.(AccountSchedulingThresholdSnapshotPolicyReconciler)
 		switch {

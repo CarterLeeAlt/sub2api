@@ -535,6 +535,9 @@ func quotaSnapshotRecoveryCanonical(accountID int64, refreshedAt time.Time) *Acc
 			"codex_usage_updated_at":          refreshedAt.Format(time.RFC3339),
 			"codex_7d_used_percent":           0.0,
 			"codex_7d_reset_at":               until.Format(time.RFC3339),
+			// 恢复判定只认 WHAM 权威数据：刷新刚落库的代际与专写百分比。
+			codexWhamUsageUpdatedAtKey: refreshedAt.UTC().Format(codexWhamGenerationLayout),
+			codexWham7dUsedPercentKey:  0.0,
 		},
 	}
 }

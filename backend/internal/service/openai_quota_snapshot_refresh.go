@@ -76,6 +76,10 @@ type OpenAIQuotaSnapshotRefreshService struct {
 	// optional: without it the refresher stays read-only display plumbing.
 	reconciler OpenAIQuotaSnapshotRecoveryReconciler
 
+	// settingService supplies the current global scheduling thresholds so the
+	// recovery evaluation honors threshold relaxations immediately. Optional.
+	settingService *SettingService
+
 	parentCtx    context.Context
 	parentCancel context.CancelFunc
 	wg           sync.WaitGroup
@@ -127,6 +131,15 @@ func (s *OpenAIQuotaSnapshotRefreshService) SetRecoveryReconciler(reconciler Ope
 		return
 	}
 	s.reconciler = reconciler
+}
+
+// SetSettingService wires the settings source for current global scheduling
+// thresholds (recovery honors threshold relaxations immediately). Optional.
+func (s *OpenAIQuotaSnapshotRefreshService) SetSettingService(settingService *SettingService) {
+	if s == nil {
+		return
+	}
+	s.settingService = settingService
 }
 
 func (s *OpenAIQuotaSnapshotRefreshService) Start() {
@@ -391,7 +404,11 @@ func (s *OpenAIQuotaSnapshotRefreshService) reconcileQuotaRecoveryAfterPersist(c
 		return
 	}
 
-	if shouldClearOpenAISchedulingThresholdPause(canonical, s.now()) {
+	var currentThresholds map[string]int
+	if s.settingService != nil {
+		currentThresholds = s.settingService.GetAccountSchedulingThresholds(ctx)
+	}
+	if shouldClearOpenAISchedulingThresholdPause(canonical, s.now(), currentThresholds) {
 		if err := s.reconciler.ReconcileAccountSchedulingThresholdPolicyIfSnapshotUnchanged(ctx, canonical, expectedGeneration); err != nil {
 			slog.Warn("openai_quota_snapshot_threshold_recovery_reconcile_failed", "account_id", canonical.ID, "error", err)
 		}

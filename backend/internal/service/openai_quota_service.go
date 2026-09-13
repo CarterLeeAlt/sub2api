@@ -756,6 +756,8 @@ func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Ti
 	if normalized.Used5hPercent != nil {
 		updates[codexWham5hWindowPresentKey] = true
 		updates["codex_5h_used_percent"] = *normalized.Used5hPercent
+		// WHAM 专写副本：阈值停调恢复判定的唯一百分比来源（头路径不写）。
+		updates[codexWham5hUsedPercentKey] = *normalized.Used5hPercent
 	}
 	if normalized.Reset5hSeconds != nil {
 		updates["codex_5h_reset_after_seconds"] = *normalized.Reset5hSeconds
@@ -766,6 +768,8 @@ func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Ti
 	if normalized.Used7dPercent != nil {
 		updates[codexWham7dWindowPresentKey] = true
 		updates["codex_7d_used_percent"] = *normalized.Used7dPercent
+		// WHAM 专写副本：阈值停调恢复判定的唯一百分比来源（头路径不写）。
+		updates[codexWham7dUsedPercentKey] = *normalized.Used7dPercent
 	}
 	if normalized.Reset7dSeconds != nil {
 		updates["codex_7d_reset_after_seconds"] = *normalized.Reset7dSeconds
@@ -793,6 +797,8 @@ func clearAbsentCodexWindowExtra(updates map[string]any, window string) {
 	for _, suffix := range []string{"used_percent", "reset_after_seconds", "window_minutes", "reset_at"} {
 		updates[prefix+suffix] = nil
 	}
+	// WHAM 专写副本同步清除，保持"权威缺席"语义对恢复判定同样成立。
+	updates["codex_wham_"+window+"_used_percent"] = nil
 }
 
 // mapUpstreamStatus collapses upstream HTTP statuses into a stable set we

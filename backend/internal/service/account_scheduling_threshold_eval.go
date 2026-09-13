@@ -2,7 +2,6 @@ package service
 
 import (
 	"encoding/json"
-	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -34,7 +33,16 @@ const accountSchedulingThresholdCredentialKey = "account_scheduling_threshold"
 // superseded by a fresh OpenAI Codex snapshot. Other temporary pause sources
 // are deliberately excluded so authentication, transport, and custom-rule
 // cooldowns cannot be cleared by a quota refresh.
-func shouldClearOpenAISchedulingThresholdPause(account *Account, now time.Time) bool {
+//
+// 权威来源语义（CUSTOM-006）：恢复判定只认 /wham/usage 快照——新鲜度锚是
+// codex_wham_usage_updated_at 纳秒代际（x-codex-* 响应头路径从不写该键），
+// 百分比只读 codex_wham_<w>_used_percent（WHAM 专写副本，头路径的共享
+// codex_<w>_used_percent 观测时刻可早于停调，是误恢复的历史根源）。
+// 任一权威数据缺失即不恢复（保守方向），账号等 TempUnschedulableUntil 或
+// 下一次 WHAM 快照落地。thresholds 是当前生效的全局阈值表：恢复判定使用
+// 账号 override 优先、全局次之的当前值（P3-3：管理员放宽阈值立即生效），
+// 两者都缺时回退触发时记录的阈值。
+func shouldClearOpenAISchedulingThresholdPause(account *Account, now time.Time, thresholds map[string]int) bool {
 	if account == nil || account.Platform != PlatformOpenAI || account.TempUnschedulableUntil == nil {
 		return false
 	}
@@ -51,18 +59,20 @@ func shouldClearOpenAISchedulingThresholdPause(account *Account, now time.Time) 
 	}
 
 	extra := account.Extra
-	updatedAtRaw, ok := extra["codex_usage_updated_at"]
-	if !ok {
+	// 权威新鲜度锚：WHAM 纳秒代际。缺失或不可解析时不恢复。
+	generation := codexWhamSnapshotGeneration(extra)
+	if generation == "" {
 		return false
 	}
-	updatedAt, err := parseTime(fmt.Sprint(updatedAtRaw))
+	whamUpdatedAt, err := time.Parse(codexWhamGenerationLayout, generation)
 	if err != nil {
 		return false
 	}
-	if reason.TriggeredAtUnix > 0 && updatedAt.Unix() < reason.TriggeredAtUnix {
+	if reason.TriggeredAtUnix > 0 && whamUpdatedAt.Unix() < reason.TriggeredAtUnix {
 		return false
 	}
-	if openAICodexSnapshotStaleForPause(extra, now) {
+	// 权威观测过旧同样不恢复：与共享键的 stale 边界一致，但只由 WHAM 驱动。
+	if now.Sub(whamUpdatedAt) >= openAICodexAutoPauseStaleAfter {
 		return false
 	}
 
@@ -74,14 +84,14 @@ func shouldClearOpenAISchedulingThresholdPause(account *Account, now time.Time) 
 	}
 
 	thresholdPercent := reason.ThresholdPercent
-	if currentThreshold, ok := accountSchedulingThresholdOverride(account); ok {
+	if currentThreshold, ok := resolveEffectiveAccountSchedulingThreshold(account, thresholds, PlatformOpenAI); ok {
 		thresholdPercent = currentThreshold
 	}
 	if thresholdPercent >= 100 {
 		return true
 	}
 
-	usedPercent, ok := resolveAccountExtraNumber(extra, "codex_"+reason.Window+"_used_percent")
+	usedPercent, ok := resolveAccountExtraNumber(extra, "codex_wham_"+reason.Window+"_used_percent")
 	return ok && usedPercent < float64(thresholdPercent)
 }
 

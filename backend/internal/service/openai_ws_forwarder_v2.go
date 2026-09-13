@@ -754,7 +754,14 @@ readLoop:
 			setOpsUpstreamError(c, statusCode, errMsg, "")
 			if reqStream && !clientDisconnected {
 				flushBufferedStreamEvents("error_event")
-				emitStreamMessage(message, true)
+				// 客户端写出副本改写容量降载码：server_is_overloaded / slow_down 对
+				// Codex 判致命，须改为可退避码（与 HTTP SSE / ctx_pool / http_bridge
+				// 三条路径对齐）。独立变量副本保证上方账号状态判定仍用原始 payload。
+				clientMessage := message
+				if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
+					clientMessage = rewritten
+				}
+				emitStreamMessage(clientMessage, true)
 			}
 			if !reqStream {
 				c.JSON(statusCode, gin.H{
@@ -812,7 +819,15 @@ readLoop:
 				}
 			} else {
 				flushBufferedStreamEvents(eventType)
-				emitStreamMessage(message, isTerminalEvent)
+				// 客户端写出副本改写容量降载码（仅 error/response.failed，
+				// 与 ctx_pool ingress 口径一致；账号状态判定仍用原始 message）。
+				clientMessage := message
+				if eventType == "error" || eventType == "response.failed" {
+					if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
+						clientMessage = rewritten
+					}
+				}
+				emitStreamMessage(clientMessage, isTerminalEvent)
 			}
 		} else {
 			if responseField.Exists() && responseField.Type == gjson.JSON {
