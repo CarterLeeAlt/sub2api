@@ -74,10 +74,9 @@ func TestCalculateOpenAI429ResetTime_5hExhausted(t *testing.T) {
 	}
 }
 
-func TestCalculateOpenAI429ResetTime_NeitherExhausted_UsesMax(t *testing.T) {
+func TestCalculateOpenAI429ResetTime_NeitherExhausted_ReturnsNil(t *testing.T) {
 	svc := &RateLimitService{}
 
-	// Neither limit at 100%, should use the longer reset time
 	headers := http.Header{}
 	headers.Set("x-codex-primary-used-percent", "80")
 	headers.Set("x-codex-primary-reset-after-seconds", "100000")
@@ -86,22 +85,7 @@ func TestCalculateOpenAI429ResetTime_NeitherExhausted_UsesMax(t *testing.T) {
 	headers.Set("x-codex-secondary-reset-after-seconds", "5000")
 	headers.Set("x-codex-secondary-window-minutes", "300")
 
-	before := time.Now()
-	resetAt := svc.calculateOpenAI429ResetTime(headers)
-	after := time.Now()
-
-	if resetAt == nil {
-		t.Fatal("expected non-nil resetAt")
-	}
-
-	// Should use the max (100000 seconds from 7d window)
-	expectedDuration := 100000 * time.Second
-	minExpected := before.Add(expectedDuration)
-	maxExpected := after.Add(expectedDuration)
-
-	if resetAt.Before(minExpected) || resetAt.After(maxExpected) {
-		t.Errorf("resetAt %v not in expected range [%v, %v]", resetAt, minExpected, maxExpected)
-	}
+	require.Nil(t, svc.calculateOpenAI429ResetTime(headers))
 }
 
 func TestCalculateOpenAI429ResetTime_NoCodexHeaders(t *testing.T) {
@@ -259,7 +243,7 @@ func TestHandle429_OpenAIPersistsCodexSnapshotImmediately(t *testing.T) {
 
 func TestHandle429_OpenAIQuotaProvenanceUsesEffectiveThreshold(t *testing.T) {
 	headers := http.Header{}
-	headers.Set("x-codex-primary-used-percent", "20")
+	headers.Set("x-codex-primary-used-percent", "100")
 	headers.Set("x-codex-primary-reset-after-seconds", "500000")
 	headers.Set("x-codex-primary-window-minutes", "10080")
 	headers.Set("x-codex-secondary-used-percent", "96")
@@ -278,10 +262,37 @@ func TestHandle429_OpenAIQuotaProvenanceUsesEffectiveThreshold(t *testing.T) {
 
 	state, _, ok := parseOpenAICodexQuota429State(map[string]any{OpenAICodexRateLimitStateExtraKey: json.RawMessage(repo.quotaStateJSON)})
 	require.True(t, ok)
-	require.Equal(t, "5h", state.Window)
-	require.Equal(t, 96.0, state.UsedPercent)
+	require.Equal(t, "7d", state.Window)
+	require.Equal(t, 100.0, state.UsedPercent)
 	require.Equal(t, 95, state.ThresholdPercent)
 	require.WithinDuration(t, time.Now().Add(500000*time.Second), repo.quotaResetAt, time.Second)
+}
+
+func TestHandle429_OpenAISubThresholdQuota429FallsBackToGenericCooldown(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "20")
+	headers.Set("x-codex-primary-reset-after-seconds", "500000")
+	headers.Set("x-codex-primary-window-minutes", "10080")
+	headers.Set("x-codex-secondary-used-percent", "96")
+	headers.Set("x-codex-secondary-reset-after-seconds", "3600")
+	headers.Set("x-codex-secondary-window-minutes", "300")
+
+	repo := &openAI429SnapshotRepo{}
+	svc := NewRateLimitService(repo, nil, nil, nil, nil)
+	account := &Account{
+		ID:          127,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{accountSchedulingThresholdCredentialKey: 95},
+	}
+	svc.handle429(context.Background(), account, headers, []byte(`{"error":{"type":"usage_limit_reached"}}`))
+
+	// 两个窗口均未耗尽：reset-after 头不能证明配额耗尽，不得按窗口重置点长冷却，
+	// 也不写结构化配额 provenance；应回落 body 解析（此处无 resets_at）后的
+	// 可配置短冷却兜底。
+	require.Equal(t, account.ID, repo.rateLimitedID)
+	require.Empty(t, repo.quotaStateJSON)
+	require.True(t, repo.quotaResetAt.IsZero())
 }
 
 func TestHandle429_OpenAINonQuota429DoesNotGetRecoverableProvenance(t *testing.T) {
