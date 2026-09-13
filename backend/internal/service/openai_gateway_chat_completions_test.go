@@ -76,6 +76,8 @@ func TestHandleChatStreamingResponse_ClassifiesHTTP2ReadError(t *testing.T) {
 		"gpt-5.6-sol",
 		time.Now(),
 		0,
+		nil,
+		OpenAIResponsesImageBillingConfig{},
 	)
 
 	require.Error(t, err)

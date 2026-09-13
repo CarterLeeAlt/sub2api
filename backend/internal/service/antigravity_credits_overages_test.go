@@ -135,7 +135,7 @@ func TestHandleSmartRetry_QuotaExhausted_UsesCreditsAndStoresIndependentState(t 
 	}
 
 	svc := &AntigravityGatewayService{}
-	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test", 0, []string{"https://ag-1.test"})
+	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test")
 
 	require.NotNil(t, result)
 	require.Equal(t, smartRetryActionBreakWithResp, result.action)
@@ -196,7 +196,7 @@ func TestHandleSmartRetry_RateLimited_DoesNotUseCredits(t *testing.T) {
 	}
 
 	svc := &AntigravityGatewayService{}
-	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test", 0, []string{"https://ag-1.test"})
+	result := svc.handleSmartRetry(params, resp, respBody, "https://ag-1.test")
 
 	require.NotNil(t, result)
 	require.Equal(t, smartRetryActionBreakWithResp, result.action)

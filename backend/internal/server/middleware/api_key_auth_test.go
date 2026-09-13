@@ -1598,6 +1598,10 @@ func (r *stubApiKeyRepo) CountByGroupID(ctx context.Context, groupID int64) (int
 	return 0, errors.New("not implemented")
 }
 
+func (r *stubApiKeyRepo) CountGroupAPIKeyStats(ctx context.Context, groupID int64) (total int64, active int64, err error) {
+	return 0, 0, errors.New("not implemented")
+}
+
 func (r *stubApiKeyRepo) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
 	return nil, errors.New("not implemented")
 }

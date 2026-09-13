@@ -181,9 +181,12 @@ func GeminiTokenCacheKey(account *Account) string {
 			return vertexServiceAccountCacheKey(account, key)
 		}
 	}
+	// 键必须包含 account.ID：project_id 可被多个 Google 账号共享，仅按 project
+	// 建键会让不同 OAuth 身份互相命中缓存 token，配额与审计归属错乱。
+	accountKey := "gemini:account:" + strconv.FormatInt(account.ID, 10)
 	projectID := strings.TrimSpace(account.GetCredential("project_id"))
 	if projectID != "" {
-		return "gemini:" + projectID
+		return accountKey + ":project:" + projectID
 	}
-	return "gemini:account:" + strconv.FormatInt(account.ID, 10)
+	return accountKey
 }

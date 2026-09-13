@@ -22,7 +22,7 @@ func TestGeminiTokenCacheKey(t *testing.T) {
 					"project_id": "my-project-123",
 				},
 			},
-			expected: "gemini:my-project-123",
+			expected: "gemini:account:100:project:my-project-123",
 		},
 		{
 			name: "project_id_with_whitespace",
@@ -32,7 +32,7 @@ func TestGeminiTokenCacheKey(t *testing.T) {
 					"project_id": "  project-with-spaces  ",
 				},
 			},
-			expected: "gemini:project-with-spaces",
+			expected: "gemini:account:101:project:project-with-spaces",
 		},
 		{
 			name: "empty_project_id_fallback_to_account_id",
@@ -78,6 +78,25 @@ func TestGeminiTokenCacheKey(t *testing.T) {
 			require.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// 共享同一 project_id 的不同 Google 账号必须持有独立缓存键，否则互相命中
+// 对方的 OAuth token，配额与审计归属错乱。
+func TestGeminiTokenCacheKeySeparatesAccountsWithSameProject(t *testing.T) {
+	first := &Account{
+		ID: 110,
+		Credentials: map[string]any{
+			"project_id": "shared-project",
+		},
+	}
+	second := &Account{
+		ID: 111,
+		Credentials: map[string]any{
+			"project_id": "shared-project",
+		},
+	}
+
+	require.NotEqual(t, GeminiTokenCacheKey(first), GeminiTokenCacheKey(second))
 }
 
 func TestAntigravityTokenCacheKey(t *testing.T) {

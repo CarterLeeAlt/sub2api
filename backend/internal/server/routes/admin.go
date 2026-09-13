@@ -68,7 +68,7 @@ func RegisterAdminRoutes(
 		registerProxyRoutes(admin, h, stepUpAuth)
 
 		// 卡密管理
-		registerRedeemCodeRoutes(admin, h)
+		registerRedeemCodeRoutes(admin, h, stepUpAuth)
 
 		// 优惠码管理
 		registerPromoCodeRoutes(admin, h)
@@ -86,7 +86,7 @@ func RegisterAdminRoutes(
 		registerOpsRoutes(admin, h)
 
 		// 系统管理
-		registerSystemRoutes(admin, h)
+		registerSystemRoutes(admin, h, stepUpAuth)
 
 		// 订阅管理
 		registerSubscriptionRoutes(admin, h)
@@ -526,12 +526,13 @@ func registerProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth
 	}
 }
 
-func registerRedeemCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+func registerRedeemCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
 	codes := admin.Group("/redeem-codes")
 	{
 		codes.GET("", h.Admin.Redeem.List)
 		codes.GET("/stats", h.Admin.Redeem.GetStats)
-		codes.GET("/export", h.Admin.Redeem.Export)
+		// 导出未兑换卡密等于导出可直接变现的凭据，与账号/代理导出同级，强制 step-up。
+		codes.GET("/export", gin.HandlerFunc(stepUpAuth), h.Admin.Redeem.Export)
 		codes.GET("/:id", h.Admin.Redeem.GetByID)
 		codes.POST("/create-and-redeem", h.Admin.Redeem.CreateAndRedeem)
 		codes.POST("/generate", h.Admin.Redeem.Generate)
@@ -655,15 +656,16 @@ func registerBackupRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAut
 	}
 }
 
-func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
 	system := admin.Group("/system")
 	{
 		system.GET("/version", h.Admin.System.GetVersion)
 		system.GET("/check-updates", h.Admin.System.CheckUpdates)
 		system.GET("/rollback-versions", h.Admin.System.GetRollbackVersions)
-		system.POST("/update", h.Admin.System.PerformUpdate)
-		system.POST("/rollback", h.Admin.System.Rollback)
-		system.POST("/restart", h.Admin.System.RestartService)
+		// 更新/回滚/重启等价于任意代码执行入口，与备份下载等敏感写操作同级，强制 step-up。
+		system.POST("/update", gin.HandlerFunc(stepUpAuth), h.Admin.System.PerformUpdate)
+		system.POST("/rollback", gin.HandlerFunc(stepUpAuth), h.Admin.System.Rollback)
+		system.POST("/restart", gin.HandlerFunc(stepUpAuth), h.Admin.System.RestartService)
 	}
 }
 

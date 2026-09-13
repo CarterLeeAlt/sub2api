@@ -824,11 +824,11 @@ func (s *OpenAIGatewayService) finalizeLiveCall(record *LiveCallRecord) {
 	if record.SubscriptionID > 0 {
 		billingType = BillingTypeSubscription
 	}
-	// TODO(billing): Live 会话目前不计费：TotalCost/ActualCost 恒为 0，完全绕过
-	// recordUsageCore/applyUsageBilling，余额模式下极低余额也能反复开启最长
-	// liveMaxSessionDuration 的会话。若确认按时长计费，应在此接入计费管道；
-	// 若确认有意免费，删除本注释即可（零值行为由
-	// TestFinalizeLiveCallIsIdempotentAndWritesZeroUsage 锁定）。
+	// 已知限制（有意保持，2026-09 复审确认）：Live/Realtime 会话目前不计费，
+	// TotalCost/ActualCost 恒为 0，完全绕过 recordUsageCore/applyUsageBilling。
+	// 后果：余额模式下极低余额用户也能反复开启最长 liveMaxSessionDuration 的会话。
+	// 后续若要实现按时长计费，应在此接入计费管道；零值行为由
+	// TestFinalizeLiveCallIsIdempotentAndWritesZeroUsage 锁定，改动前先更新该测试。
 	//
 	// 这是该会话唯一一次落库机会（MarkLiveCallClosed 已标记 first），失败即永久
 	// 丢失，因此走带日志与同步兜底的 writeUsageLogBestEffort（issue #3656）。

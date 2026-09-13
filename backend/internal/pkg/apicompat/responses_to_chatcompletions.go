@@ -51,6 +51,17 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 					Arguments: item.Arguments,
 				},
 			})
+		case "custom_tool_call":
+			// custom/freeform 工具（如新版 apply_patch）：与流式转换器同口径，
+			// 注册为 type=function 的 tool_call，自由文本 input 放入 arguments。
+			toolCalls = append(toolCalls, ChatToolCall{
+				ID:   item.CallID,
+				Type: "function",
+				Function: ChatFunctionCall{
+					Name:      item.Name,
+					Arguments: item.Input,
+				},
+			})
 		case "reasoning":
 			for _, s := range item.Summary {
 				if s.Type == "summary_text" && s.Text != "" {
