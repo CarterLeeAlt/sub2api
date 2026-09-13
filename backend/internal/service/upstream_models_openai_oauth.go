@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -22,40 +24,78 @@ type openAICodexManifestModel struct {
 // OpenAI OAuth traffic. OAuth accounts do not expose the public /v1/models
 // endpoint used by API-key accounts; their live catalog comes from the ChatGPT
 // Codex backend instead.
-func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, error) {
+//
+// When the sync service has a dedicated upstream transport it is used so the
+// request stays observable and injectable (tests, TLS fingerprinting, proxy
+// handling parity with the other platforms); otherwise the gateway's manifest
+// client remains the transport of record.
+func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, []byte, error) {
 	credentialAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
-		return nil, newUpstreamModelSyncConfigError("Failed to resolve OpenAI OAuth credentials", err)
+		return nil, nil, newUpstreamModelSyncConfigError("Failed to resolve OpenAI OAuth credentials", err)
 	}
 	if credentialAccount == nil || !credentialAccount.IsOpenAIOAuth() {
-		return nil, newUpstreamModelSyncUnsupportedError("OpenAI OAuth credentials are required for Codex model sync", nil)
+		return nil, nil, newUpstreamModelSyncUnsupportedError("OpenAI OAuth credentials are required for Codex model sync", nil)
 	}
 	if !credentialAccount.IsOpenAIAgentIdentity() && strings.TrimSpace(credentialAccount.GetOpenAIAccessToken()) == "" {
-		return nil, newUpstreamModelSyncConfigError("No OpenAI access token is available", nil)
+		return nil, nil, newUpstreamModelSyncConfigError("No OpenAI access token is available", nil)
 	}
 
-	// FetchCodexModelsManifest already owns the ChatGPT Codex endpoint, request
-	// headers, account-id/FedRAMP handling, proxy behavior, Agent Identity auth,
-	// response limits, and manifest-envelope validation. Keep the admin sync path
-	// on that implementation instead of duplicating the protocol here.
-	//
-	// Pass an empty client version so the manifest request resolves the live
-	// canonical version (admin override → auto-synced → compiled constant). The
-	// Codex backend gates manifest entries by client_version (e.g. gpt-6 models
-	// only ship to >= 0.153.0), so pinning the compiled constant would freeze the
-	// synced catalog at whatever models shipped with that historical version.
-	gateway := &OpenAIGatewayService{accountRepo: s.accountRepo}
-	manifest, err := gateway.FetchCodexModelsManifest(ctx, account, "", "")
-	if err != nil {
-		return nil, newUpstreamModelSyncUpstreamError("Failed to fetch OpenAI Codex model list", err)
-	}
-	if manifest == nil || len(manifest.Body) == 0 {
-		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+	var body []byte
+	if s.httpUpstream != nil {
+		req, err := s.buildOpenAIOAuthUpstreamModelsRequest(ctx, account)
+		if err != nil {
+			return nil, nil, err
+		}
+		resp, err := s.doUpstreamModelsRequest(req, upstreamModelsProxyURL(account), account)
+		if err != nil {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Failed to request upstream model list", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return nil, nil, &UpstreamModelSyncError{
+				Kind:       UpstreamModelSyncErrorUpstream,
+				Message:    fmt.Sprintf("Upstream model list request failed with HTTP %d", resp.StatusCode),
+				StatusCode: resp.StatusCode,
+				Err:        fmt.Errorf("upstream model list returned HTTP %d", resp.StatusCode),
+			}
+		}
+		bodyLimit := resolveModelsListReadLimit(s.cfg)
+		body, err = io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
+		if err != nil {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Failed to read upstream model list", err)
+		}
+		if int64(len(body)) > bodyLimit {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response is too large", fmt.Errorf("response exceeds %d bytes", bodyLimit))
+		}
+	} else {
+		// FetchCodexModelsManifest already owns the ChatGPT Codex endpoint, request
+		// headers, account-id/FedRAMP handling, proxy behavior, Agent Identity auth,
+		// response limits, and manifest-envelope validation. Keep the admin sync path
+		// on that implementation instead of duplicating the protocol here.
+		//
+		// Pass an empty client version so the manifest request resolves the live
+		// canonical version (admin override → auto-synced → compiled constant). The
+		// Codex backend gates manifest entries by client_version (e.g. gpt-6 models
+		// only ship to >= 0.153.0), so pinning the compiled constant would freeze the
+		// synced catalog at whatever models shipped with that historical version.
+		gateway := &OpenAIGatewayService{accountRepo: s.accountRepo}
+		manifest, err := gateway.FetchCodexModelsManifest(ctx, account, "", "")
+		if err != nil {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Failed to fetch OpenAI Codex model list", err)
+		}
+		if manifest == nil || len(manifest.Body) == 0 {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+		}
+		body = manifest.Body
 	}
 
-	manifestModels, err := parseOpenAICodexManifestModels(manifest.Body)
+	if len(body) == 0 {
+		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+	}
+	manifestModels, err := parseOpenAICodexManifestModels(body)
 	if err != nil {
-		return nil, newUpstreamModelSyncUpstreamError("OpenAI Codex model list response was not valid JSON", err)
+		return nil, nil, newUpstreamModelSyncUpstreamError("OpenAI Codex model list response was not valid JSON", err)
 	}
 	models := openAICodexManifestModelIDs(manifestModels)
 	if openAICodexImageGenerationEligible(credentialAccount, manifestModels) {
@@ -63,9 +103,9 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		models = dedupeAndSortModelIDs(models)
 	}
 	if len(models) == 0 {
-		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
-	return models, nil
+	return models, body, nil
 }
 
 func parseOpenAICodexManifestModels(body []byte) ([]openAICodexManifestModel, error) {
