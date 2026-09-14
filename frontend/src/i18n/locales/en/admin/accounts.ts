@@ -1575,8 +1575,8 @@ export default {
         grokLastHeadersSeen: 'Headers {time}',
         passiveSampled: 'Passive',
         activeQuery: 'Query',
-        estimatedTotalCost: 'Est. total ${cost}',
-        estimatedTotalCostTooltip: 'Estimated total cost at 100% utilization, based on current window cost and utilization'
+        estimatedTotalCost: 'T ${cost}',
+        estimatedTotalCostTooltip: 'Estimated total cost when the current 7-day window reaches 100% utilization, based on its current cost and used percentage'
       },
       openaiQuotaReset: {
         count: 'Credits',

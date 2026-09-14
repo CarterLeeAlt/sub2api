@@ -7,7 +7,10 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      t: (key: string, params?: { cost?: string }) =>
+        key === 'admin.accounts.usageWindow.estimatedTotalCost' && params?.cost != null
+          ? `T $${params.cost}`
+          : key
     })
   }
 })
@@ -20,6 +23,27 @@ describe('UsageProgressBar', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+  })
+
+  it('预计总费用以紧凑 T 标签显示，并保留说明提示', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '7d',
+        utilization: 18,
+        color: 'emerald',
+        windowStats: {
+          requests: 113,
+          tokens: 9_600_000,
+          cost: 22.42,
+          user_cost: 22.42
+        },
+        estimatedTotalCost: 124.54
+      }
+    })
+
+    const estimatedCost = wrapper.get('[data-test="estimated-total-cost"]')
+    expect(estimatedCost.text()).toBe('T $124.54')
+    expect(estimatedCost.attributes('title')).toBe('admin.accounts.usageWindow.estimatedTotalCostTooltip')
   })
 
   it('showNowWhenIdle=true 且利用率为 0 时显示“现在”', () => {
