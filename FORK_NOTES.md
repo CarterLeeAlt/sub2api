@@ -201,7 +201,7 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 
 ### CUSTOM-011：Codex 官方客户端默认策略与账号设置行间距（`active`）
 
-新建 OpenAI OAuth/Setup Token 账号时，账号编辑表单默认开启“仅允许 Codex 官方客户端”；已有账号编辑仍按已保存的 `extra.codex_cli_only` 值回填，不会静默覆盖历史配置。创建、编辑和批量编辑弹窗的设置行统一使用 `account-setting-row`，让左侧说明文本可收缩换行、右侧开关/选择器保持固定宽度并留出间距，避免长说明贴近控件。
+新建 OpenAI OAuth/Setup Token 账号时，账号编辑表单默认开启“仅允许 Codex 官方客户端”；已有账号编辑仍按已保存的 `extra.codex_cli_only` 值回填，不会静默覆盖历史配置。创建、编辑和批量编辑弹窗的设置行统一使用 `account-setting-row`，让左侧说明文本可收缩换行、右侧开关/选择器保持固定宽度并留出间距，避免长说明贴近控件。新建账号表单切换到 OpenAI 平台时并发数预填 `5`（其他平台保持表单默认 `10`，与 grok 平台强制 `1` 的特判并列；后端与数据库默认值不涉及），上游同步时需保留该 openai 分支。
 
 主要文件：
 

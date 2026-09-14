@@ -4881,6 +4881,9 @@ watch(
       form.concurrency = 1
       form.load_factor = null
     }
+    if (newPlatform === 'openai') {
+      form.concurrency = 5
+    }
     if (newPlatform !== 'gemini' && newPlatform !== 'anthropic' && accountCategory.value === 'service_account') {
       accountCategory.value = 'oauth-based'
     }
