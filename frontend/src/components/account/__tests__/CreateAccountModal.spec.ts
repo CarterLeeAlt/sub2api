@@ -425,6 +425,14 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     )
   })
 
+  it('prefills concurrency 5 for new OpenAI accounts and keeps 10 for other platforms', async () => {
+    await submitApiKeyAccount('openai')
+    expect(createAccountMock.mock.calls[0]?.[0]?.concurrency).toBe(5)
+
+    await submitApiKeyAccount('anthropic')
+    expect(createAccountMock.mock.calls[1]?.[0]?.concurrency).toBe(10)
+  })
+
   it('enables upstream billing probes by default for new OpenAI API key accounts', async () => {
     await submitApiKeyAccount('openai')
 
