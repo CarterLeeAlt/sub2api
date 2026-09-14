@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -334,4 +335,62 @@ func TestPassthroughStreaming_ZeroOutputBareErrorTerminalHasNoKeepaliveInterleav
 	require.True(t, strings.HasSuffix(terminal, "\n\n"), "终态事件必须完整闭合")
 	require.NotContains(t, terminal, "\n:\n", "终态事件字节之间不得插入心跳注释行")
 	require.Contains(t, terminal, "\"type\":\"response.failed\"", "最后一个 data 事件必须是 response.failed")
+}
+
+// ---------------------------------------------------------------------------
+// 回归（审计轮追加）：bindHTTPResponseAccount 在响应写回客户端之后执行，
+// 非流式请求的客户端此刻往往已断开、原始请求 ctx 已取消——用取消的 ctx 写
+// Redis 绑定必然失败（生产观测 openai.http_bind_response_owner_failed:
+// context canceled）。bind 是断连后仍必须完成的收尾动作：粘性丢失会让
+// previous_response_id 续链退回普通调度，owner 绑定丢失会让后续请求直接
+// 400。修复：入口脱离请求取消（WithoutCancel）并给 3s 显式预算。
+// ---------------------------------------------------------------------------
+
+type ctxRecordingGatewayCache struct {
+	stubGatewayCache
+	mu                sync.Mutex
+	setAccountCtxErrs []error
+}
+
+func (c *ctxRecordingGatewayCache) SetSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error {
+	var err error
+	if ctx != nil {
+		err = ctx.Err()
+	}
+	c.mu.Lock()
+	c.setAccountCtxErrs = append(c.setAccountCtxErrs, err)
+	c.mu.Unlock()
+	return c.stubGatewayCache.SetSessionAccountID(ctx, groupID, sessionHash, accountID, ttl)
+}
+
+func TestBindHTTPResponseAccount_SurvivesCanceledRequestContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cache := &ctxRecordingGatewayCache{}
+	svc := &OpenAIGatewayService{openaiWSStateStore: NewOpenAIWSStateStore(cache)}
+
+	groupID := int64(100)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set("api_key", &APIKey{ID: 900, UserID: 55, GroupID: &groupID})
+	c.Set(openAIHTTPResponseOwnerContextKey, openAIHTTPResponseOwner{userID: 55, apiKeyID: 900})
+
+	// 模拟"响应已写回、客户端立即断开"：请求 ctx 已取消。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	svc.bindHTTPResponseAccount(ctx, c, &Account{ID: 43, Platform: PlatformOpenAI}, "resp_bind_survive")
+
+	cache.mu.Lock()
+	errs := append([]error(nil), cache.setAccountCtxErrs...)
+	cache.mu.Unlock()
+	require.NotEmpty(t, errs, "账号绑定写必须被执行")
+	for i, err := range errs {
+		require.NoError(t, err, "第 %d 次绑定写必须使用脱离请求取消的 ctx", i+1)
+	}
+
+	// 本地绑定可读回：粘性与续链鉴权的数据已就位。
+	got, err := svc.openaiWSStateStore.GetResponseAccount(context.Background(), groupID, "resp_bind_survive")
+	require.NoError(t, err)
+	require.Equal(t, int64(43), got)
 }

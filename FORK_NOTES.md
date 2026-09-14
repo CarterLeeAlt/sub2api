@@ -635,4 +635,5 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 - **删除分组统计接口**（产品决策）：`GET /admin/groups/:id/stats` 端点、`AdminService.GetGroupAPIKeyStats`、`APIKeyRepository.CountGroupAPIKeyStats`、前端 `groupsAPI.getStats` 一并移除——无前端消费者且全历史聚合有慢查询隐患，日后需要时从 git 历史恢复。
 - 删除死文件 `backend/internal/service/prompts/codex_opencode_bridge.txt`（全库零引用）。
 - Codex 批量导入报错行号改为追踪真实输入行（原 `len(values)+1` 在多条目/空行场景错位）。
+- **生产验证后追加两项决策**：① `bindHTTPResponseAccount` 的 ctx 改为 `WithoutCancel` + 3s 预算——bind 在响应写回后执行，非流式客户端已断开时原 ctx 必取消，Redis 绑定写必失败；粘性丢失会让 `previous_response_id` 续链退回普通调度，owner 绑定丢失会让后续请求 400（回归测试 `TestBindHTTPResponseAccount_SurvivesCanceledRequestContext`）。② **有意不修**：生图/对话非流式请求在客户端断开后继续完成上游并记账——`openai_images.go:617` 注释明确（断连取消会导致"网关不扣费、上游已计费"的资损），上游 ctx 发出前已无条件脱钩；客户端断开产生的 `broken pipe` WARN 仅观测。后续若有人把"断连取消上游"当优化提上来，以本条为准拒绝。
 
