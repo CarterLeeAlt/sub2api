@@ -314,7 +314,12 @@ func runOpenAIWSCodexThreadPair(t *testing.T, threadA, threadB string) (serverEr
 	cancelA()
 	if aReadErr == nil {
 		require.Equal(t, "resp_thread_a", gjson.GetBytes(completedA, "response.id").String())
-		require.NoError(t, connA.Close(coderws.StatusNormalClosure, "done"))
+		closeErr := connA.Close(coderws.StatusNormalClosure, "done")
+		if IsOpenAIWSSessionPreemptedError(closeErr) {
+			aReadErr = closeErr
+		} else {
+			require.NoError(t, closeErr)
+		}
 	}
 	require.NoError(t, connB.Close(coderws.StatusNormalClosure, "done"))
 
