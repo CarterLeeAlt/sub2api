@@ -500,8 +500,8 @@ export default {
         grokLastHeadersSeen: '响应头 {time}',
         passiveSampled: '被动采样',
         activeQuery: '查询',
-        estimatedTotalCost: '预计总费用 ${cost}',
-        estimatedTotalCostTooltip: '根据当前窗口费用和使用率估算达到 100% 使用率时的总费用'
+        estimatedTotalCost: 'T ${cost}',
+        estimatedTotalCostTooltip: '按当前 7 天窗口的费用和已用比例估算，额度用到 100% 时的总费用'
       },
       openaiQuotaReset: {
         count: '次数',
