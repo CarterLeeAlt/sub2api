@@ -315,7 +315,7 @@ func runOpenAIWSCodexThreadPair(t *testing.T, threadA, threadB string) (serverEr
 	if aReadErr == nil {
 		require.Equal(t, "resp_thread_a", gjson.GetBytes(completedA, "response.id").String())
 		closeErr := connA.Close(coderws.StatusNormalClosure, "done")
-		if IsOpenAIWSSessionPreemptedError(closeErr) {
+		if IsOpenAIWSSessionPreemptedError(closeErr) || isOpenAIWSPreemptedCloseFrameError(closeErr) {
 			aReadErr = closeErr
 		} else {
 			require.NoError(t, closeErr)
@@ -358,4 +358,14 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_SameCodexThreadS
 		}
 	}
 	require.Equal(t, 1, preempted, "应恰好有一条会话被抢占")
+}
+
+// isOpenAIWSPreemptedCloseFrameError 识别抢占关闭帧在客户端 Close 握手侧的形态：
+// coder/websocket 将其包装为 "failed to close WebSocket: ..."，不含生产侧哨兵错误，
+// IsOpenAIWSSessionPreemptedError 无法匹配，只能按关闭帧的 code/reason 判定。
+func isOpenAIWSPreemptedCloseFrameError(err error) bool {
+	var closeErr coderws.CloseError
+	return errors.As(err, &closeErr) &&
+		closeErr.Code == coderws.StatusTryAgainLater &&
+		closeErr.Reason == openAIWSSessionPreemptedCloseReason
 }
