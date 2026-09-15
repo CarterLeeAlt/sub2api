@@ -395,7 +395,11 @@ func TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort(t *testing.T) {
 	require.Equal(t, 1, scheduler.count())
 
 	// An admin / newer policy re-arms the account to a fresh SHORT cooldown.
-	newShort := time.Now().Add(5 * time.Second)
+	// Windows 时钟粒度约 0.5ms：handle429 内部写入的触发冷却（now+5s）与本处
+	// re-arm 值（now+5s）可能落在同一时钟刻度而完全相等，CAS 的时间指纹将无法
+	// 区分新旧冷却。显式加 1ms 偏移保证 re-arm 严格晚于触发冷却，语义不变
+	//（同 CUSTOM-005/008/013 的 Windows 时钟假设稳定化）。
+	newShort := time.Now().Add(5*time.Second).Add(time.Millisecond)
 	repo.mutate(acct.ID, func(a *Account) { a.RateLimitResetAt = ollama429TimePtr(newShort) })
 
 	// The old async result reports a long 7d reset; it must not override.
