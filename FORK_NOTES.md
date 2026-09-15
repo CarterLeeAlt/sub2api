@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`bdb42e22f`](https://github.com/Wei-Shaw/sub2api/commit/bdb42e22f81fcb633ff0a060961211dd2bcb515b)（`v0.2.4` 标签提交 [`5de5e2bed`](https://github.com/Wei-Shaw/sub2api/commit/5de5e2bed035d43591a2e10e51f420ef6a84eb98) 及其后 main 顶端） |
-| 最近一次上游合并提交 | [`f6fbd8110`](https://github.com/CarterLeeAlt/sub2api/commit/f6fbd81107c06f60dcd9a3dd5270581717e22bb0) |
+| 当前已同步上游节点 | [`881f32026`](https://github.com/Wei-Shaw/sub2api/commit/881f3202694c6bc932446931a30c27d9675178b9)（`v0.2.5` 标签提交及其后 main 顶端） |
+| 最近一次上游合并提交 | [`50000212a`](https://github.com/CarterLeeAlt/sub2api/commit/50000212a) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -257,6 +257,16 @@ Grok 429 测试按请求执行前后的时间窗口验证 `Retry-After`，并显
 
 相关提交：[`3b609d74b`](https://github.com/CarterLeeAlt/sub2api/commit/3b609d74bd3ba7200d47f0e91fe12f2dd7bec844)、[`a1caee16c`](https://github.com/CarterLeeAlt/sub2api/commit/a1caee16cca9330bc6b25c52c562c8f431291d87)、[`bfe5f0689`](https://github.com/CarterLeeAlt/sub2api/commit/bfe5f06893173b7c65713afdf56bfa1c39d8e298)。
 
+### CUSTOM-015：Ollama 429 CAS 测试时钟粒度稳定化（`active`，仅测试）
+
+上游 `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort` 中，测试 re-arm 的新短冷却与 `handle429` 内部写入的触发冷却（同为 `now+5s`）在 Windows 时钟粒度（≈0.5ms）下可能完全相等，导致仓储 CAS 的时间指纹无法区分新旧冷却、过期 probe 回调误通过。re-arm 值显式 `+1ms` 保证严格晚于触发冷却，生产限流行为不变。
+
+主要文件：
+
+- `backend/internal/service/ratelimit_service_ollama_429_test.go`
+
+相关提交：[`987abb352`](https://github.com/CarterLeeAlt/sub2api/commit/987abb352)。
+
 ## 已被上游吸收
 
 ### 管理端用量推理强度展示（`upstreamed`，2026-09-05）
@@ -297,6 +307,16 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-09-16：同步至上游 `881f32026`（v0.2.5）
+
+- 从本地节点 `a84260a38` 以普通 `--no-ff` merge 合入上游 main 顶端 `881f32026`（共同祖先即上一同步点 `bdb42e22f`/`v0.2.4`，上游侧 56 个提交、26 项变更，覆盖 `v0.2.5`）；合并前创建备份分支 `backup/pre-upstream-merge-20260916-a84260a38`，`git merge-tree` 试合并确认仅 1 个冲突文件。`backend/cmd/server/VERSION` 自动合并为 `0.2.5`；本轮上游**无新增迁移**、`go.mod`/`go.sum` 零变化。
+- 上游主要变更随合并接入：Codex 调度配额窗口 canonical 化（#7074：`openAICanonicalQuotaWindows` 按 window-minutes 归类、相对 `reset_after_seconds` 无有效 `codex_usage_updated_at` 锚点时不再默认 now 而返回 false）、Ollama Cloud 429 异步用量探测与恢复（#6769：`handle429` 在 CN 分支前显式分流、`SetRateLimitedIfLater` 永不缩短冷却、`SetRateLimitedIfUnchanged` 仓储级 CAS、`OllamaCloudUsageService` 注入链在 `wire_gen.go` 前移）、apicompat Responses→Anthropic 文本恢复（#6925：done/terminal 兜底补发缺失文本）与开头 system 合并 + 中段 system/developer 降级 user（#7094/`5255838`）、DeepSeek 官方模型白名单与 `[1m]` 后缀剥离（#6977）、订阅管理批量操作与 `ExtendSubscription` 行锁事务（#7091/`e3cce57`，`routes/admin.go` +1 行）、Antigravity OAuth 令牌缓存键改 `ag:account:<id>` 且失效器兼容清理旧 project 键（#7082）、Responses Lite namespace 声明兼容 `input.additional_tools` 载体（#7126）、调度器 sticky 命中率去重计数与 `LatencyMs` 返回值修复（#7072）、代理凭据显式清空（`*string` 语义，#7111）、Antigravity 刷新部分成功告警（#7076）、注册确认密码（#6654）、API Key 批量编辑（#6691）、API Key 建组按提供者过滤（#7153）、monitor 刷新间隔修正（#7112）、DeepSeek/antigravity/批次图等修复；#7110+#7148 为上游自合并自回退（净零）。
+- `ratelimit_service.go`（唯一文本冲突，结构体字段区）：fork 保留 `thresholdReconcileOnce`/`thresholdRetryBase`（CUSTOM-006 启动协调重试），接入上游 `ollamaCloudUsageProbe` 可选探测调度器；`handle429` 的 Ollama 分流位于 fork 的 OpenAI OAuth 重试窗口与 Spark 影子守卫之后、CN 分支之前，fork 结构化 429/WHAM CAS/"只延长"守卫不受影响。
+- 语义复核确认的并存点：#7074 窗口解析落在 `openai_gateway_scheduling.go` 独立函数，fork 账号阈值最高优先级与粘性路由无碰撞；#6977 DeepSeek 分支位于 `normalizeOpenAIModelForUpstream` 的 Codex 协议早返回之后，fork `codex-auto-*` 透传语义不变；#7094 归一化与 #6925 恢复逻辑同 fork 审计修复（迟到工具参数丢弃、终态 item ID 复用等）同文件不同函数；i18n `channels.ts` 追加上游订阅批量 key，CUSTOM-010「代理管理」命名保留；`useSwipeSelect.ts`、自动用卡、动态窗口显隐、一次性工作流、分组统计端点均未恢复（上游 #6691 的 KeysView 选择走 DataTable `selectable` 复选框，不依赖已删除的 swipe 组件，与 CUSTOM-009 一致）。
+- **批量生图选号优先级方向反转（#7073）经用户确认采纳上游**：`batch_image_public.go` 选号由 Priority 数值大优先改为数值小优先，与常规账号调度语义一致；生产账号若按"大值优先"配置需调换 Priority 值。
+- 测试修复：上游新测试 `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort` 在 Windows 时钟粒度（≈0.5ms）下 re-arm 值可与触发冷却完全相等导致 CAS 指纹无法区分新旧（[987abb352](https://github.com/CarterLeeAlt/sub2api/commit/987abb352) re-arm 值 +1ms，归入 CUSTOM-015 同族）；另修复三个**合并前即存在**的本地测试问题（经 backup 分支复跑判定非合并引入）：monitor 提供者数断言由硬编码 8 改 `PROVIDERS.length`、`GroupsView.codexManifest.spec` 补 `useAuthStore` mock（Pinia 未激活报错）、`KeyUsageView` 环形动画 rAF/定时器链在测试环境拆除后泄漏（组件加动画代数守卫 + spec afterEach 排空 1.15s）。
+- 验证：`go build ./...`、`go vet ./...`、golangci-lint 2.13.0 `0 issues`、`go test -tags=unit ./internal/service -count=1` 与全后端 `go test -tags=unit ./...` 通过；前端 `lint:check`（1 个既有警告）、`vue-tsc --noEmit`、Vitest 全量 287 文件 2185 项通过（连续两次 exit=0）、i18n 完整性检查、`vue-tsc -b`、Vite 生产构建通过（既有大 chunk 警告）。工具链为工作区 `.toolchains/` 便携版（Go 1.27.0、Node 22.20.0、golangci-lint 2.13.0）。
 
 ### 2026-09-13：同步至上游 `bdb42e22f`（v0.2.4 及其后）
 
@@ -501,6 +521,9 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 38 | [`7845cf411`](https://github.com/CarterLeeAlt/sub2api/commit/7845cf411) | 上游同步 | 合并上游 `2ac784c51a`（`v0.1.185`），接入 routed catalog、Spark 模型级 429、图像能力丢失冷却、Fable 模型级阈值、原子配额重置与推理强度列上游实现；`CachePostResetSnapshot` 按 fork CAS 语义落地并退役 [`18f5f3a41`](https://github.com/CarterLeeAlt/sub2api/commit/18f5f3a41) 旧版推理强度展示，继续排除自动用卡。 |
 | 39 | [`47cb55daf`](https://github.com/CarterLeeAlt/sub2api/commit/47cb55daf) | 上游同步 | 合并上游 `578785ee7`（`v0.2.1`），接入 GPT-6 Astra（模型注册/定价/归一化/能力持久化）、ultrafast service tier、group 级 Codex manifest 钉定配置、compact 账号列表与 upstream request-id 校验；维持删除自动用卡，保留 CUSTOM-001/009/011/012 定制。 |
 | 40 | [`f6fbd8110`](https://github.com/CarterLeeAlt/sub2api/commit/f6fbd81107c06f60dcd9a3dd5270581717e22bb0) | 上游同步 | 合并上游 `bdb42e22f`（`v0.2.4` 及其后 main 顶端），接入 OpenCode/MiniMax 平台、Codex Images 直调与 WS 连接池、group 模型白名单强制等；未耗尽 429 经确认采纳上游可配置冷却语义并改写对应单测，OAuth manifest 同步适配双传输并保留 `supported_in_api` 过滤与 `gpt-image-2` 追加，维持删除自动用卡。 |
+| 41 | [`50000212a`](https://github.com/CarterLeeAlt/sub2api/commit/50000212a) | 上游同步 | 合并上游 `881f32026`（`v0.2.5`），接入 Codex 配额窗口 canonical 化、Ollama Cloud 429 异步探测、apicompat 文本恢复与 system 角色归一化、DeepSeek 白名单、订阅批量操作、Antigravity 令牌缓存键隔离等；唯一冲突 `ratelimit_service.go` 结构体字段共存；经用户确认采纳 #7073 批量生图优先级方向反转；无新迁移，维持删除自动用卡。 |
+| 42 | [`987abb352`](https://github.com/CarterLeeAlt/sub2api/commit/987abb352) | 测试 | CUSTOM-015：Ollama 429 CAS 测试 re-arm 值 +1ms，消除 Windows 时钟粒度下的新旧冷却相等导致的 flaky。 |
+| 43 | [`f1ebcf43b`](https://github.com/CarterLeeAlt/sub2api/commit/f1ebcf43b) | 测试 | 修复合并前即存在的前端测试问题：monitor 提供者数改用 `PROVIDERS.length`、GroupsView spec 补 auth store mock、KeyUsageView 动画代数守卫与 spec 定时器排空。 |
 
 ## 下次同步检查清单
 
