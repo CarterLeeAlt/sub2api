@@ -20,17 +20,22 @@ import (
 
 // RateLimitService 处理限流和过载状态管理
 type RateLimitService struct {
-	accountRepo            AccountRepository
-	usageRepo              UsageLogRepository
-	cfg                    *config.Config
-	geminiQuotaService     *GeminiQuotaService
-	tempUnschedCache       TempUnschedCache
-	openAIAPIKeyHealth     OpenAIAPIKeyHealthCache
-	timeoutCounterCache    TimeoutCounterCache
-	openAI403CounterCache  OpenAI403CounterCache
-	settingService         *SettingService
-	tokenCacheInvalidator  TokenCacheInvalidator
-	runtimeBlocker         AccountRuntimeBlocker
+	accountRepo           AccountRepository
+	usageRepo             UsageLogRepository
+	cfg                   *config.Config
+	geminiQuotaService    *GeminiQuotaService
+	tempUnschedCache      TempUnschedCache
+	openAIAPIKeyHealth    OpenAIAPIKeyHealthCache
+	timeoutCounterCache   TimeoutCounterCache
+	openAI403CounterCache OpenAI403CounterCache
+	settingService        *SettingService
+	tokenCacheInvalidator TokenCacheInvalidator
+	runtimeBlocker        AccountRuntimeBlocker
+	// ollamaCloudUsageProbe is the optional Ollama Cloud usage probe scheduler
+	// injected via SetOllamaCloudUsageProbeScheduler. See
+	// ratelimit_service_ollama_429.go for how real-Ollama 429s schedule an async
+	// probe to learn the true usage-window reset.
+	ollamaCloudUsageProbe  ollamaCloudUsageProbeScheduler
 	usageCacheMu           sync.RWMutex
 	usageCache             map[int64]*geminiUsageCacheEntry
 	thresholdReconcileOnce sync.Once
@@ -1615,6 +1620,14 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// 单影子场景直接变成无可用账号(外审第8轮 P1)。整段跳过;影子的 codex_* 仅由 account_usage 的
 	// QueryUsage→persistOpenAICodexProbeSnapshot 维护,枯竭由调度守卫处理。
 	if account.IsShadow() {
+		return
+	}
+	// 真实 Ollama Cloud 用量账号（credentials base_url 指向 ollama.com）的 429 由
+	// ollama.com 的用量窗口驱动。其响应头不得被当作 OpenAI codex / Anthropic /
+	// CN 限流来解析，故在国产供应商分支之前单独处理：先设置永不缩短的临时冷却，
+	// 再调度异步 probe 学习真实重置点（详见 ratelimit_service_ollama_429.go）。
+	if account != nil && IsOllamaCloudUsageAccount(account) {
+		s.handleOllamaCloudUsage429(ctx, account, headers)
 		return
 	}
 	// 国产供应商（kimi/zhipu/deepseek）的 429 走专用可恢复路径：余额不足 → 临时停调，
