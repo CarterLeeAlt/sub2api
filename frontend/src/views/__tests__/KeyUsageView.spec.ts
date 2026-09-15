@@ -168,8 +168,11 @@ describe('KeyUsageView daily detail', () => {
     }))
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers()
+    // 环形进度动画链（50ms 延时 + 1s rAF 循环）使用真实定时器，必须在其
+    // 自然结束后再拆除 rAF stub，否则迟到的 rAF 调用会成为未处理错误
+    await new Promise(resolve => setTimeout(resolve, 1150))
     vi.unstubAllGlobals()
   })
 
@@ -266,7 +269,10 @@ describe('KeyUsageView subscription feature flag', () => {
     }))
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    vi.useRealTimers()
+    // 同上：先等动画链自然结束，再拆 stub
+    await new Promise(resolve => setTimeout(resolve, 1150))
     appStoreState.cachedPublicSettings = null
     vi.unstubAllGlobals()
   })
