@@ -537,6 +537,8 @@ const RING_GRADIENTS = [
 
 const ringAnimated = ref(false)
 const displayPcts = ref<number[]>([])
+// 动画代数：卸载或重新触发后旧动画链（rAF/定时器）自失效，不再写响应式状态
+let ringAnimSeq = 0
 
 const ringTrackColor = computed(() => isDark.value ? '#222222' : '#F0F0EE')
 
@@ -556,12 +558,16 @@ function getRingOffset(ring: RingItem): number {
 }
 
 function triggerRingAnimation(items: RingItem[]) {
+  const seq = ++ringAnimSeq
   ringAnimated.value = false
   displayPcts.value = items.map(() => 0)
 
   nextTick(() => {
+    if (seq !== ringAnimSeq) return
     requestAnimationFrame(() => {
+      if (seq !== ringAnimSeq) return
       setTimeout(() => {
+        if (seq !== ringAnimSeq) return
         ringAnimated.value = true
 
         // Animate percentage numbers
@@ -570,6 +576,7 @@ function triggerRingAnimation(items: RingItem[]) {
         const targets = items.map(item => item.isBalance ? 0 : item.pct)
 
         function tick() {
+          if (seq !== ringAnimSeq) return
           const elapsed = performance.now() - startTime
           const p = Math.min(elapsed / duration, 1)
           const ease = 1 - Math.pow(1 - p, 3)
@@ -939,6 +946,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  ringAnimSeq++
   if (resetTimer) clearInterval(resetTimer)
 })
 </script>
