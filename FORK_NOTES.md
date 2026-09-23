@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`881f32026`](https://github.com/Wei-Shaw/sub2api/commit/881f3202694c6bc932446931a30c27d9675178b9)（`v0.2.5` 标签提交及其后 main 顶端） |
-| 最近一次上游合并提交 | [`50000212a`](https://github.com/CarterLeeAlt/sub2api/commit/50000212a) |
+| 当前已同步上游节点 | [`aea725f2`](https://github.com/Wei-Shaw/sub2api/commit/aea725f2ea644d5592d0bbb1d63b607efa7e200a)（`v0.2.7` 标签提交，Seedance/Ark 原生视频 PR merge） |
+| 最近一次上游合并提交 | [`03977ef07`](https://github.com/CarterLeeAlt/sub2api/commit/03977ef07) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -308,6 +308,20 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已知上游合并处理
 
+### 2026-09-23：同步至上游 `aea725f2`（v0.2.7）
+
+- 从本地节点 `f94eedad5` 以普通 `--no-ff` merge 合入上游 `v0.2.7` 标签提交 `aea725f2`（共同祖先即上一同步点 `881f32026`/`v0.2.5`，上游侧 70 个提交、127 文件 +7229/−390，**无新增迁移**）；合并前创建备份分支 `backup/pre-upstream-merge-20260923-f94eedad`，`git merge-tree` 试合并确认仅 3 个冲突文件，均在预测内。合并提交 [`03977ef07`](https://github.com/CarterLeeAlt/sub2api/commit/03977ef07)。
+- **本次刻意合并到标签而非 main 顶端（经用户确认）**：上游 `v0.2.7` 之后 main 又积累 157 个未发版提交（`VERSION` 停在 0.2.7，`v0.2.6` 被跳过）。这 157 个提交留待下次同步，内容包括：Cloudflare 1010 不再禁用 OpenCode/CC 账号、Codex credits 展示与 referral 邀请（触碰 `openai_quota_service.go`/`account_repo.go`/`OpenAIQuotaResetCell.vue`）、TypeSafe content-audit 引擎与 billing reasoning effort multipliers（各含新迁移）、plugin HostService 结构化账号元数据（`29eead9`）、流终态结束/心跳外移/模型别名恢复、非高级调度选号决策（#7427）、apicompat `function_call_arguments.done` 补参数（#7272）等。
+- 上游主要变更随合并接入：Seedance/Ark 原生视频任务 API（v0.2.7 本体 `aba3452`，账号弹窗 endpoint capability 增 `seedance`）、CN coding-plan 配额耗尽 403 按 429 口径停调（`db8692d`，`handle403` 新分支 + `ratelimit_cn_providers.go` 判定/处理函数）、paused 账号继续刷新 OAuth token（`8e34ca5`，`ListOAuthRefreshCandidatePage` 移除 `schedulable = TRUE` 过滤）、plugin 通用宿主服务与只读状态桥（`c63bd14`，`NewPluginManager` 增 `pluginKVStore` 参数 + `SetAccountDirectory`）、manifest 解析去重与 key 校验保留（`2f16e09`/`31f3003`，落 `openai_codex_models_service.go`）、客户端取消后持久化响应亲和（`d7ee1ab`）、分组用量汇总去全表扫（`18d483c`）、developer 角色对严格 Chat 上游归一化（`18bfa4b`，新文件 `openai_chat_roles.go`）、grpc v1.83.2（`611c30f`，与 fork `f94eedad5` 同值自动合并）及一批前端 UX 修复。
+- 3 处文本冲突逐文件处理：
+  - `openai_gateway_response_handling.go`：fork（2026-09-14 审查轮）与上游 `d7ee1ab` 对**同一生产问题**（非流式客户端断开后 bind ctx 已取消、Redis 绑定写失败）各自实现了 `WithoutCancel` + `openAIWSStateStoreRedisTimeout` 预算；采纳上游 `bindBaseCtx`/`bindCtx` 结构（`context.Background()` 兜底为等价超集，后续调用已按上游 `bindCtx` 引用），fork 回归 `TestBindHTTPResponseAccount_SurvivesCanceledRequestContext` 在上游实现下通过。
+  - `EditAccountModal.spec.ts`：双方在文件同一位置各自新增用例，fork CUSTOM-006 两个测试（阈值覆盖开关、运行时刷新不覆盖编辑）与上游 Seedance capability 测试并存。
+  - `ChannelMonitorView.grok.spec.ts`：上游把 provider 数断言 8 改硬编码 10，fork `f1ebcf43b` 已改为 `PROVIDERS.length` 自适应；取 fork 写法。
+- 语义复核确认的并存点：`handle403` 的 CN 配额耗尽分支独立于 fork OpenAI OAuth 429 结构化/CAS 逻辑（handle429 未被上游触碰）；`ListOAuthRefreshCandidatePage` 移除 `schedulable` 过滤只扩大 token 刷新候选集，调度查询与停调/阈值状态不受影响；Seedance 平台接入保留 CUSTOM-011 的 `account-setting-row` 行距与 openai 并发数预填分支；`wire_gen.go` 自动合并后 fork 的 `thresholdReconciler`/`OpenAIQuotaSnapshotRefresh` 接线完整；developer 角色归一化带 `AccountTypeAPIKey` 门控，与 `codex-auto-*` 透传无交集；`18d483c` 分组汇总 SQL 变更未触碰 CUSTOM-008 测试文件，repository 包测试全绿。
+- `backend/cmd/server/VERSION`：`v0.2.7` 标签处滞后为 `0.2.5`（同 v0.2.1 先例），merge commit 中手动置 `0.2.7`。
+- 验证：`go build ./...`、`go vet ./...`、golangci-lint 2.13.0 `0 issues`、全后端 `go test -tags=unit ./...` 26 包全绿（`internal/service` 314s；首次运行出现 1 次 flaky FAIL，复跑与全量复跑均全绿，按既有 Windows flake 记录处理）；前端 `lint:check`（1 个既有警告）、`vue-tsc --noEmit`、Vitest 全量 **300 文件 2252 项**通过、i18n 完整性检查、Vite 生产构建通过（既有动态导入提示）。工具链为工作区 `.toolchains/` 便携版（Go 1.27.0、Node 22.20.0、pnpm 10.34.5、golangci-lint 2.13.0）。
+- 经验记录：本仓 `package.json` 的 `test` script 是裸 `vitest`，非 TTY 且无 `CI` 环境变量时会进入 watch 模式挂住；全量验证需用 `CI=true pnpm test`。
+
 ### 2026-09-16：同步至上游 `881f32026`（v0.2.5）
 
 - 从本地节点 `a84260a38` 以普通 `--no-ff` merge 合入上游 main 顶端 `881f32026`（共同祖先即上一同步点 `bdb42e22f`/`v0.2.4`，上游侧 56 个提交、26 项变更，覆盖 `v0.2.5`）；合并前创建备份分支 `backup/pre-upstream-merge-20260916-a84260a38`，`git merge-tree` 试合并确认仅 1 个冲突文件。`backend/cmd/server/VERSION` 自动合并为 `0.2.5`；本轮上游**无新增迁移**、`go.mod`/`go.sum` 零变化。
@@ -524,6 +538,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 41 | [`50000212a`](https://github.com/CarterLeeAlt/sub2api/commit/50000212a) | 上游同步 | 合并上游 `881f32026`（`v0.2.5`），接入 Codex 配额窗口 canonical 化、Ollama Cloud 429 异步探测、apicompat 文本恢复与 system 角色归一化、DeepSeek 白名单、订阅批量操作、Antigravity 令牌缓存键隔离等；唯一冲突 `ratelimit_service.go` 结构体字段共存；经用户确认采纳 #7073 批量生图优先级方向反转；无新迁移，维持删除自动用卡。 |
 | 42 | [`987abb352`](https://github.com/CarterLeeAlt/sub2api/commit/987abb352) | 测试 | CUSTOM-015：Ollama 429 CAS 测试 re-arm 值 +1ms，消除 Windows 时钟粒度下的新旧冷却相等导致的 flaky。 |
 | 43 | [`f1ebcf43b`](https://github.com/CarterLeeAlt/sub2api/commit/f1ebcf43b) | 测试 | 修复合并前即存在的前端测试问题：monitor 提供者数改用 `PROVIDERS.length`、GroupsView spec 补 auth store mock、KeyUsageView 动画代数守卫与 spec 定时器排空。 |
+| 44 | [`03977ef07`](https://github.com/CarterLeeAlt/sub2api/commit/03977ef07) | 上游同步 | 合并上游 `aea725f2`（`v0.2.7` 标签），接入 Seedance/Ark 原生视频、CN 配额耗尽 403 停调、paused 账号 token 刷新、plugin 宿主服务与 KV store、响应亲和断连持久化（与 fork 同问题修复，采纳上游结构）；刻意不追 main 顶端，上游尚有 157 个未发版提交待下次同步。 |
 
 ## 下次同步检查清单
 
