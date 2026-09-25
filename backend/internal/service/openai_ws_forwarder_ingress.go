@@ -324,6 +324,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				nil,
 			)
 		}
+		// 归属校验（turn>1；首包已在 handler 校验过）：不归属的 previous_response_id
+		// 剥离后以本轮 input 重建上下文，防止同分组跨租户凭他人 resp id 续链。
+		if turn > 1 && previousResponseID != "" && s.stripOpenAIWSUnownedPreviousResponseID(ctx, c, previousResponseID) {
+			normalized = RemovePreviousResponseIDFromBody(normalized)
+			previousResponseID = ""
+			logOpenAIWSModeInfo("ingress_ws_previous_response_id_stripped_not_owned turn=%d", turn)
+		}
 		if turnMetadata := strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)); turnMetadata != "" {
 			next, setErr := applyPayloadMutation(normalized, "client_metadata."+openAIWSTurnMetadataHeader, turnMetadata)
 			if setErr != nil {
@@ -790,6 +797,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if responseID != "" && stateStore != nil {
 				ttl := s.openAIWSResponseStickyTTL()
 				logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
+				s.bindOpenAIWSResponseOwner(ctx, c, groupID, responseID)
 			}
 			nextClientMessage, readErr := readClientMessage()
 			if readErr != nil {
@@ -2062,6 +2070,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			ttl := s.openAIWSResponseStickyTTL()
 			logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
 			stateStore.BindResponseConn(responseID, connID, ttl)
+			s.bindOpenAIWSResponseOwner(ctx, c, groupID, responseID)
 		}
 		if stateStore != nil && storeDisabled && sessionHash != "" {
 			stateStore.BindSessionConn(groupID, sessionHash, connID, s.openAIWSSessionStickyTTL())

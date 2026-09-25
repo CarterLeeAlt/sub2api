@@ -201,7 +201,7 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 
 ### CUSTOM-011：Codex 官方客户端默认策略与账号设置行间距（`active`）
 
-新建 OpenAI OAuth/Setup Token 账号时，账号编辑表单默认开启“仅允许 Codex 官方客户端”；已有账号编辑仍按已保存的 `extra.codex_cli_only` 值回填，不会静默覆盖历史配置。创建、编辑和批量编辑弹窗的设置行统一使用 `account-setting-row`，让左侧说明文本可收缩换行、右侧开关/选择器保持固定宽度并留出间距，避免长说明贴近控件。新建账号表单切换到 OpenAI 平台时并发数预填 `5`（其他平台保持表单默认 `10`，与 grok 平台强制 `1` 的特判并列；后端与数据库默认值不涉及），上游同步时需保留该 openai 分支。
+新建 OpenAI OAuth/Setup Token 账号时，账号编辑表单默认开启“仅允许 Codex 官方客户端”；已有账号编辑仍按已保存的 `extra.codex_cli_only` 值回填，不会静默覆盖历史配置。2026-09-25 起该默认已下沉到后端创建逻辑（`ensureCodexCLIOnlyDefaultForCreate`，见同日审查轮章节），绕过管理 UI 的建号路径同样生效。创建、编辑和批量编辑弹窗的设置行统一使用 `account-setting-row`，让左侧说明文本可收缩换行、右侧开关/选择器保持固定宽度并留出间距，避免长说明贴近控件。新建账号表单切换到 OpenAI 平台时并发数预填 `5`（其他平台保持表单默认 `10`，与 grok 平台强制 `1` 的特判并列；后端与数据库默认值不涉及），上游同步时需保留该 openai 分支。
 
 主要文件：
 
@@ -266,6 +266,68 @@ Grok 429 测试按请求执行前后的时间窗口验证 `Retry-After`，并显
 - `backend/internal/service/ratelimit_service_ollama_429_test.go`
 
 相关提交：[`987abb352`](https://github.com/CarterLeeAlt/sub2api/commit/987abb352)。
+
+## 2026-09-25 全面审查修复轮（Codex 上游泄露面专项）
+
+第三轮分区审查（入站头透传 / 客户端限制执行 / 响应回传泄露 / 会话与状态隔离）后的修复记录。上游同步时必须复核以下决策：
+
+### codex_cli_only 执行面扩展到全部消耗 OAuth 额度的入口（原 H1/H2）
+
+- 此前 `detectCodexClientRestriction` 只有两个调用方（`/v1/responses` Forward 与 chat completions），WS ingress、`/v1/messages`（Anthropic 协议桥接）、`/v1/alpha/search`、`/v1/live`（realtime）、`/v1/images`、`/v1/embeddings` 六类入口全部绕过"仅允许官方客户端"开关。经确认五类端点**全部纳入**门禁。
+- service 层新增导出门禁：`DetectCodexClientRestriction`（检测+审计日志）与 `EnforceCodexClientRestriction`（检测+日志+ops 标记+OpenAI 形状 403，供 OpenAI 协议端点）；Forward 与 CC 原内联门重构为调用后者（CC 硬编码文案统一为 `CodexClientRestrictionMessage`，基础文案不变）。
+- 各入口拒绝动作：WS 首连账号门禁未命中 → `StatusPolicyViolation` 关帧 + ops 标记；`/v1/messages` → Anthropic 形状 403；live → service 层 `LiveCodexClientRestrictedError`（`CreateLiveCall` 新增 `*gin.Context` 参数），handler 映射 403；alpha/images/embeddings → 共用 403。**全部终止、不换号**（与 HTTP 门一致）。WS 门禁位于调度循环内，对 failover 重选的每个账号重新执行（与 HTTP 逐尝试检测一致）；仅转发层内部的连接复用/换连不经此门。
+- 各 handler 门禁点位于 `account := selection.Account` 之后、占槽之前；`selection.Acquired` 时先释放槽位。
+- 主要文件：`openai_gateway_service.go`、`openai_gateway_forward.go`、`openai_gateway_chat_completions.go`、`openai_gateway_handler.go`、`openai_alpha_search.go`、`openai_images.go`、`openai_embeddings.go`、`openai_live.go`（handler+service）、`openai_live_types.go`。
+
+### 后端创建默认注入 codex_cli_only（CUSTOM-011 下沉，原 M5）
+
+- 经确认把"新建 OpenAI OAuth/Setup Token 账号默认开启"从前端表单下沉到后端：`ensureCodexCLIOnlyDefaultForCreate` 在创建（admin 创建/复制、`AccountService.Create`、CRS 批量导入）时对 OpenAI OAuth/Setup Token 类型、extra 未显式提供该键则注入 `true`；显式提供（含 false）尊重；更新路径不适用。
+- **行为修正**：`IsCodexCLIOnlyEnabled` 读取口径由 `IsOpenAIOAuth()`（仅 OAuth）放宽为 `IsOpenAIOAuthLike()`（OAuth + Setup Token）。此前 UI 可为 Setup Token 保存该开关但后端静默忽略；放宽后这类账号开始真正生效，属 CUSTOM-011 意图内的修复。API Key 账号仍不受此门管控。
+- 主要文件：`account.go`（新增 `codexCLIOnlyExtraKey` 常量）、`admin_account.go`、`account_service.go`、`crs_sync_service.go`。
+
+### WS previous_response_id 归属校验（原 H3）
+
+- HTTP `/v1/responses` 早有按 user 归属的 fail-closed 校验（`ValidateOpenAIHTTPResponseOwner`），但 WS 路径完全没有：同分组跨租户可凭他人 `resp_*` id 续链对话。修复分三段：
+  1. **铸造补绑**：WS 原生（ingress 2063 区）、桥接（ingress 792 区）、v2 HTTP-WS（forwarder_v2 890 区）铸造 response 时经 `bindOpenAIWSResponseOwner` 补记属主；**passthrough 模式**（不经过状态存储）在 `BeforeWriteClient` 的 `response.created/completed` 处补绑——先写绑定后写客户端，不存在"客户端引用未绑定 id"的竞态。
+  2. **消费校验**：handler 首包（与 HTTP 同存储同规则：同 user 跨 key 互通，查无记录/查找失败按不归属处理）、ingress `parseClientPayload`（仅 turn>1）、v2 passthrough 适配器每帧 `response.create` 三处校验；不归属则 `RemovePreviousResponseIDFromBody` 剥离并以本轮 input 重建上下文（与跨组剥离同款），记 warn 日志。
+  3. **已知代价（有意）**：fail-closed 意味着跨升级边界的存量 WS 会话首次续链会被剥离一次上游上下文；`responseToConn` 亲和映射**未**加租户 scope（决策：归属校验已把住全部消费点，scope 化属冗余防御，不做）。
+- 主要文件：`openai_gateway_response_handling.go`（新增 bind/strip helper）、`openai_ws_forwarder_support.go`（`getOpenAIOwnerUserIDFromContext`）、`openai_ws_forwarder_ingress.go`、`openai_ws_forwarder_v2.go`、`openai_ws_v2_passthrough_adapter.go`、`openai_gateway_handler.go`。
+
+### 错误回传出口消毒与 sanitizer 加厚（原 M1）
+
+- failover 耗尽后透传规则命中、`error_passthrough_runtime`、Claude 路径透传规则三处 `ExtractUpstreamErrorMessage` 结果统一包 `SanitizeUpstreamErrorMessage`（此前同函数 400 分支有消毒、透传分支没有，口径不一）。
+- `sanitizeUpstreamErrorMessage` 在 URL query 密钥打码基础上新增：email、`org_`/`acct_`/`usr_`/`proj_`/`sess_` 标识符、`sk-` key 片段打码。该函数为全部错误回传出口共用，加厚只多打码。ops 记录仍保留原始文本（有独立 redact）。
+
+### 用户侧 usage DTO 去除 account_id（原 M2）
+
+- 普通用户 usage 接口不再返回内部 `account_id`（`usageLogFromServiceUser` 此前在"严禁包含管理员字段"注释下保留了该字段），租户无法再从用量明细追踪账号池轮换节奏。admin DTO 经 `Account` 汇总对象看账号、按 account_id 筛选用查询参数，均不受影响。前后端类型同步删除（前端用户页无消费）。
+
+### 探查误报修正：compat 桥接出站身份（原 M3，确认不修）
+
+- 审查探查曾报告"/v1/messages 桥接请求客户端真实 UA 直达 OAuth 上游"（依据 `enforceCodexIdentityHeadersWithUA` 以 originator 存在为前提）。**实测证伪**：`openai_gateway_messages.go:372` 的 `ensureCodexIdentityHeaders` 在桥接构造后恢复完整规范身份，既有测试 `TestOpenAISetupTokenMessagesUsesCodexBridgeAndTurnState` 钉住出站 UA=`codexCLIUserAgent`、originator=`codex-tui`、version=规范值。曾短暂加入的桥接分支 UA Set 已回滚（冗余且注释失实）。
+
+### compact 请求 body 标识与头侧一致（原 M4）
+
+- `/responses/compact` 此前跳过 body 侧全部标识改写（头侧反而有隔离）：现对 compact 删除 `client_metadata`（与真实 Codex compact 形态对齐），`prompt_cache_key` 仍按账号+租户 scope 化（新拆 `scopeCodexAccountIdentityPromptCacheKeyInMap`，普通路径 `applyCodexAccountIdentityClientMetadataMap` 行为不变）。指纹收敛在 compact 上维持跳过。
+
+### app-server 放行口语义文档化（原 M6）
+
+- `codex_cli_only_allow_app_server_clients`（全局）或账号级 `codex_cli_only_allow_app_server` 开启后，任意客户端无需 UA/originator 特征即成放行候选，唯一剩余约束是携带任意 `x-codex-*` 头（默认指纹门）——**近似于取消官方客户端校验**。本轮不收紧代码，管理员开启前须知悉。
+
+### 明确不修（本轮复核后维持现状）
+
+- API-key 账号路径的 `safety_identifier` 条件删除：该字段是 api.openai.com 的合法 API 参数，OAuth 路径始终删除，API-key 自有账号透传无害。
+- API-key 账号（api.openai.com/国内上游）的客户端 UA/标识透传：自有账号常规代理行为。
+- `x-ratelimit-*`/`x-codex-*` 用量响应头放行：官方 CLI 协议需要，属已知取舍。
+- OAuth 账号 namespace 为空的退化路径：头侧 session_id 仍有 apiKeyID 哈希隔离兜底，仅账号级派生标识退化，条件苛刻。
+
+### 新增回归测试
+
+- `account_codex_cli_only_default_test.go`（默认注入 + 读取口径类型覆盖）
+- `openai_gateway_restriction_gate_test.go`（共用门禁：真实 detector 全链路）
+- `openai_ws_response_owner_test.go`（归属校验语义 + 剥离判定）
+- `sanitize_upstream_error_message_test.go`（打码矩阵）
+- `openai_codex_account_identity_compact_test.go`（compact scope）
 
 ## 已被上游吸收
 

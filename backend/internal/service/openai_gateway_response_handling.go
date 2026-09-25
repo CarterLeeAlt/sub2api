@@ -1510,6 +1510,55 @@ func (s *OpenAIGatewayService) BindOpenAIHTTPResponseOwner(
 	)
 }
 
+// bindOpenAIWSResponseOwner 为 WS 路径（原生/桥接/passthrough）铸造的 response 补记
+// 属主（user/api key），使 previous_response_id 归属校验对 WS 续链与 HTTP 同等可用。
+func (s *OpenAIGatewayService) bindOpenAIWSResponseOwner(ctx context.Context, c *gin.Context, groupID int64, responseID string) {
+	if s == nil || c == nil {
+		return
+	}
+	userID := getOpenAIOwnerUserIDFromContext(c)
+	apiKeyID := getAPIKeyIDFromContext(c)
+	if userID <= 0 || apiKeyID <= 0 || groupID <= 0 || strings.TrimSpace(responseID) == "" {
+		return
+	}
+	if err := s.BindOpenAIHTTPResponseOwner(ctx, groupID, responseID, userID, apiKeyID); err != nil {
+		logger.L().Warn(
+			"openai.ws_bind_response_owner_failed",
+			zap.Int64("group_id", groupID),
+			zap.Int64("user_id", userID),
+			zap.Int64("api_key_id", apiKeyID),
+			zap.String("response_id", truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen)),
+			zap.Error(err),
+		)
+	}
+}
+
+// stripOpenAIWSUnownedPreviousResponseID 校验 WS turn 携带的 previous_response_id 归属。
+// 不归属（含查无记录、查找失败——与 HTTP 校验一致的 fail-closed 口径）时返回 true，
+// 调用方从 payload 中删除该字段，以本轮 input 重建上下文；首次跨升级边界的存量会话
+// 续链会因此丢失一次上游上下文，属 fail-closed 的已知代价。
+func (s *OpenAIGatewayService) stripOpenAIWSUnownedPreviousResponseID(ctx context.Context, c *gin.Context, previousResponseID string) bool {
+	previousResponseID = strings.TrimSpace(previousResponseID)
+	if previousResponseID == "" {
+		return false
+	}
+	userID := getOpenAIOwnerUserIDFromContext(c)
+	apiKeyID := getAPIKeyIDFromContext(c)
+	if userID <= 0 || apiKeyID <= 0 {
+		return false
+	}
+	owned, err := s.ValidateOpenAIHTTPResponseOwner(ctx, getOpenAIGroupIDFromContext(c), previousResponseID, userID, apiKeyID)
+	if err != nil {
+		logger.L().Warn(
+			"openai.ws_previous_response_owner_lookup_failed",
+			zap.Int64("api_key_id", apiKeyID),
+			zap.String("response_id", truncateOpenAIWSLogValue(previousResponseID, openAIWSIDValueMaxLen)),
+			zap.Error(err),
+		)
+	}
+	return !owned
+}
+
 func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *gin.Context, account *Account, responseID string) {
 	if s == nil || account == nil || account.ID <= 0 {
 		return

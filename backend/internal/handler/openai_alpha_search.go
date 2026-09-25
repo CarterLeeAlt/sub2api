@@ -161,6 +161,14 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		}
 
 		account := selection.Account
+		// codex_cli_only 门禁：alpha/search 直连 ChatGPT backend-api，消耗 OAuth 账号
+		// 额度，与 /v1/responses 转发门同源；终止本次调度，不换号。
+		if h.gatewayService.EnforceCodexClientRestriction(c.Request.Context(), c, account, body) {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			return
+		}
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		accountRelease, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, false, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {

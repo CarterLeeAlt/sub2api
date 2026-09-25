@@ -169,6 +169,14 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 			return
 		}
 		account := selection.Account
+		// codex_cli_only 门禁：embeddings 消耗 OAuth 账号额度，与 /v1/responses 转发门
+		// 同源；终止本次调度，不换号。
+		if h.gatewayService.EnforceCodexClientRestriction(c.Request.Context(), c, account, body) {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			return
+		}
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", selection, false, &streamStarted, reqLog)

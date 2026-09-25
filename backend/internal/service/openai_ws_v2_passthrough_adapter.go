@@ -1040,6 +1040,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				} else if compatibilityChanged {
 					payload = normalized
 				}
+				// 归属校验（首包已在 handler 校验，此处覆盖后续 turn 的续链帧）：
+				// 不归属的 previous_response_id 剥离，以本轮 input 重建上下文，
+				// 防止同分组跨租户凭他人 resp id 续链。
+				if prevID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()); prevID != "" && s.stripOpenAIWSUnownedPreviousResponseID(ctx, c, prevID) {
+					payload = RemovePreviousResponseIDFromBody(payload)
+					logOpenAIWSModeInfo("ingress_ws_passthrough_previous_response_id_stripped_not_owned")
+				}
 			}
 			if account.IsOpenAIOAuthLike() && (isResponseCreate || eventType == "session.update") {
 				aliasedBody, reverse, aliased, aliasErr := aliasOpenAIOAuthReservedToolNamesBody(payload)
@@ -1318,6 +1325,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 				if eventType == "response.created" {
 					failureAccountSideEffectsApplied = false
+				}
+				// passthrough 模式不经过状态存储的铸造绑定路径，这里在回写给客户端
+				// 之前补记 response 属主（先写绑定后写客户端，客户端不可能引用到
+				// 未绑定的 id），使本连接后续 turn 与跨重连续链的归属校验能正常放行。
+				if eventType == "response.created" || eventType == "response.completed" {
+					if respID := strings.TrimSpace(gjson.GetBytes(payload, "response.id").String()); respID != "" {
+						s.bindOpenAIWSResponseOwner(ctx, c, getOpenAIGroupIDFromContext(c), respID)
+					}
 				}
 				if (eventType == "error" || eventType == "response.failed") && markOpenAIWSV2PassthroughCyberPolicy(c, payload) {
 					return nil

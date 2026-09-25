@@ -444,6 +444,23 @@ func getOpenAIGroupIDFromContext(c *gin.Context) int64 {
 	return *apiKey.GroupID
 }
 
+// getOpenAIOwnerUserIDFromContext 读取鉴权中间件随 API key 写入的属主用户 ID，
+// 供 previous_response_id 归属校验使用（与 HTTP 校验同口径：同 user 跨 key 互通）。
+func getOpenAIOwnerUserIDFromContext(c *gin.Context) int64 {
+	if c == nil {
+		return 0
+	}
+	value, exists := c.Get("api_key")
+	if !exists {
+		return 0
+	}
+	apiKey, ok := value.(*APIKey)
+	if !ok || apiKey == nil {
+		return 0
+	}
+	return apiKey.UserID
+}
+
 // SelectAccountByPreviousResponseID 按 previous_response_id 命中账号粘连。
 // 未命中或账号不可用时返回 (nil, nil)，由调用方继续走常规调度。
 func (s *OpenAIGatewayService) SelectAccountByPreviousResponseID(

@@ -214,6 +214,14 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		)
 
 		account := selection.Account
+		// codex_cli_only 门禁：生图消耗 OAuth 账号额度，与 /v1/responses 转发门同源；
+		// 终止本次调度，不换号。
+		if h.gatewayService.EnforceCodexClientRestriction(c.Request.Context(), c, account, body) {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			return
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.images.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)

@@ -178,18 +178,32 @@ func applyCodexAccountIdentityClientMetadataMap(requestBody map[string]any, acco
 			changed = true
 		}
 	}
-	if raw, ok := requestBody["prompt_cache_key"].(string); ok && strings.TrimSpace(raw) != "" {
-		kind := "prompt-cache"
-		if strings.TrimSpace(originalBodySessionID) != "" && raw == originalBodySessionID {
-			kind = "session"
-		}
-		next := scopeCodexAccountIdentityValue(account, apiKeyID, kind, raw)
-		if next != raw {
-			requestBody["prompt_cache_key"] = next
-			changed = true
-		}
+	if scopeCodexAccountIdentityPromptCacheKeyInMap(requestBody, account, apiKeyID, originalBodySessionID) {
+		changed = true
 	}
 	return changed
+}
+
+// scopeCodexAccountIdentityPromptCacheKeyInMap 仅对 body 内的 prompt_cache_key 做
+// 账号 namespace scope。compact 路径会整体删除 client_metadata，但该字段仍需隔离。
+func scopeCodexAccountIdentityPromptCacheKeyInMap(requestBody map[string]any, account *Account, apiKeyID int64, originalBodySessionID string) bool {
+	if requestBody == nil || codexAccountIdentityNamespace(account) == "" {
+		return false
+	}
+	raw, ok := requestBody["prompt_cache_key"].(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	kind := "prompt-cache"
+	if strings.TrimSpace(originalBodySessionID) != "" && raw == originalBodySessionID {
+		kind = "session"
+	}
+	next := scopeCodexAccountIdentityValue(account, apiKeyID, kind, raw)
+	if next == raw {
+		return false
+	}
+	requestBody["prompt_cache_key"] = next
+	return true
 }
 
 // applyCodexAccountIdentityClientMetadataRaw scopes only the small identity

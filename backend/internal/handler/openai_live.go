@@ -113,7 +113,7 @@ func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 	defer userRelease()
 
 	identity := liveCallIdentity(c, apiKey, subject.UserID, subscription)
-	created, err := h.gatewayService.CreateLiveCall(c.Request.Context(), request, identity, subject.Concurrency)
+	created, err := h.gatewayService.CreateLiveCall(c.Request.Context(), c, request, identity, subject.Concurrency)
 	if err != nil {
 		h.writeLiveCreateError(c, err)
 		return
@@ -184,6 +184,12 @@ func (h *OpenAIGatewayHandler) writeLiveCreateError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrLiveUnavailable):
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Live is unavailable")
 	default:
+		var restrictedErr *service.LiveCodexClientRestrictedError
+		if errors.As(err, &restrictedErr) {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalPolicyDenied)
+			h.errorResponse(c, http.StatusForbidden, "permission_error", restrictedErr.Message)
+			return
+		}
 		var attestationErr *service.LiveAttestationUnavailableError
 		if errors.As(err, &attestationErr) {
 			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", attestationErr.Error())

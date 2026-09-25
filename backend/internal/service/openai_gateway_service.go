@@ -1080,6 +1080,32 @@ func (s *OpenAIGatewayService) detectCodexClientRestriction(c *gin.Context, acco
 	return s.getCodexClientRestrictionDetector().Detect(c, account, policy, body)
 }
 
+// DetectCodexClientRestriction 导出给 handler 层及自管拒绝动作的入口（WS、Live 等），
+// 与 HTTP 转发门执行完全相同的检测与审计日志。
+func (s *OpenAIGatewayService) DetectCodexClientRestriction(ctx context.Context, c *gin.Context, account *Account, body []byte) CodexClientRestrictionDetectionResult {
+	result := s.detectCodexClientRestriction(c, account, body)
+	logCodexCLIOnlyDetection(ctx, c, account, getAPIKeyIDFromContext(c), result, body)
+	return result
+}
+
+// EnforceCodexClientRestriction 统一执行 codex_cli_only 客户端限制门（OpenAI 协议
+// HTTP 端点通用）。命中拒绝时写 OpenAI 形状 403 并标记 ops，返回 true 表示调用方
+// 必须立即终止本次转发——与 Forward 门语义一致：终止，不换号。
+func (s *OpenAIGatewayService) EnforceCodexClientRestriction(ctx context.Context, c *gin.Context, account *Account, body []byte) bool {
+	result := s.DetectCodexClientRestriction(ctx, c, account, body)
+	if !result.Enabled || result.Matched {
+		return false
+	}
+	MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+	c.JSON(http.StatusForbidden, gin.H{
+		"error": gin.H{
+			"type":    "forbidden_error",
+			"message": CodexClientRestrictionMessage(result),
+		},
+	})
+	return true
+}
+
 func getAPIKeyIDFromContext(c *gin.Context) int64 {
 	if c == nil {
 		return 0
