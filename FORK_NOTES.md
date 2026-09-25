@@ -267,6 +267,15 @@ Grok 429 测试按请求执行前后的时间窗口验证 `Retry-After`，并显
 
 相关提交：[`987abb352`](https://github.com/CarterLeeAlt/sub2api/commit/987abb352)。
 
+### CUSTOM-016：Antigravity keepalive 测试窗口稳定化（`active`，仅测试）
+
+antigravity 三个流式 handler 的 keepalive 采用固定 Ticker + 守卫（`time.Since(lastDataAt) < keepaliveInterval` 时裸 `continue`，过早节拍不重排），首个**保证**发出的心跳落在第 2 个节拍（≈2×interval）；首个节拍能否过守卫取决于 `lastDataAt` 偏移与节拍交付延迟的微秒级竞态。`TestAntigravityGeminiStreamKeepsCommentKeepaliveForOrdinaryClients` 等三个测试的 1.2s 窗口因此与守卫语义结构性不匹配（CI 偶发失败一次）。窗口统一放宽为 `3*time.Second`（2×interval + 1s 交付余量），负向断言（go-genai 不收注释）同步受益。对照：Anthropic 主网关（`gateway_upstream_response.go`）为自重置 Timer 模式、无此问题；曾考虑把 antigravity 移植为该模式，因属上游活跃文件的生产行为变更而否决（fork 分叉面最小化）。窗口依据已写在测试注释中，后续修改勿改回短窗口。
+
+主要文件：
+
+- `backend/internal/service/gemini_sse_comment_compat_test.go`
+- `backend/internal/service/antigravity_gateway_compat_test.go`
+
 ## 2026-09-25 全面审查修复轮（Codex 上游泄露面专项）
 
 第三轮分区审查（入站头透传 / 客户端限制执行 / 响应回传泄露 / 会话与状态隔离）后的修复记录。上游同步时必须复核以下决策：
