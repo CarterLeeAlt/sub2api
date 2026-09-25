@@ -56,7 +56,8 @@ func applyErrorPassthroughRule(
 		status = *rule.ResponseCode
 	}
 
-	errMsg = ExtractUpstreamErrorMessage(responseBody)
+	// 消毒后回传：上游文本可能携带账号 email/org 标识，与 failover 耗尽出口同口径。
+	errMsg = SanitizeUpstreamErrorMessage(ExtractUpstreamErrorMessage(responseBody))
 	if !rule.PassthroughBody && rule.CustomMessage != nil {
 		errMsg = *rule.CustomMessage
 	}

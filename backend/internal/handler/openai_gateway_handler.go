@@ -1327,6 +1327,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			return
 		}
 		account := selection.Account
+		// codex_cli_only 门禁（/v1/messages 桥接入口）：与 /v1/responses 转发门同源，
+		// 按 Anthropic 协议形状回错误；终止本次调度，不换号。
+		if restrictionResult := h.gatewayService.DetectCodexClientRestriction(c.Request.Context(), c, account, body); restrictionResult.Enabled && !restrictionResult.Matched {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalPolicyDenied)
+			reqLog.Warn("openai_messages_codex_cli_only_denied", zap.String("reason", restrictionResult.Reason))
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			h.anthropicStreamingAwareError(c, http.StatusForbidden, "permission_error", service.CodexClientRestrictionMessage(restrictionResult), streamStarted)
+			return
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_messages.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision
@@ -2421,6 +2432,28 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id must be a response.id (resp_*), not a message id")
 		return
 	}
+	// previous_response_id 归属校验（与 HTTP /v1/responses 同一存储、同一放行规则：
+	// 同 user 跨 key 互通；查无记录/查找失败按不归属处理，fail-closed）。不归属时
+	// 剥离续链字段并以首包 input 重建上下文——与跨组剥离同款处理，防止同分组
+	// 跨租户凭他人 resp id 续链对话；后续 turn 由 WS 转发层按同口径校验。
+	if previousResponseID != "" {
+		wsOwnerGroupID := int64(0)
+		if apiKey.GroupID != nil {
+			wsOwnerGroupID = *apiKey.GroupID
+		}
+		owned, ownershipErr := h.gatewayService.ValidateOpenAIHTTPResponseOwner(ctx, wsOwnerGroupID, previousResponseID, subject.UserID, apiKey.ID)
+		if ownershipErr != nil {
+			reqLog.Warn("openai.ws_previous_response_owner_lookup_failed", zap.Error(ownershipErr))
+			owned = false
+		}
+		if !owned {
+			firstMessage = service.RemovePreviousResponseIDFromBody(firstMessage)
+			reqLog.Warn("openai.ws_previous_response_id_stripped_not_owned",
+				zap.String("previous_response_id_kind", previousResponseIDKind),
+			)
+			previousResponseID = ""
+		}
+	}
 	firstMessageToolCoverage := service.AnalyzeToolCallOutputContextCoverageBytes(firstMessage)
 	previousResponseCanMove := !firstMessageToolCoverage.HasFunctionCallOutput || firstMessageToolCoverage.ContextCoversAllCallIDs
 	reqLog = reqLog.With(
@@ -2665,6 +2698,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 
 		account := selection.Account
+		// codex_cli_only 门禁：与 HTTP /v1/responses 转发门同源（检测、文案、ops 标记一致），
+		// 对本循环选中的每个账号（含 failover 重选）执行，与 HTTP 逐尝试检测语义一致；
+		// 仅转发层内部的连接复用/换连不经此门。
+		if restrictionResult := h.gatewayService.DetectCodexClientRestriction(ctx, c, account, firstMessage); restrictionResult.Enabled && !restrictionResult.Matched {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalPolicyDenied)
+			reqLog.Warn("openai.ws_codex_cli_only_denied", zap.String("reason", restrictionResult.Reason))
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, service.CodexClientRestrictionMessage(restrictionResult))
+			return
+		}
 		accountMaxConcurrency := account.Concurrency
 		if selection.WaitPlan != nil && selection.WaitPlan.MaxConcurrency > 0 {
 			accountMaxConcurrency = selection.WaitPlan.MaxConcurrency
@@ -3442,8 +3487,8 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 				respCode = *rule.ResponseCode
 			}
 
-			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
+			// 确定响应消息（消毒后回传：上游文本可能携带账号 email/org 标识）
+			msg := service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(responseBody))
 			if !rule.PassthroughBody && rule.CustomMessage != nil {
 				msg = *rule.CustomMessage
 			}

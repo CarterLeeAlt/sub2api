@@ -33,6 +33,19 @@ func (e *LiveAttestationUnavailableError) Error() string {
 	return "Live attestation is unavailable: " + e.Reason
 }
 
+// LiveCodexClientRestrictedError 表示 codex_cli_only 门禁拒绝了本次 Live 通话创建；
+// Message 已是面向客户端的文案，handler 按 403 映射。
+type LiveCodexClientRestrictedError struct {
+	Message string
+}
+
+func (e *LiveCodexClientRestrictedError) Error() string {
+	if e == nil || e.Message == "" {
+		return "This account only allows Codex official clients"
+	}
+	return e.Message
+}
+
 // LiveCallRequest 是两个下游创建协议归一后的请求。Session 不做结构改写。
 type LiveCallRequest struct {
 	SDP     string          `json:"sdp"`

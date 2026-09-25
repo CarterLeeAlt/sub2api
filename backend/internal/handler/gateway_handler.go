@@ -1878,8 +1878,8 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 				respCode = *rule.ResponseCode
 			}
 
-			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
+			// 确定响应消息（消毒后回传：上游文本可能携带账号 email/org 标识）
+			msg := service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(responseBody))
 			if !rule.PassthroughBody && rule.CustomMessage != nil {
 				msg = *rule.CustomMessage
 			}

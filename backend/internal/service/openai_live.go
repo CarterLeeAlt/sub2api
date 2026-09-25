@@ -17,6 +17,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	coderws "github.com/coder/websocket"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -123,6 +124,7 @@ func ValidateLiveCallRequest(request *LiveCallRequest) error {
 // 调度器持有的普通账号槽位会被同一个 Live 租约原子接替。
 func (s *OpenAIGatewayService) CreateLiveCall(
 	ctx context.Context,
+	c *gin.Context,
 	request *LiveCallRequest,
 	identity LiveCallIdentity,
 	userMaxConcurrency int,
@@ -176,6 +178,12 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		}
 
 		account := selection.Account
+		// codex_cli_only 门禁：Live 直连 ChatGPT realtime，消耗 OAuth 账号额度，与 HTTP
+		// 转发门同源；拒绝时释放选号，由 handler 按 403 映射。
+		if restrictionResult := s.DetectCodexClientRestriction(ctx, c, account, nil); restrictionResult.Enabled && !restrictionResult.Matched {
+			selection.ReleaseFunc()
+			return nil, &LiveCodexClientRestrictedError{Message: CodexClientRestrictionMessage(restrictionResult)}
+		}
 		leaseID := generateRequestID()
 		acquired, acquireErr := liveCache.AcquireLiveLease(
 			ctx,

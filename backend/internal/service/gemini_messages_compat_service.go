@@ -1852,13 +1852,21 @@ func sleepGeminiBackoff(attempt int) {
 var (
 	sensitiveQueryParamRegex = regexp.MustCompile(`(?i)([?&](?:key|client_secret|access_token|refresh_token)=)[^&"\s]+`)
 	retryInRegex             = regexp.MustCompile(`Please retry in ([0-9.]+)s`)
+	// 上游错误文本回传客户端前的身份打码：池化账号的邮箱、组织/账号标识与 API key
+	// 片段不应随透传错误暴露给租户。
+	sensitiveEmailRegex      = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
+	sensitiveUpstreamIDRegex = regexp.MustCompile(`(?i)\b(?:org|acct|usr|proj|sess)_[A-Za-z0-9]{8,}`)
+	sensitiveAPIKeyRegex     = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9_\-]{16,}`)
 )
 
 func sanitizeUpstreamErrorMessage(msg string) string {
 	if msg == "" {
 		return msg
 	}
-	return sensitiveQueryParamRegex.ReplaceAllString(msg, `$1***`)
+	msg = sensitiveQueryParamRegex.ReplaceAllString(msg, `$1***`)
+	msg = sensitiveUpstreamIDRegex.ReplaceAllString(msg, `***`)
+	msg = sensitiveAPIKeyRegex.ReplaceAllString(msg, `sk-***`)
+	return sensitiveEmailRegex.ReplaceAllString(msg, `***`)
 }
 
 func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, account *Account, upstreamStatus int, upstreamRequestID string, body []byte) error {
