@@ -50,6 +50,13 @@ func TestDownstreamRejectsSSECommentsReadsBothHeaders(t *testing.T) {
 
 // runAntigravityGeminiStreamWithIdle 起一条上游流：先发一个 data 事件，然后空闲 idle 时长再关闭，
 // 返回写给下游的全部字节。用来观察空闲期间网关是否发了 ":\n\n" 心跳。
+//
+// idle 窗口必须 > 2×StreamKeepaliveInterval：handleGeminiStreamingResponse 用固定
+// Ticker + 裸 continue（过早节拍直接丢弃，见 antigravity_gateway_streaming.go 的
+// `time.Since(lastDataAt) < keepaliveInterval` 守卫），lastDataAt 晚于 Ticker 创建
+// δ（调度/管道交接耗时），首个节拍（t≈1s）能否过守卫取决于 δ 与交付延迟的微秒级
+// 竞态；首个保证发出的心跳在第 2 个节拍（t≈2s）。窗口取 3s 留 1s 交付余量，
+// 再 flake 需要 goroutine 被饿死超过 1s。
 func runAntigravityGeminiStreamWithIdle(t *testing.T, userAgent string, idle time.Duration) string {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -81,13 +88,13 @@ func runAntigravityGeminiStreamWithIdle(t *testing.T, userAgent string, idle tim
 }
 
 func TestAntigravityGeminiStreamKeepsCommentKeepaliveForOrdinaryClients(t *testing.T) {
-	out := runAntigravityGeminiStreamWithIdle(t, "curl/8.7.1", 1200*time.Millisecond)
+	out := runAntigravityGeminiStreamWithIdle(t, "curl/8.7.1", 3*time.Second)
 	require.Contains(t, out, ":\n\n", "ordinary clients should still get the idle keepalive")
 	require.Contains(t, out, `"text":"partial"`)
 }
 
 func TestAntigravityGeminiStreamSkipsCommentKeepaliveForGoGenai(t *testing.T) {
-	out := runAntigravityGeminiStreamWithIdle(t, "google-genai-sdk/1.71.0 gl-go/go1.28-20260721-RC03", 1200*time.Millisecond)
+	out := runAntigravityGeminiStreamWithIdle(t, "google-genai-sdk/1.71.0 gl-go/go1.28-20260721-RC03", 3*time.Second)
 	require.Contains(t, out, `"text":"partial"`)
 	for _, event := range strings.Split(out, "\n\n") {
 		require.False(t, strings.HasPrefix(event, ":"), "go-genai must never receive an SSE comment event, got %q", event)

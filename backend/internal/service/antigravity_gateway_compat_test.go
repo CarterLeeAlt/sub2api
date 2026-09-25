@@ -779,7 +779,11 @@ func TestAntigravityCompatKeepaliveAfterFirstEvent(t *testing.T) {
 		`data: {"response":{"responseId":"resp_3757","candidates":[{"content":{"parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":1}}}`+"\n\n",
 	)
 	require.NoError(t, err)
-	time.Sleep(1200 * time.Millisecond)
+	// 窗口 3s = 2×StreamKeepaliveInterval + 1s 交付余量：keepalive 节拍为固定
+	// Ticker，首个保证在空闲满一个 interval 后写出的心跳落在第 2 个节拍（t≈2s），
+	// 1.2s 的旧窗口与交付延迟构成薄余量竞态（同 gemini_sse_comment_compat_test
+	// 的窗口依据注释）。
+	time.Sleep(3 * time.Second)
 	require.NoError(t, writer.Close())
 	require.NoError(t, <-done)
 	require.Contains(t, recorder.Body.String(), ": ping\n\n")
