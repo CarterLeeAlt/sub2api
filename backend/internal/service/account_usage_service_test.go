@@ -550,7 +550,7 @@ func TestAccountUsageService_GetOpenAIUsageMissingRateLimitDoesNotRecover(t *tes
 	reconciler := &accountUsageThresholdReconciler{}
 	svc := &AccountUsageService{
 		accountRepo:         repo,
-		openAIQuotaService:  NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokenCache, nil), newQuotaRedirectingFactory(server)),
+		openAIQuotaService:  NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokenCache, nil), newQuotaRedirectingFactory(server), nil),
 		thresholdReconciler: reconciler,
 	}
 
@@ -600,7 +600,7 @@ func TestAccountUsageService_GetOpenAIUsageStaleSnapshotWriteDoesNotRecover(t *t
 	reconciler := &accountUsageThresholdReconciler{}
 	svc := &AccountUsageService{
 		accountRepo:         repo,
-		openAIQuotaService:  NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokenCache, nil), newQuotaRedirectingFactory(server)),
+		openAIQuotaService:  NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokenCache, nil), newQuotaRedirectingFactory(server), nil),
 		thresholdReconciler: reconciler,
 	}
 

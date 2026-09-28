@@ -310,10 +310,23 @@ func runOpenAIWSCodexThreadPair(t *testing.T, threadA, threadB string) (serverEr
 	close(gatedConn.gate)
 
 	readCtxA, cancelA := context.WithTimeout(context.Background(), 5*time.Second)
-	_, completedA, aReadErr := connA.Read(readCtxA)
+	defer cancelA()
+	for {
+		var completedA []byte
+		_, completedA, aReadErr = connA.Read(readCtxA)
+		if aReadErr != nil {
+			break
+		}
+		require.Equal(t, "resp_thread_a", gjson.GetBytes(completedA, "response.id").String())
+		if threadA != threadB {
+			break
+		}
+		// 抢占关闭帧异步发送，已在飞的响应可能先到达；同线程必须继续读到关闭帧。
+	}
 	cancelA()
 	if aReadErr == nil {
-		require.Equal(t, "resp_thread_a", gjson.GetBytes(completedA, "response.id").String())
+		// 循环内已断言响应 ID；此处沿用 fork 的宽容关闭：服务端抢占关闭帧可能
+		// 异步到达，正常完成后 Close 仍可能读到抢占错误，需计入 aReadErr 而非失败。
 		closeErr := connA.Close(coderws.StatusNormalClosure, "done")
 		if IsOpenAIWSSessionPreemptedError(closeErr) || isOpenAIWSPreemptedCloseFrameError(closeErr) {
 			aReadErr = closeErr

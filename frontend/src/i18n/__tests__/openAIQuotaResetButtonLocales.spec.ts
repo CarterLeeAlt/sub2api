@@ -11,7 +11,7 @@ describe('OpenAI quota reset button labels', () => {
 
   it('keeps the existing English action names unchanged', () => {
     expect(enAdminAccounts.accounts.usageWindow.activeQuery).toBe('Query')
-    expect(enAdminAccounts.accounts.openaiQuotaReset.count).toBe('Credits')
+    expect(enAdminAccounts.accounts.openaiQuotaReset.count).toBe('Resets')
     expect(enAdminAccounts.accounts.openaiQuotaReset.reset).toBe('Reset')
   })
 })
