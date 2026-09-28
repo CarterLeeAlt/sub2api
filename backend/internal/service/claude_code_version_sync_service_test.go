@@ -330,7 +330,8 @@ func TestClaudeCodeVersionSyncInitialRunsWhenStaleOrMissing(t *testing.T) {
 		repo := newClaudeCodeVersionSyncSettingRepoStub(map[string]string{
 			SettingKeyClaudeCodeClientVersionSynced: "2.1.280",
 		})
-		repo.updatedAt = time.Now().Add(-2 * time.Hour)
+		// 相对同步周期取值：超过一个完整周期才算过期，对间隔调整保持鲁棒。
+		repo.updatedAt = time.Now().Add(-claudeCodeVersionSyncInterval - time.Hour)
 		github := &claudeCodeVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "v2.1.281"}}}
 
 		newClaudeCodeVersionSyncService(repo, github).runInitial()
