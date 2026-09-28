@@ -11,21 +11,24 @@ import (
 )
 
 type dashboardAggregationRepoTestStub struct {
-	aggregateCalls       int
-	recomputeCalls       int
-	cleanupUsageCalls    int
-	cleanupDedupCalls    int
-	ensurePartitionCalls int
-	lastStart            time.Time
-	lastEnd              time.Time
-	watermark            time.Time
-	aggregateErr         error
-	cleanupAggregatesErr error
-	cleanupUsageErr      error
-	cleanupDedupErr      error
-	ensurePartitionErr   error
-	aggregateCtx         context.Context
-	events               *[]string
+	aggregateCalls        int
+	recomputeCalls        int
+	cleanupUsageCalls     int
+	cleanupUsageCutoff    time.Time
+	cleanupDedupCutoff    time.Time
+	cleanupAggregateCalls int
+	cleanupDedupCalls     int
+	ensurePartitionCalls  int
+	lastStart             time.Time
+	lastEnd               time.Time
+	watermark             time.Time
+	aggregateErr          error
+	cleanupAggregatesErr  error
+	cleanupUsageErr       error
+	cleanupDedupErr       error
+	ensurePartitionErr    error
+	aggregateCtx          context.Context
+	events                *[]string
 }
 
 type dashboardAggregationRollupRepoTestStub struct {
@@ -71,16 +74,19 @@ func (s *dashboardAggregationRepoTestStub) UpdateAggregationWatermark(ctx contex
 }
 
 func (s *dashboardAggregationRepoTestStub) CleanupAggregates(ctx context.Context, hourlyCutoff, dailyCutoff time.Time) error {
+	s.cleanupAggregateCalls++
 	return s.cleanupAggregatesErr
 }
 
 func (s *dashboardAggregationRepoTestStub) CleanupUsageLogs(ctx context.Context, cutoff time.Time) error {
 	s.cleanupUsageCalls++
+	s.cleanupUsageCutoff = cutoff
 	return s.cleanupUsageErr
 }
 
 func (s *dashboardAggregationRepoTestStub) CleanupUsageBillingDedup(ctx context.Context, cutoff time.Time) error {
 	s.cleanupDedupCalls++
+	s.cleanupDedupCutoff = cutoff
 	return s.cleanupDedupErr
 }
 
@@ -218,6 +224,7 @@ func TestDashboardAggregationService_CleanupRetentionFailure_DoesNotRecord(t *te
 	svc := &DashboardAggregationService{
 		repo: repo,
 		cfg: config.DashboardAggregationConfig{
+			Enabled: true,
 			Retention: config.DashboardAggregationRetentionConfig{
 				UsageLogsDays: 1,
 				HourlyDays:    1,
@@ -238,6 +245,7 @@ func TestDashboardAggregationService_CleanupDedupFailure_DoesNotRecord(t *testin
 	svc := &DashboardAggregationService{
 		repo: repo,
 		cfg: config.DashboardAggregationConfig{
+			Enabled: true,
 			Retention: config.DashboardAggregationRetentionConfig{
 				UsageLogsDays: 1,
 				HourlyDays:    1,

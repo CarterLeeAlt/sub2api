@@ -88,6 +88,12 @@ func runAntigravityGeminiStreamWithIdle(t *testing.T, userAgent string, idle tim
 }
 
 func TestAntigravityGeminiStreamKeepsCommentKeepaliveForOrdinaryClients(t *testing.T) {
+	// The keepalive interval is configured in whole seconds; the first guaranteed
+	// heartbeat lands on the second tick, so the idle window must cover 2x the
+	// interval plus delivery slack (see the 3s rationale in CUSTOM-016 notes).
+	// Leave enough idle time for the first data event to be processed before the
+	// ticker fires; otherwise a busy CI runner can consume the first tick too
+	// early and close the stream before any heartbeat is written.
 	out := runAntigravityGeminiStreamWithIdle(t, "curl/8.7.1", 3*time.Second)
 	require.Contains(t, out, ":\n\n", "ordinary clients should still get the idle keepalive")
 	require.Contains(t, out, `"text":"partial"`)
