@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	// claudeCodeVersionSyncInterval 自动同步间隔。Claude Code CLI 发版频率是小时级，
-	// 1 小时足够跟上官方节奏，同时把对 GitHub API 的调用压到每天 24 次。
-	claudeCodeVersionSyncInterval = time.Hour
+	// claudeCodeVersionSyncInterval 自动同步间隔。Claude Code CLI 发版频率是天级，
+	// 48 小时足够跟上官方节奏，同时把对 GitHub API 的调用压到每天约 12 次；
+	// 与 openAICodexVersionSyncInterval 的放缓口径保持一致（fork 决策）。
+	claudeCodeVersionSyncInterval = 48 * time.Hour
 	// claudeCodeVersionSyncTimeout 单次同步的整体超时。
 	claudeCodeVersionSyncTimeout = 30 * time.Second
 	// claudeCodeVersionSyncRepo 官方 Claude Code CLI 仓库。
