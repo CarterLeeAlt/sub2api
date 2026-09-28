@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`aea725f2`](https://github.com/Wei-Shaw/sub2api/commit/aea725f2ea644d5592d0bbb1d63b607efa7e200a)（`v0.2.7` 标签提交，Seedance/Ark 原生视频 PR merge） |
-| 最近一次上游合并提交 | [`03977ef07`](https://github.com/CarterLeeAlt/sub2api/commit/03977ef07) |
+| 当前已同步上游节点 | [`9a62841fd`](https://github.com/Wei-Shaw/sub2api/commit/9a62841fd)（`v0.2.9` 之后仅 1 个 VERSION 同步提交，覆盖 `v0.2.8`/`v0.2.9` 两版本） |
+| 最近一次上游合并提交 | [`c5dcfdadd`](https://github.com/CarterLeeAlt/sub2api/commit/c5dcfdadd) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
 
@@ -379,6 +379,21 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已知上游合并处理
 
+### 2026-09-28：同步至上游 `9a62841fd`（v0.2.8/v0.2.9）
+
+- 从本地节点 `cbf38153b` 以普通 `--no-ff` merge 合入上游 main 顶端 `9a62841fd`（共同祖先即上一同步点 `aea725f2`/`v0.2.7`，上游侧 308 个提交、540 文件 +150 新文件，`go.mod`/`go.sum` 零变化）；覆盖 `v0.2.8`/`v0.2.9` 两个标签，main 顶端距 `v0.2.9` 标签仅 1 个 VERSION 同步提交。合并前创建备份分支 `backup/pre-upstream-merge-20260928-cbf38153`，`git merge-tree` 试合并预测 33 个冲突文件，实际一致。合并提交 [`c5dcfdadd`](https://github.com/CarterLeeAlt/sub2api/commit/c5dcfdadd)。
+- 上游主要新能力随合并接入：OpenCode Go 官方用量窗口查询与自动刷新（服务/repo/handler/settings/前端全链路，默认全局关闭）、Codex points（`/wham/usage` 的 `credits`，独立于重置卡）展示 + referral 邀请管理（新 `OpenAIReferralClient`，`NewOpenAIQuotaService` 增第 5 参）、Claude Code CLI 版本号自动同步服务（fork 于后续提交放缓至 48h）、TypeSafe content-audit 独立引擎（迁移 `238b`）、channel 推理强度计费乘数（迁移 `239`）、affiliate 线下提现幂等（迁移 `240`）、备份月度归档、滚动日志保留、simple mode API-key 消费窗口、group 白名单通配符、GPT-6 Sol/Luna + Claude Opus 5.5（1M ctx）+ Grok 4.7 模型注册、Cloudflare 1010 不再计入账号 403 罢免、上游调度粘性命中二元组重构（`selectAccountForModelWithExclusionsStickyHit`/`markStickySessionHit`）与 `openAIQuotaWindowResetPending` 未来重置放行。
+- **自动用卡维持删除**：上游继续演进 fork 已删除的 `openai_quota_auto_reset.go`（查询失败退避 + 调度通知冷却 +64 行、测试 +141 行），按 fork 政策保持删除；上游自动合并带入的调度投影键（`scheduler_cache.go` 的 4 个 `OpenAIAutoResetCredit*ExtraKey`）、投影测试 `TestSchedulerMetadataPayload_KeepsOpenAIAutoResetCreditFields`、`openai_gateway_scheduling.go` 的 `notifyOpenAIAutoResetFromScheduler` 调用（落在 fork 删除区域）、`ResetCreditTargeted` 及其新测试全部清理。合并后全仓 auto-reset 符号零残留（grep 复核）。
+- `openai_gateway_scheduling.go`（唯一实质重构冲突）：采纳上游粘性命中重构与放行修复，保留 fork 的账号阈值最高优先级块（`EvaluateAccountSchedulingThreshold`），不恢复 auto-reset 调用。教训：`git checkout --ours/--theirs` 会整文件回退、抹掉已自动合并的改动，冲突文件一律用 `git checkout -m` 恢复冲突态后按块解决（本轮 scheduling 文件与 i18n channels.ts 各踩了一次并重做）。
+- `OpenAIQuotaResetCell.vue`（前端语义合并重点）：以 fork CUSTOM-014 严格语义为基底（extra 水合、30 分钟新鲜度、fail-closed 未知态、PAT 门禁、影子禁重置），叠加上游 points 按钮 + `OpenAIReferralCell` + 账号切换守卫（`accountID` 捕获比对）；丢弃上游 auto-reset 状态徽章。上游把重置卡计数按钮 en 文案 `Credits` 改名 `Resets`（新增 Points 按钮后避免歧义），fork 钉住 spec 同步更新。
+- `openai_quota_service.go`：共存 fork `OpenAIResetCreditSnapshot` 严格 CAS（`cacheResetCreditsSnapshotAt`）与上游 `OpenAICredits`/`openAICreditsSnapshot`/`CacheCreditsSnapshot`（handler 手动刷新路径调用）；`CachePostResetSnapshot` 保持 fork 语义（仅 CAS 写重置卡，不盲写窗口），上游版本引用的 `buildOpenAIAutoResetUsageUpdates` 在已删除文件中。`account_repo.go`：上游新增 `codex_credits_snapshot`/`codex_referral_snapshot` 并入 fork 改写后的 `schedulerNeutralExtraKeys`。
+- **迁移撞号（无害，已查明）**：fork 自有 `239_backfill_codex_fingerprint_seed_setup_token.sql` 与上游新 `239_channel_reasoning_effort_multipliers.sql` 同号；`migrations_runner.go` 以 filename 为主键记录与校验，按名不按号，两者均会执行且 schema 操作独立。fork 文件保持原名不动（改名会被视为新迁移重跑）。上游自身已有双 238 先例。
+- 上游新测试适配 fork 契约：`openai_quota_credits_test.go` 6 个 fixture 补 `"rate_limit":null`（fork `queryUsage` 强制字段在场，显式 null 才是权威无窗口——CUSTOM-006 语义）；`account_usage_service_batch_test.go` 适配 fork `GetUsageBatch` 四值签名（recoveredAccountIDs）；5 处 `NewOpenAIQuotaService` 调用补第 5 参 `nil`；`UsageProgressBar.spec.ts` 采纳上游 idle 倒计时断言反转（有未来 `resetsAt` 显示倒计时而非"现在"）。
+- settings 全家桶（`setting_handler*.go`/`setting_parse.go`/`settings_view.go`/`dto/settings.go`/前端 settings 三件套 + `SettingsView.vue`）：fork `OpenAICodexPATResetCreditsEnabled` 开关与上游 TypeSafe 引擎/日志保留/OpenCode Go 刷新/Claude sync 新设置同区共存；`api_contract_test.go` 双方新增键共存。
+- `backend/cmd/server/VERSION`：merge commit 中置 `0.2.9`。
+- 验证：`go build ./...`、`go vet ./...`、golangci-lint 2.13.0 `0 issues`、全后端 `go test -tags=unit ./...`（`internal/service` 定向复跑两次全绿，首次失败为上游 credits 测试与 fork 字段在场契约的适配问题）、前端 `lint:check`（1 个既有警告）、`vue-tsc --noEmit`、Vitest 全量 **336 文件 2522 项**通过、i18n 完整性检查、Vite 生产构建通过（既有大 chunk 警告）。全量 Vitest 曾出现一次 `AccountsView.selectAllResults.spec` 的 unhandled rejection（涉及文件均与 fork HEAD 一致、上游未触碰，单独重跑通过，判定为全量运行下的既有异步时序噪声）。工具链为工作区 `.toolchains/` 便携版（Go 1.27.0、Node 22.20.0、pnpm 10.34.5、golangci-lint 2.13.0）。
+- 后续提交：[`c44748524`](https://github.com/CarterLeeAlt/sub2api/commit/c44748524) 将上游 Claude Code 版本同步间隔从 1h 放缓至 48h（与 `openAICodexVersionSyncInterval` 的 `ee8e18e80` 口径一致，en/zh 提示文案同步）。
+
 ### 2026-09-23：同步至上游 `aea725f2`（v0.2.7）
 
 - 从本地节点 `f94eedad5` 以普通 `--no-ff` merge 合入上游 `v0.2.7` 标签提交 `aea725f2`（共同祖先即上一同步点 `881f32026`/`v0.2.5`，上游侧 70 个提交、127 文件 +7229/−390，**无新增迁移**）；合并前创建备份分支 `backup/pre-upstream-merge-20260923-f94eedad`，`git merge-tree` 试合并确认仅 3 个冲突文件，均在预测内。合并提交 [`03977ef07`](https://github.com/CarterLeeAlt/sub2api/commit/03977ef07)。
@@ -610,6 +625,8 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 | 42 | [`987abb352`](https://github.com/CarterLeeAlt/sub2api/commit/987abb352) | 测试 | CUSTOM-015：Ollama 429 CAS 测试 re-arm 值 +1ms，消除 Windows 时钟粒度下的新旧冷却相等导致的 flaky。 |
 | 43 | [`f1ebcf43b`](https://github.com/CarterLeeAlt/sub2api/commit/f1ebcf43b) | 测试 | 修复合并前即存在的前端测试问题：monitor 提供者数改用 `PROVIDERS.length`、GroupsView spec 补 auth store mock、KeyUsageView 动画代数守卫与 spec 定时器排空。 |
 | 44 | [`03977ef07`](https://github.com/CarterLeeAlt/sub2api/commit/03977ef07) | 上游同步 | 合并上游 `aea725f2`（`v0.2.7` 标签），接入 Seedance/Ark 原生视频、CN 配额耗尽 403 停调、paused 账号 token 刷新、plugin 宿主服务与 KV store、响应亲和断连持久化（与 fork 同问题修复，采纳上游结构）；刻意不追 main 顶端，上游尚有 157 个未发版提交待下次同步。 |
+| 45 | [`c5dcfdadd`](https://github.com/CarterLeeAlt/sub2api/commit/c5dcfdadd) | 上游同步 | 合并上游 `9a62841fd`（覆盖 `v0.2.8`/`v0.2.9`），接入 OpenCode Go 用量窗口、Codex points + referral、Claude Code 版本同步、TypeSafe 审计引擎与三个新迁移；维持删除自动用卡（含上游新增的调度投影键与新测试），保留 CUSTOM-014 严格语义并叠加上游 points/referral；迁移 239 与 fork 自有 239_backfill 撞号（按 filename 主键无碍）。 |
+| 46 | [`c44748524`](https://github.com/CarterLeeAlt/sub2api/commit/c44748524) | 定制 | Claude Code 版本自动同步间隔 1h → 48h，与 Codex 版本同步放缓口径一致。 |
 
 ## 下次同步检查清单
 
