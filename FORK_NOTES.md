@@ -11,10 +11,10 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`9a62841fd`](https://github.com/Wei-Shaw/sub2api/commit/9a62841fd)（`v0.2.9` 之后仅 1 个 VERSION 同步提交，覆盖 `v0.2.8`/`v0.2.9` 两版本） |
-| 最近一次上游合并提交 | [`c5dcfdadd`](https://github.com/CarterLeeAlt/sub2api/commit/c5dcfdadd) |
+| 当前已同步上游节点 | [`b8dece900`](https://github.com/Wei-Shaw/sub2api/commit/b8dece900)（`v0.2.13` 之后仅 1 个 VERSION 同步提交，覆盖 `v0.2.10`～`v0.2.13` 四版本） |
+| 最近一次上游合并提交 | [`c9bce6cb6`](https://github.com/CarterLeeAlt/sub2api/commit/c9bce6cb6) |
 
-上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。
+上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。自 2026-10-03 起按项目指令（`AGENTS.md` 分支策略）不再创建 `backup/*` 备份分支，回滚点以合并前提交哈希记录。
 
 ## 状态定义
 
@@ -378,6 +378,19 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-10-03：同步至上游 `b8dece900`（v0.2.10～v0.2.13）
+
+- 从本地节点 `8f5b9c424` 以普通 `--no-ff` merge 合入上游 main 顶端 `b8dece900`（共同祖先即上一同步点 `9a62841fd`/`v0.2.9`，上游侧 95 个提交、310 文件 +14905/−915，`go.mod`/`go.sum` 零变化，前端仅 axios 1.20.0 安全升级）；覆盖 `v0.2.10`～`v0.2.13` 四个标签，main 顶端距 `v0.2.13` 标签仅 1 个 VERSION 同步提交。自本轮起按项目指令分支策略不再创建备份分支，回滚点为合并前提交 `8f5b9c424`；`git merge-tree` 试合并预测 3 个冲突文件，与实际一致。合并提交 [`c9bce6cb6`](https://github.com/CarterLeeAlt/sub2api/commit/c9bce6cb6)。
+- 上游主要新能力随合并接入：Claude 原生限额重置次数查询/兑换（新文件族 `claude_reset_credits.go`/`claude_reset_redeem.go`/`ClaudeResetCreditsCell.vue`，独立于 fork 的 Codex 重置卡）、TypeSafe 平台一等支持与 Jev System One（迁移 `241_add_typesafe_platform.sql` + 校验/审计加固 + API-key 账号上游计费探查）、计费并发 in-flight 余额预留与未定价别名计费回退、API Key 删除后结算兜底（迁移 `241_add_payment_order_bonus_amount.sql` 为充值赠送阶梯）、GPT-6.1 Sol/Astra Ultrafast/Claude Sonnet 5.5/Codex 订阅套餐识别、composite 路由模型所有权强制（`account_model_not_owned`）与 WS 别名 composite 路由解析、Claude-Code-only 分组的 OpenAI 兼容入口改走降级分组、邮箱验证码原子尝试 + 单次哈希重置 token、antigravity 上游错误体脱敏、antigravity 首内容前 keepalive（固定 15s + 2min 上限）、风控用户白名单、API Key 创建数量/频率限制、账号优先级行内快调、充值赠送阶梯 + 折扣模式、Grok CLI 身份头修正、白名单模型映射冲突预防。
+- 3 处文本冲突均为双方并行新增，取并集解决：
+  - `openai_ws_forwarder_ingress.go`：同一位置双方各加一个变量声明——保留 fork `currentAccountIdentitySourceRaw`（failover 重放基准）与上游 `currentClientPayload`（admission hooks 客户端模型候选），并采纳上游 `hooks.BeforeRequest` 调用点改传 `rawForHash` 的两处改动；fork 的生图并发槽、归属校验、turn-state 回带守卫与指纹收敛生产点均在同一文件其他区域自动合并完好。
+  - `frontend/src/i18n/locales/en|zh/admin/accounts.ts`：保留 fork `autoPauseManagedByAccountThresholdHint`（CUSTOM-006）与上游 `claudeResetCredits` 整块文案；**丢弃上游同块携带的 `autoResetCredit` 文案**（fork 政策维持自动用卡删除）。
+- **自动用卡维持删除**：上游本轮在 i18n 冲突块内携带的 `autoResetCredit` 键按 fork 政策剔除；合并后全仓 `auto.?reset.?credit` 大小写不敏感检索零残留（仅 FORK_NOTES 文档提及）。
+- 上游新测试适配 fork 契约（2 处）：`claude_reset_redeem_test.go` 的 `redeemLeaseStub` 补 `RenewLeaderLock` 方法（fork `LeaderLockCache` 接口含续期语义，上游接口没有；桩实现为 held key 续期成功、`fail` 时同样报错，该功能仅调用 `TryAcquireLeaderLock`，续期不被上游测试逻辑触达）；`settings.authSourceDefaults.spec.ts` 平台清单 5→6（上游 `settings.ts` 的 `PLATFORMS` 加入 `typesafe`，fixture 补 `typesafe` 全 null 项、两处 `toHaveLength(5)` 改 6）。
+- fork 重点定制完好性（合并树逐项核验）：`ratelimit_service.go`、`account_repo.go`、`scheduler_cache.go`、`openai_quota_service*.go`、`openai_quota_snapshot_refresh.go`、`OpenAIQuotaResetCell.vue`、`upstream_models_openai_oauth.go`、`openai_images_responses.go`、`openai_gateway_response_handling.go` 本轮上游均未触碰；CUSTOM-006 阈值块在 `openai_gateway_scheduling.go` 的调用点完好（仅因上游 +10 行 composite 所有权检查整体下移）；CUSTOM-016 的 3s 测试窗口在两个 antigravity 测试文件完好——上游首内容前 keepalive（`antigravityCompatPreContentKeepaliveInterval` 15s）与既有 `StreamKeepaliveInterval` 配置驱动 ticker 确认共存，fork 测试先写有效数据再等 ticker，不受影响；设置键 `openai_codex_pat_reset_credits_enabled` 与上游新键（充值阶梯/风控白名单/typesafe 配额）在 `setting_parse.go`/`api_contract_test.go` 并存；`wire_gen.go` 的 fork 接线（thresholdReconciler/OpenAIQuotaSnapshotRefresh/referral）完好。
+- 新增迁移 2 个（`241_add_payment_order_bonus_amount.sql`、`241_add_typesafe_platform.sql`），fork 自有最高 239、上游既有最高 240，无撞号；`backend/cmd/server/VERSION` 自动合并为 `0.2.13`。
+- 验证：`go build ./...`、`go vet ./...`（修正 redeemLeaseStub 接口适配后通过）、golangci-lint 2.13.0 `0 issues`、全后端 `go test -tags=unit ./... -count=1` 通过、antigravity/Claude reset 定向复跑通过；前端 `lint:check`（1 个既有警告）、`vue-tsc --noEmit`、Vitest 全量 **339 文件 2609 项**通过（首轮 3 项失败为 fork spec 钉死 5 平台与上游 typesafe 新平台的适配问题，修正后复跑全绿）、i18n 完整性检查 + Vite 生产构建通过（既有大 chunk 警告）。工具链为工作区 `.toolchains/` 便携版（Go 1.27.0、Node 22.20.0、pnpm 10.34.5、golangci-lint 2.13.0）。
 
 ### 2026-09-28：同步至上游 `9a62841fd`（v0.2.8/v0.2.9）
 
