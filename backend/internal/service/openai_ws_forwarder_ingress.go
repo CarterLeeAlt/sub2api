@@ -618,7 +618,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		bridgeAccountFailoverInputExists := false
 		for turn := 1; ; turn++ {
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
-				if err := hooks.BeforeRequest(turn, currentBridgePayload.payloadRaw, currentBridgePayload.originalModel); err != nil {
+				if err := hooks.BeforeRequest(turn, currentBridgePayload.rawForHash, currentBridgePayload.originalModel); err != nil {
 					return err
 				}
 			}
@@ -1436,6 +1436,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	// 作为基准（与 http_bridge 的 accountIdentitySourceRaw 同角色），避免把
 	// 上一账号 namespace 改写过的帧交给新账号。
 	currentAccountIdentitySourceRaw := append([]byte(nil), firstPayload.accountIdentitySourceRaw...)
+	// Admission hooks must see client model candidates before upstream mapping.
+	currentClientPayload := firstPayload.rawForHash
 	currentOriginalModel := firstPayload.originalModel
 	currentImageBillingModel := firstPayload.imageBillingModel
 	currentImageSizeTier := firstPayload.imageSizeTier
@@ -1625,7 +1627,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 	for {
 		if turn > 1 && !skipBeforeTurn && hooks != nil && hooks.BeforeRequest != nil {
-			if err := hooks.BeforeRequest(turn, currentPayload, currentOriginalModel); err != nil {
+			if err := hooks.BeforeRequest(turn, currentClientPayload, currentOriginalModel); err != nil {
 				return err
 			}
 		}
@@ -2190,6 +2192,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 		}
 		currentPayload = nextPayload.payloadRaw
+		currentClientPayload = nextPayload.rawForHash
 		currentOriginalModel = nextPayload.originalModel
 		currentAccountIdentitySourceRaw = append([]byte(nil), nextPayload.accountIdentitySourceRaw...)
 		currentImageBillingModel = nextPayload.imageBillingModel
