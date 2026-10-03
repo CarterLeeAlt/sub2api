@@ -199,9 +199,9 @@ Codex 指纹的 `turn_started_at_unix_ms` 在解析一次请求的指纹 ID 时�
 
 相关提交：[`96bf166d5`](https://github.com/CarterLeeAlt/sub2api/commit/96bf166d5f416b3e7aa586a71c0a0fcecf73ca1e)。
 
-### CUSTOM-011：Codex 官方客户端默认策略与账号设置行间距（`active`）
+### CUSTOM-011：Codex 官方客户端默认策略与账号设置行间距（`active`，默认已改关闭）
 
-新建 OpenAI OAuth/Setup Token 账号时，账号编辑表单默认开启“仅允许 Codex 官方客户端”；已有账号编辑仍按已保存的 `extra.codex_cli_only` 值回填，不会静默覆盖历史配置。2026-09-25 起该默认已下沉到后端创建逻辑（`ensureCodexCLIOnlyDefaultForCreate`，见同日审查轮章节），绕过管理 UI 的建号路径同样生效。创建、编辑和批量编辑弹窗的设置行统一使用 `account-setting-row`，让左侧说明文本可收缩换行、右侧开关/选择器保持固定宽度并留出间距，避免长说明贴近控件。新建账号表单切换到 OpenAI 平台时并发数预填 `5`（其他平台保持表单默认 `10`，与 grok 平台强制 `1` 的特判并列；后端与数据库默认值不涉及），上游同步时需保留该 openai 分支。
+新建 OpenAI OAuth/Setup Token 账号时，“仅允许 Codex 官方客户端”**默认关闭**（2026-10-04 按用户决定从默认开启改回；此前 2026-09-25 曾下沉到后端创建逻辑的 `ensureCodexCLIOnlyDefaultForCreate` 注入已随本次整体移除，`AccountService.Create`、admin 创建/复制与 CRS 批量导入路径均不再落 `extra.codex_cli_only` 键）。已有账号编辑仍按已保存的 `extra.codex_cli_only` 值回填，不会静默覆盖历史配置；历史账号已存的 `true` 继续生效。前端表单切换到 OpenAI OAuth 类别时开关保持 `false`，管理员可手动开启。创建、编辑和批量编辑弹窗的设置行统一使用 `account-setting-row`，让左侧说明文本可收缩换行、右侧开关/选择器保持固定宽度并留出间距，避免长说明贴近控件。新建账号表单切换到 OpenAI 平台时并发数预填 `5`（其他平台保持表单默认 `10`，与 grok 平台强制 `1` 的特判并列；后端与数据库默认值不涉及），上游同步时需保留该 openai 分支。**后续上游同步不得恢复默认注入**（上游本就无此注入，保持一致即可）。
 
 主要文件：
 
@@ -288,7 +288,9 @@ antigravity 三个流式 handler 的 keepalive 采用固定 Ticker + 守卫（`t
 - 各 handler 门禁点位于 `account := selection.Account` 之后、占槽之前；`selection.Acquired` 时先释放槽位。
 - 主要文件：`openai_gateway_service.go`、`openai_gateway_forward.go`、`openai_gateway_chat_completions.go`、`openai_gateway_handler.go`、`openai_alpha_search.go`、`openai_images.go`、`openai_embeddings.go`、`openai_live.go`（handler+service）、`openai_live_types.go`。
 
-### 后端创建默认注入 codex_cli_only（CUSTOM-011 下沉，原 M5）
+### 后端创建默认注入 codex_cli_only（CUSTOM-011 下沉，原 M5；**注入已于 2026-10-04 退役**）
+
+> 2026-10-04：按用户决定"仅允许 Codex 官方客户端"默认改为关闭，本节的 `ensureCodexCLIOnlyDefaultForCreate` 注入函数及其 3 处调用已整体移除（详见 CUSTOM-011 现行描述）；`IsCodexCLIOnlyEnabled` 的 `IsOpenAIOAuthLike()` 读取口径修正继续有效。以下为历史记录。
 
 - 经确认把"新建 OpenAI OAuth/Setup Token 账号默认开启"从前端表单下沉到后端：`ensureCodexCLIOnlyDefaultForCreate` 在创建（admin 创建/复制、`AccountService.Create`、CRS 批量导入）时对 OpenAI OAuth/Setup Token 类型、extra 未显式提供该键则注入 `true`；显式提供（含 false）尊重；更新路径不适用。
 - **行为修正**：`IsCodexCLIOnlyEnabled` 读取口径由 `IsOpenAIOAuth()`（仅 OAuth）放宽为 `IsOpenAIOAuthLike()`（OAuth + Setup Token）。此前 UI 可为 Setup Token 保存该开关但后端静默忽略；放宽后这类账号开始真正生效，属 CUSTOM-011 意图内的修复。API Key 账号仍不受此门管控。
