@@ -410,23 +410,6 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
-// ensureCodexCLIOnlyDefaultForCreate 在创建 OpenAI OAuth/Setup Token 账号时，若 extra
-// 未显式提供 codex_cli_only 则注入默认开启（CUSTOM-011：新建账号默认仅允许 Codex
-// 官方客户端）。显式提供（含 false）一律尊重；本默认只适用于创建，更新路径不适用。
-func ensureCodexCLIOnlyDefaultForCreate(platform, accountType string, extra map[string]any) map[string]any {
-	if platform != PlatformOpenAI || (accountType != AccountTypeOAuth && accountType != AccountTypeSetupToken) {
-		return extra
-	}
-	if _, exists := extra[codexCLIOnlyExtraKey]; exists {
-		return extra
-	}
-	if extra == nil {
-		extra = make(map[string]any, 1)
-	}
-	extra[codexCLIOnlyExtraKey] = true
-	return extra
-}
-
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
 	if input.Platform == PlatformTypeSafe && input.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
@@ -441,7 +424,6 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	delete(accountExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(accountExtra, OpenCodeGoUsageSnapshotExtraKey)
 	accountExtra = prepareCodexFingerprintExtraForCreate(input.Platform, input.Type, accountExtra)
-	accountExtra = ensureCodexCLIOnlyDefaultForCreate(input.Platform, input.Type, accountExtra)
 	account := &Account{
 		Name:        input.Name,
 		Notes:       normalizeAccountNotes(input.Notes),

@@ -4978,8 +4978,10 @@ watch(
   [accountCategory, () => form.platform],
   ([category, platform]) => {
     if (platform === 'openai' && category === 'oauth-based') {
-      // New OpenAI OAuth/Setup Token accounts use the safer official-client policy by default.
-      codexCLIOnlyEnabled.value = true
+      // CUSTOM-011 默认已于 2026-10-04 改为关闭：新建 OpenAI OAuth/Setup Token
+      // 账号不再默认开启"仅允许 Codex 官方客户端"，保持 ref 初始 false 即可。
+      codexCLIOnlyEnabled.value = false
+      codexCLIOnlyAppServerEnabled.value = false
     } else if (platform === 'openai' && category !== 'oauth-based') {
       codexCLIOnlyEnabled.value = false
       codexCLIOnlyAppServerEnabled.value = false

@@ -674,7 +674,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 				Platform:    PlatformOpenAI,
 				Type:        AccountTypeOAuth,
 				Credentials: credentials,
-				Extra:       ensureCodexCLIOnlyDefaultForCreate(PlatformOpenAI, AccountTypeOAuth, extra),
+				Extra:       extra,
 				ProxyID:     proxyID,
 				Concurrency: concurrency,
 				Priority:    priority,
