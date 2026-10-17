@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`b8dece900`](https://github.com/Wei-Shaw/sub2api/commit/b8dece900)（`v0.2.13` 之后仅 1 个 VERSION 同步提交，覆盖 `v0.2.10`～`v0.2.13` 四版本） |
-| 最近一次上游合并提交 | [`c9bce6cb6`](https://github.com/CarterLeeAlt/sub2api/commit/c9bce6cb6) |
+| 当前已同步上游节点 | [`b0a02a330`](https://github.com/Wei-Shaw/sub2api/commit/b0a02a330)（`v0.2.17` 之后仅 1 个 VERSION 同步提交，覆盖 `v0.2.14`～`v0.2.17` 四版本） |
+| 最近一次上游合并提交 | [`86f2f69ff`](https://github.com/CarterLeeAlt/sub2api/commit/86f2f69ff) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。自 2026-10-03 起按项目指令（`AGENTS.md` 分支策略）不再创建 `backup/*` 备份分支，回滚点以合并前提交哈希记录。
 
@@ -380,6 +380,17 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-10-17：同步至上游 `b0a02a330`（v0.2.14～v0.2.17）
+
+- 本轮起始环境异常：工作区 `D:\ZCodeProject\Sub2API` 此前被清空（原因不明，回收站无可恢复内容），从 GitHub 重新克隆后继续（本地无未推送提交，fork main 与 origin 一致在 `5d9869a97`）。工作区级非 git 资产（`.toolchains/`、AGENTS.md、pnpm 守护 shim、`ssh-server (secret).txt` 等）本轮全部重建。从本地节点 `5d9869a97` 以普通 `--no-ff` merge 合入上游 main 顶端 `b0a02a330`（共同祖先即上一同步点 `b8dece900`/`v0.2.13`，上游侧 281 个提交、552 文件 +40763/−2728）；覆盖 `v0.2.14`～`v0.2.17` 四个标签。回滚点为合并前提交 `5d9869a97`（未建分支）。合并提交 [`86f2f69ff`](https://github.com/CarterLeeAlt/sub2api/commit/86f2f69ff)，**提交后未推送**。
+- `git merge-tree` 试合并预测 7 个冲突文件、8 个冲突块，与实际完全一致。上一轮预告的 `OpenAIReferralCell.vue` / `useSwipeSelect.ts` modify/delete 冲突**未发生**——上游这 281 个提交从未触碰这两个已删文件，fork 删除干净保留。上游侧仅删除 2 个合作方 logo 图片。
+- **max_tokens 钳制语义决策（用户拍板，2026-10-17）**：apicompat 三条转换路径（Anthropic→Responses、ChatCompletions→Responses、ChatCompletions→Anthropic bridge）**采用上游 v0.2.17 的可配置下限钳制**（`gateway.min_output_tokens`，默认 128、配置最低 16，服务层经 `configuredMinOutputTokens` 传入 `*WithMinOutputTokens` 变体），**取代** fork `613606f8c` 的“显式小 max_tokens 直通不钳制”决定（该决定当年未登记 CUSTOM，见该提交信息 apicompat 段）。依据：上游已把原硬编码 128 钳制升级为可配置项，符合 FORK_NOTES“上游已有等价实现即跟进”约定；如需贴近原直通语义，部署配置设 `gateway.min_output_tokens: 16`。受影响测试已对齐：apicompat 三处 fork 直通断言改为钳制断言（`chatcompletions_anthropic_bridge_test.go`/`anthropic_responses_test.go` 整文件取上游版本——差异仅此；`chatcompletions_responses_test.go` 仅改 max_tokens 子测试断言、保留 fork 独有 `TestResponsesToChatCompletions_CustomToolCall`）；`openai_responses_ingress_compat_test.go` 的 64→128 断言随新语义修正。
+- 其余冲突解决：`apicompat/types.go` 取上游侧（新增 `DefaultMinMaxOutputTokens`/`minMaxOutputTokens` 常量）；`settings.authSourceDefaults.spec.ts` 三处取上游平台清单重构（13 平台数组 + `listPlatformIds()` 完全覆盖 fork 上轮手写的 6 平台）；`EditAccountModal.vue` 取上游侧（fork 的 DeepSeek 无 Coding Plan 归一化被上游 `resolveProviderAccountMode` 完整覆盖——内置目录中 deepseek 仅 `payg` 模式、`default_mode: 'payg'`，旧 coding 数据自动回落）；`wire_gen.go` 手工并集后用 wire v0.7.0 重新生成定稿（手工并集误保留了上游 `openAIQuotaAutoResetService` 实参，wire 按合并后的 provider 图生成时自动纠正）。
+- **自动用卡维持删除（延续 fork 政策，非合并事故）**：本轮专门核查了 `OpenAIQuotaAutoResetService` 接线在上游 `wire.go`/`handler/wire.go`/`service/wire.go` 的“缺失”，确认这是 fork CUSTOM-014 的既定替代（快照服务只读、无消费能力），且上游对该实现文件自基点起零改动，合并按 fork 删除保留；与上游 wire 三文件的差异全部是 fork 有意分歧，无需修复。
+- 上游主要新能力随合并接入：Cline（ClinePass 订阅/积分计费）与 Command Code（按模型自动分流）两平台，平台清单驱动表单/转发/探测；Gemini 显式上下文缓存（AI Studio/Vertex/自建网关，迁移 `243`～`245`）与 Vertex Agent Platform API Key 认证；Gemini 4 Argon（Antigravity/Gemini API/CLI）；Claude Haiku 5.5 全链路适配；`gateway.min_output_tokens` 可配置最小输出；临时不可调度规则作用域（整账号 vs 单模型冷却）；用量页单请求输出 TPS；OpenAI API Key 账号 Web Search 模拟；v0.2.14 安全修复（全新安装随机管理员邮箱——仅影响全新安装、EasyPay 回调伪造封堵）；支付退款/易支付查单/Stripe client_secret 等资金链路修复。
+- `backend/go.mod` Go 版本 1.27.0→1.27.2，`Dockerfile` 自动合并为 `golang:1.27.2-alpine`（CUSTOM-003 严格一致约束自动满足）；新增迁移 4 个（`242_drop_platform_check_constraints.sql`、`242_group_i18n.sql`——上游自身两个 242 撞号、`243_gemini_cached_contents.sql`、`244_gemini_cached_contents_channel_usage.sql`、`245_gemini_cached_contents_mutation_lease.sql`），`backend/cmd/server/VERSION` 随上游为 `0.2.17`。
+- 验证：`go build ./...` 通过；全后端 `go test -tags=unit ./...` 首轮仅 1 项失败（上述 ingress 兼容测试的 64/128 断言），修正后 `internal/service` 整包复跑通过（其余 57 包首轮全绿）；golangci-lint **v2.14.0**（本轮起与 CI 同版本，上游从 2.13.0 升级）`0 issues`；gofmt 干净；前端 `vue-tsc --noEmit` 通过、Vitest 全量 **2864 项**全部通过（含本次冲突涉及的 platform spec 与账号弹窗 spec）。工具链为工作区 `.toolchains/` 便携版（Go 1.27.2、Node 20.19.5、pnpm 9.15.9、golangci-lint v2.14.0，均与当前 CI 对齐）；pnpm store/缓存全部锚定工作区内。
 
 ### 2026-10-03：同步至上游 `b8dece900`（v0.2.10～v0.2.13）
 
