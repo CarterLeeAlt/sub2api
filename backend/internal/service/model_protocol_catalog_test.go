@@ -332,9 +332,15 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 		url  string
 		body []byte
 	}
+	// base 地址用单调计数器而非 time.Now().UnixNano()：Windows 时钟粒度下相邻两次
+	// 取值可能相同，两次 forward 的目录缓存 key 碰撞后，第二次的「目录不可用」
+	// store 只设置退避、不清除已缓存的目录（见 modelProtocolCatalog.store），回落
+	// 断言会读到第一次的目录而误报失败。
+	seq := 0
 	forward := func(t *testing.T, ingress routingMatrixIngress, model string, catalog map[string][]string) observation {
 		t.Helper()
-		base := fmt.Sprintf("http://cc-%s-%d.example", strings.ReplaceAll(t.Name(), "/", "-"), time.Now().UnixNano())
+		seq++
+		base := fmt.Sprintf("http://cc-%s-%d.example", strings.ReplaceAll(t.Name(), "/", "-"), seq)
 		account := commandCodeTestAccount(12)
 		account.Credentials["api_base_urls"] = map[string]any{
 			APIProtocolChatCompletions: base + "/provider/v1",

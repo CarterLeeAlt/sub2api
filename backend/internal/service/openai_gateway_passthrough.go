@@ -1392,6 +1392,41 @@ func sanitizeOpenAICapacityShedErrorCodeForClient(payload []byte) ([]byte, bool)
 	return updated, changed
 }
 
+// sanitizeOpenAIClientVisibleErrorPayload 在写给下游客户端前，对 error /
+// response.failed 事件里的错误文案做身份打码（复用 sanitizeUpstreamErrorMessage：
+// 邮箱、org_/acct_/usr_/proj_/sess_ 标识、sk- key 片段、URL 凭据参数）。只改写
+// 文案字段，事件结构与其余字段不动；非错误事件原样返回。与
+// sanitizeOpenAICapacityShedErrorCodeForClient 一样，只作用于客户端写出副本——
+// 账号状态判定、监控与日志继续使用未改写的原始 payload。
+func sanitizeOpenAIClientVisibleErrorPayload(payload []byte) ([]byte, bool) {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload, false
+	}
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	if eventType != "error" && eventType != "response.failed" {
+		return payload, false
+	}
+	updated := payload
+	changed := false
+	for _, path := range []string{"message", "error.message", "response.error.message"} {
+		field := gjson.GetBytes(updated, path)
+		if !field.Exists() || field.Type != gjson.String || strings.TrimSpace(field.String()) == "" {
+			continue
+		}
+		masked := sanitizeUpstreamErrorMessage(field.String())
+		if masked == field.String() {
+			continue
+		}
+		next, err := sjson.SetBytes(updated, path, masked)
+		if err != nil {
+			return payload, false
+		}
+		updated = next
+		changed = true
+	}
+	return updated, changed
+}
+
 // openAIStreamErrorStatusPaths 覆盖流内 error / response.failed 事件里上游状态码的
 // 两种拼写：OpenAI 用 status_code，而不少 OpenAI 兼容上游（含二级中转）只写 status。
 // 只认 status_code 会把 401/403/429/529 一律降级成通用 502，账号健康与 failover

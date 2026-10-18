@@ -1968,7 +1968,10 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		body = s.redactAgentIdentitySensitiveBody(reqCtx, request.credentialAccount, body)
-		message := strings.TrimSpace(string(body))
+		// 错误消息会经 handler 原样返回给该分组的任意 API Key 持有者，先做身份
+		// 打码（邮箱、上游组织/账号标识、key 片段）；body 本体保留原文供重试与
+		// ops 排障（不回传）。
+		message := sanitizeUpstreamErrorMessage(strings.TrimSpace(string(body)))
 		if message == "" {
 			message = resp.Status
 		}

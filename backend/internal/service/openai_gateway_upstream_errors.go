@@ -542,7 +542,8 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		if contentType == "" {
 			contentType = "application/json"
 		}
-		c.Data(resp.StatusCode, contentType, body)
+		// 恒透传保持不变，但 error 文案先做身份打码（ops 标记仍用原始文本）。
+		c.Data(resp.StatusCode, contentType, sanitizeUpstreamErrorBodyForClient(body, sanitizeUpstreamErrorMessage(cyberMsg)))
 		if cyberMsg == "" {
 			return nil, fmt.Errorf("openai cyber_policy: %d", resp.StatusCode)
 		}
@@ -789,7 +790,8 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 			UpstreamStatus: resp.StatusCode,
 		})
 		setOpsUpstreamError(c, resp.StatusCode, cyberMsg, truncateString(string(body), 2048))
-		clientMsg := cyberMsg
+		// 客户端可见文案做身份打码；ops 标记与返回错误保留原始文本。
+		clientMsg := sanitizeUpstreamErrorMessage(cyberMsg)
 		if clientMsg == "" {
 			clientMsg = "Request blocked by upstream cyber-security policy"
 		}

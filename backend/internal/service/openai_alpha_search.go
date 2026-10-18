@@ -122,6 +122,14 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	if contentType == "" {
 		contentType = "application/json"
 	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		// 非 2xx 透传给客户端前对 error 文案做身份打码，避免上游错误文本携带
+		// 池化账号邮箱 / 组织标识直达租户（2026-10-18 客户端泄露面修复）。
+		respBody = sanitizeUpstreamErrorBodyForClient(
+			respBody,
+			sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody))),
+		)
+	}
 	c.Data(resp.StatusCode, contentType, respBody)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		// 非 2xx（错误/重定向）已原样透传给客户端：不是一次成功的搜索，不计费。
@@ -199,6 +207,11 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 		if contentType == "" {
 			contentType = "application/json"
 		}
+		// 与 standalone 端点同口径：非 2xx 透传前对 error 文案做身份打码。
+		respBody = sanitizeUpstreamErrorBodyForClient(
+			respBody,
+			sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody))),
+		)
 		c.Data(resp.StatusCode, contentType, respBody)
 		return nil, nil
 	}

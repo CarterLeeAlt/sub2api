@@ -340,6 +340,50 @@ antigravity 三个流式 handler 的 keepalive 采用固定 Ticker + 守卫（`t
 - `sanitize_upstream_error_message_test.go`（打码矩阵）
 - `openai_codex_account_identity_compact_test.go`（compact scope）
 
+## 2026-10-18 客户端泄露面修复轮（Codex/Claude 错误回传专项）
+
+v0.2.17 合并（`86f2f69ff`）后的第四轮分区审查（Codex WS / Claude HTTP / 透传直通 / Codex 工具端点），聚焦「上游错误文案与账号级模型映射未消毒直达租户」。凭据面复核干净（token/x-api-key/cookie/chatgpt-account-id 无回写路径，响应头白名单无全量转发），本轮修复以下五处均为**上游代码固有**（非 fork 引入）的行为缺口。上游同步时必须复核以下决策（不向上游提 PR，按用户 2026-10-18 指示长期维持 fork 内修复）：
+
+### H1：Codex WS 错误帧文案打码（三条 WS 路径全覆盖）
+
+- 此前 `sanitizeOpenAICapacityShedErrorCodeForClient` 只改写容量降载错误码，注释明写「错误消息原样保留」；HTTP 路径 108 处消毒调用，WS 三文件 0 处——而 WS 是 Codex CLI 主传输。
+- 新增 `sanitizeOpenAIClientVisibleErrorPayload`（`openai_gateway_passthrough.go`，紧邻容量改写函数）：对 `error` / `response.failed` 事件的 `message`、`error.message`、`response.error.message` 三条路径做 `sanitizeUpstreamErrorMessage` 打码，事件结构与其余字段不动；沿用既有纪律——**只改客户端写出副本**，账号状态判定 / 监控 / 日志继续用原始 payload。
+- 接线五处写出点：ctx_pool ingress（`openai_ws_forwarder_ingress.go`，容量改写后链式调用）、v2 error 事件流式与非流式 `c.JSON`（`openai_ws_forwarder_v2.go` 两处流式 + 非流式 message 单独打码，ops 与返回错误保留原文）、http_bridge 主中继与 `finalizeBareError` 收尾（`openai_ws_http_bridge.go`）。
+
+### H2：Claude 400 响应体消毒后回写（原「原样透传」撤销）
+
+- `gateway_upstream_response.go` `handleErrorResponse` 的 `case 400` 此前 `c.Data(..., body)` 原样回写上游 400 体（上方注释还写着「不透传上游详细信息」），可达 Claude OAuth 主链路、Anthropic API-key 透传、Bedrock 及部分 OpenAI 兼容路径。
+- 新增 `sanitizeUpstreamErrorBodyForClient`：合法 JSON 体只对 `error.message`（及 `error` 为字符串的退化形态）打码，`error.type`/`param`/`code` 与不含 error 文案的结构化字段（如 OpenAI 风格 `detail`）保持原样；**非 JSON 体**（代理 HTML 错误页等）不再透传原文，回退为以消毒摘要重建的最小 OpenAI 形状错误体。摘要复用函数内已算好的 `upstreamMsg`。
+- 明确不收回的既有行为：400 仍透传状态码与结构（客户端需要 invalid_request 细节）；401/403/429/5xx 的通用化错误本来就不透传原文。
+
+### H3：Anthropic 透传与国产原生直通的流式错误帧打码 + 响应 model 回填
+
+- 新增 `sanitizeAnthropicPassthroughSSELineForClient`（`gateway_anthropic_passthrough.go`）：对单行 SSE 的 `data:` 载荷做两件事——`type=="error"` 时打码 `error.message`；账号级模型映射（上游名 ≠ 客户端请求名）时把 `message_start` 的 `message.model` 回填为客户端请求名（仅当其等于上游名，防误改）。非 data 行、非 error 事件、`[DONE]` 原样返回；usage 解析与观测仍用原始行。
+- 接线：Anthropic API-key 透传流式（`handleStreamingResponseAnthropicAPIKeyPassthrough` 签名增加 `originalModel`）与国产原生 Anthropic 直通流式（`openai_gateway_messages_anthropic_native.go`，`upstreamModel`/`originalModel` 已在作用域）。
+- 非流式 model 回填：透传 `handleNonStreamingResponseAnthropicAPIKeyPassthrough`（签名增加 `requestModel`/`originalModel`）与国产原生 `handleNativeAnthropicBufferedResponse`，均按 OAuth 主链路的 `replaceModelInResponseBody` 口径，仅在有映射时回填。此前后续路径的响应 `model` 暴露账号内部真实模型名。
+
+### H4：Codex 工具端点错误消毒（alpha-search / cyber_policy / models-manifest）
+
+- `/alpha/search` standalone 与 Responses-WebSearch 兜底两处非 2xx 透传（`openai_alpha_search.go`）：`c.Data` 前过 `sanitizeUpstreamErrorBodyForClient`。
+- `cyber_policy` 恒透传保持（需求 1 不变），但 Responses 原生分支的 body 过消毒函数；compat 分支（Chat Completions / Anthropic 格式）的 `clientMsg` 改为 `sanitizeUpstreamErrorMessage(cyberMsg)`。ops 标记（`MarkOpsCyberPolicy`/`setOpsUpstreamError`）保留原始文本。
+- Codex models manifest 上游错误（`openai_codex_models_service.go`）：拼进 `OPENAI_CODEX_MODELS_UPSTREAM_FAILED` 的上游 body 片段先打码——该消息经 handler `infraerrors.Message` 原样返回给该分组任意 API Key 持有者；`body` 字段本体保留原文供重试与 ops（不回传）。
+
+### 明确不修（本轮复核后维持现状）
+
+- `x-codex-primary/secondary-used-percent` 等配额头强制回传：官方 CLI 协议需要，FORK_NOTES 既有取舍。
+- `x-request-id` / `x-ratelimit-*` / `retry-after` 回传：同上。
+- 消毒器不覆盖裸 UUID 与 `chatgpt_account_id`：本轮五个修复点均以 message 文本为主，扩正则有误伤面（request-id、模型名），留待有实际泄露样本再收紧。
+- API-key 账号路径的客户端 UA / 身份头透传、`x-claude-code-session-id` 跨租户可碰撞：自有账号常规代理行为 + 已知取舍，与 2026-09-25 轮结论一致。
+
+### 测试稳定化（顺带，同 COMMIT）
+
+- `model_protocol_catalog_test.go` 的 `TestCommandCodeGatewayPassesThroughCatalogProtocols`：两次 forward 的 base 地址原用 `time.Now().UnixNano()` 生成，Windows 时钟粒度下取值相同会让两次的目录缓存 key 碰撞，而「目录不可用」store 只设退避、不清除已缓存目录（`modelProtocolCatalog.store` 语义），回落断言读到第一次的目录而误报（实测 HEAD 上单独 `-count=5` 即 4/5 失败）。改为测试内单调计数器生成 base，`-count=10` 全绿。与 CUSTOM-005/013/015/016 同类的上游测试 Windows 计时加固，上游同步时保留。
+
+### 新增回归测试
+
+- `sanitize_client_visible_error_test.go`：`sanitizeUpstreamErrorBodyForClient`（Anthropic/OpenAI 形态打码、error 字符串退化、干净不动、非 JSON 回退、空摘要兜底）、`sanitizeAnthropicPassthroughSSELineForClient`（error 打码、model 回填、同名不改、非 data 行原样）、`sanitizeOpenAIClientVisibleErrorPayload`（顶层/嵌套 message、非错误事件、非法 JSON）。
+- 既有测试适配：`gateway_anthropic_apikey_passthrough_test.go`（10 处流式调用补第二模型参数）、`gateway_non_streaming_response_test.go`（3 处非流式调用补空模型参数，行为不变）。
+
 ## 已被上游吸收
 
 ### 管理端用量推理强度展示（`upstreamed`，2026-09-05）

@@ -291,6 +291,49 @@ func SanitizeUpstreamErrorMessage(message string) string {
 	return sanitizeUpstreamErrorMessage(message)
 }
 
+// sanitizeUpstreamErrorBodyForClient 把上游错误响应体改写为可安全回传客户端的
+// 形态。合法 JSON 体只对 error 文案做身份打码（error.message，以及 error 本身是
+// 字符串的退化形态；复用 sanitizeUpstreamErrorMessage 的邮箱 / org_/acct_/usr_/
+// proj_/sess_ 标识 / sk- 片段 / URL 凭据规则），结构与其余字段（error.type、
+// param、code、以及不含 error 文案的结构化字段如 OpenAI 风格的 detail）保持
+// 不变。体不是合法 JSON（代理 HTML 错误页等）时不再透传原文，回退为以消毒摘要
+// 重建的最小 OpenAI 形状错误体。sanitizedSummary 必须是已经消毒过的摘要文本。
+func sanitizeUpstreamErrorBodyForClient(body []byte, sanitizedSummary string) []byte {
+	if gjson.ValidBytes(body) {
+		if msg := gjson.GetBytes(body, "error.message"); msg.Exists() && msg.Type == gjson.String {
+			masked := sanitizeUpstreamErrorMessage(msg.String())
+			if masked != msg.String() {
+				if updated, err := sjson.SetBytes(body, "error.message", masked); err == nil {
+					return updated
+				}
+			}
+			return body
+		}
+		if errField := gjson.GetBytes(body, "error"); errField.Exists() && errField.Type == gjson.String {
+			masked := sanitizeUpstreamErrorMessage(errField.String())
+			if masked != errField.String() {
+				if updated, err := sjson.SetBytes(body, "error", masked); err == nil {
+					return updated
+				}
+			}
+			return body
+		}
+		// 结构化但不含 error 文案的体（如 {"detail":"Not Found"}）没有已知的
+		// 身份承载字段，保持原样透传。
+		return body
+	}
+	// 无法解析的上游体（HTML 错误页等）不含任何客户端需要的信息，不透传原文。
+	message := strings.TrimSpace(sanitizedSummary)
+	if message == "" {
+		message = "Upstream request rejected"
+	}
+	quoted, err := json.Marshal(message)
+	if err != nil {
+		quoted = []byte(`"Upstream request rejected"`)
+	}
+	return []byte(`{"error":{"message":` + string(quoted) + `,"type":"upstream_error"}}`)
+}
+
 func extractUpstreamErrorMessage(body []byte) string {
 	// Claude 风格：{"type":"error","error":{"type":"...","message":"..."}}
 	if m := gjson.GetBytes(body, "error.message").String(); strings.TrimSpace(m) != "" {
@@ -477,7 +520,10 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 
 	switch resp.StatusCode {
 	case 400:
-		c.Data(http.StatusBadRequest, "application/json", body)
+		// 400 原样透传曾把上游错误体（可能含池化账号邮箱 / 组织标识）直接交给
+		// 客户端；改为对 error 文案做身份打码后再回写，结构保持不变，无法安全
+		// 改写时回退为消毒摘要重建的最小错误体（2026-10-18 客户端泄露面修复）。
+		c.Data(http.StatusBadRequest, "application/json", sanitizeUpstreamErrorBodyForClient(body, upstreamMsg))
 		summary := upstreamMsg
 		if summary == "" {
 			summary = truncateForLog(body, 512)

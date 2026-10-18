@@ -756,18 +756,23 @@ readLoop:
 				flushBufferedStreamEvents("error_event")
 				// 客户端写出副本改写容量降载码：server_is_overloaded / slow_down 对
 				// Codex 判致命，须改为可退避码（与 HTTP SSE / ctx_pool / http_bridge
-				// 三条路径对齐）。独立变量副本保证上方账号状态判定仍用原始 payload。
+				// 三条路径对齐）。独立变量副本保证上方账号状态判定仍用原始 payload；
+				// 错误文案随后做身份打码（同口径）。
 				clientMessage := message
 				if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
+					clientMessage = rewritten
+				}
+				if rewritten, changed := sanitizeOpenAIClientVisibleErrorPayload(clientMessage); changed {
 					clientMessage = rewritten
 				}
 				emitStreamMessage(clientMessage, true)
 			}
 			if !reqStream {
+				// 非流式错误体的 message 同样做身份打码；ops 与返回错误保留原文。
 				c.JSON(statusCode, gin.H{
 					"error": gin.H{
 						"type":    "upstream_error",
-						"message": errMsg,
+						"message": sanitizeUpstreamErrorMessage(errMsg),
 					},
 				})
 			}
@@ -820,10 +825,14 @@ readLoop:
 			} else {
 				flushBufferedStreamEvents(eventType)
 				// 客户端写出副本改写容量降载码（仅 error/response.failed，
-				// 与 ctx_pool ingress 口径一致；账号状态判定仍用原始 message）。
+				// 与 ctx_pool ingress 口径一致；账号状态判定仍用原始 message），
+				// 随后对错误文案做身份打码。
 				clientMessage := message
 				if eventType == "error" || eventType == "response.failed" {
 					if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
+						clientMessage = rewritten
+					}
+					if rewritten, changed := sanitizeOpenAIClientVisibleErrorPayload(clientMessage); changed {
 						clientMessage = rewritten
 					}
 				}

@@ -272,6 +272,10 @@ func (s *OpenAIGatewayService) handleNativeAnthropicBufferedResponse(
 	if contentType == "" {
 		contentType = "application/json"
 	}
+	// 账号级模型映射时把响应 model 还原为客户端请求名，与 OAuth 主链路口径一致。
+	if upstreamModel != "" && originalModel != "" && upstreamModel != originalModel {
+		body = s.replaceModelInResponseBody(body, upstreamModel, originalModel)
+	}
 	body = reverseToolNamesIfPresent(c, body)
 	c.Data(resp.StatusCode, contentType, body)
 
@@ -475,6 +479,11 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 
 			if !clientDisconnected {
 				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
+				// 客户端写出副本：error 帧文案打码 + 上游模型名回填（usage 解析与
+				// 观测上方已用原始行完成）。
+				if rewritten, changed := sanitizeAnthropicPassthroughSSELineForClient(restored, upstreamModel, originalModel); changed {
+					restored = rewritten
+				}
 				if _, err := io.WriteString(w, restored); err != nil {
 					clientDisconnected = true
 					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)

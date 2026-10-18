@@ -254,7 +254,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	var firstTokenMs *int
 	var clientDisconnect bool
 	if input.RequestStream {
-		streamResult, err := s.handleStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account, input.StartTime, input.RequestModel)
+		streamResult, err := s.handleStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account, input.StartTime, input.RequestModel, input.OriginalModel)
 		if err != nil {
 			// 流中断时保留已观测到的 usage 与错误一起返回，避免上游已计量的请求
 			// 完全漏记漏计费（issue #5148）。
@@ -267,7 +267,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 		firstTokenMs = streamResult.firstTokenMs
 		clientDisconnect = streamResult.clientDisconnect
 	} else {
-		usage, err = s.handleNonStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account)
+		usage, err = s.handleNonStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account, input.RequestModel, input.OriginalModel)
 		if err != nil {
 			return nil, err
 		}
@@ -377,6 +377,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	account *Account,
 	startTime time.Time,
 	model string,
+	originalModel string,
 ) (*streamingResult, error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
@@ -553,6 +554,11 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 
 			if !clientDisconnected {
 				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
+				// 客户端写出副本：error 帧文案打码 + 上游模型名回填（usage 解析与
+				// 观测上方已用原始行完成）。
+				if rewritten, changed := sanitizeAnthropicPassthroughSSELineForClient(restored, model, originalModel); changed {
+					restored = rewritten
+				}
 				if _, err := io.WriteString(w, restored); err != nil {
 					clientDisconnected = true
 					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
@@ -620,6 +626,50 @@ func extractAnthropicSSEDataLine(line string) (string, bool) {
 		start++
 	}
 	return line[start:], true
+}
+
+// sanitizeAnthropicPassthroughSSELineForClient 对 Anthropic 透传 / 国产原生直通
+// 中继的单行 SSE 做客户端侧改写（2026-10-18 客户端泄露面修复）：
+//   - error 事件：error.message 做身份打码（邮箱、上游组织/账号标识、key 片段、
+//     URL 凭据参数），事件结构不变；
+//   - 模型回填：上游模型名与客户端请求名不一致（账号级模型映射）时，把
+//     message.model 还原为客户端请求的原始名，避免暴露账号内部映射。
+//
+// 其余行原样返回。第二返回值表示是否发生改写。usage 解析与观测继续使用原始行。
+func sanitizeAnthropicPassthroughSSELineForClient(line string, upstreamModel, originalModel string) (string, bool) {
+	data, ok := extractAnthropicSSEDataLine(line)
+	if !ok {
+		return line, false
+	}
+	payload := strings.TrimSpace(data)
+	if payload == "" || payload == "[DONE]" || !gjson.Valid(payload) {
+		return line, false
+	}
+	updated := payload
+	changed := false
+	if gjson.Get(updated, "type").String() == "error" {
+		if msg := gjson.Get(updated, "error.message"); msg.Exists() && msg.Type == gjson.String && strings.TrimSpace(msg.String()) != "" {
+			masked := sanitizeUpstreamErrorMessage(msg.String())
+			if masked != msg.String() {
+				if next, err := sjson.Set(updated, "error.message", masked); err == nil {
+					updated = next
+					changed = true
+				}
+			}
+		}
+	}
+	if originalModel != "" && upstreamModel != "" && upstreamModel != originalModel {
+		if model := gjson.Get(updated, "message.model"); model.Exists() && model.Type == gjson.String && model.Str == upstreamModel {
+			if next, err := sjson.Set(updated, "message.model", originalModel); err == nil {
+				updated = next
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return line, false
+	}
+	return line[:len(line)-len(data)] + updated, true
 }
 
 // parseSSEUsagePassthrough 从 Anthropic SSE data 行提取 usage（包级函数：
@@ -850,6 +900,8 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 	resp *http.Response,
 	c *gin.Context,
 	account *Account,
+	requestModel string,
+	originalModel string,
 ) (*ClaudeUsage, error) {
 	if s.rateLimitService != nil {
 		s.rateLimitService.UpdateSessionWindow(ctx, account, resp.Header)
@@ -884,6 +936,10 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if contentType == "" {
 		contentType = "application/json"
+	}
+	// 账号级模型映射时把响应 model 还原为客户端请求名，与 OAuth 主链路口径一致。
+	if requestModel != "" && originalModel != "" && requestModel != originalModel {
+		body = s.replaceModelInResponseBody(body, requestModel, originalModel)
 	}
 	body = reverseToolNamesIfPresent(c, body)
 	c.Data(resp.StatusCode, contentType, body)

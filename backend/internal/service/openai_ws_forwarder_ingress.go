@@ -1371,6 +1371,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
 						clientMessage = rewritten
 					}
+					if rewritten, changed := sanitizeOpenAIClientVisibleErrorPayload(clientMessage); changed {
+						clientMessage = rewritten
+					}
 				}
 				if err := writeClientMessage(clientMessage); err != nil {
 					if isOpenAIWSClientDisconnectError(err) {
