@@ -73,7 +73,7 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - 构建前运行本 fork 的 OpenAI 定向回归测试；
 - 仅在回归测试通过后构建 `linux/amd64` 镜像；
 - 将完整 Git commit 写入镜像标签、OCI revision 和前后端构建信息。
-- Docker 后端构建镜像的 Go 版本必须与 `backend/go.mod` 声明严格一致；当前两者均为 `1.27.0`。
+- Docker 后端构建镜像的 Go 版本必须与 `backend/go.mod` 声明严格一致；当前两者均为 `1.27.3`。
 
 主要文件：
 
