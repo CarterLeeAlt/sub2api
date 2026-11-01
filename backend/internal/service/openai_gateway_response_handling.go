@@ -1845,13 +1845,10 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		}
 		return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 	}
-	finalResponse, ok := extractCodexFinalResponse(bodyText)
+	finalResponse, ok := extractOpenAINonStreamingFinalResponse(bodyText, terminalType, terminalPayload)
 
 	usage := s.parseSSEUsageFromBody(bodyText)
 	if ok {
-		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
-			*usage = parsedUsage
-		}
 		// When the terminal event has an empty output array, reconstruct
 		// output from accumulated delta events so the client gets full content.
 		// gjson Array() returns empty slice for null, missing, or empty arrays.
@@ -1902,6 +1899,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		}
 	}
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
+		if ok {
+			c.Writer.Header().Set("Content-Type", contentType)
+		}
 		c.Data(resp.StatusCode, contentType, body)
 	}
 
@@ -1913,6 +1913,18 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
 		searchCount:      countGrokNativeSearchCallsFromSSEBody(bodyText),
 	}, nil
+}
+
+// extractOpenAINonStreamingFinalResponse also unwraps partial/cancelled responses;
+// their status and partial output must survive conversion for stream=false clients.
+func extractOpenAINonStreamingFinalResponse(body, terminalType string, terminalPayload []byte) ([]byte, bool) {
+	switch terminalType {
+	case "response.incomplete", "response.cancelled", "response.canceled":
+		if response := gjson.GetBytes(terminalPayload, "response"); response.IsObject() {
+			return []byte(response.Raw), true
+		}
+	}
+	return extractCodexFinalResponse(body)
 }
 
 func extractOpenAISSETerminalEvent(body string) (string, []byte, bool) {

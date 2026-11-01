@@ -912,14 +912,11 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 						feedOpenAIImageOutputCounters(imageCounters, payload)
 						recordPrior(&event)
 						if response := openAICompatTerminalResponse(&event, []byte(payload)); isOpenAICompatResponsesTerminalEvent(event.Type) && response != nil {
-							if event.Usage != nil {
-								usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
-								if response.Usage == nil {
-									response.Usage = event.Usage
-								}
+							if event.Usage != nil && response.Usage == nil {
+								response.Usage = event.Usage
 							}
-							if response.Usage != nil {
-								usage = copyOpenAIUsageFromResponsesUsage(response.Usage)
+							if rawResponse := gjson.Get(payload, "response"); rawResponse.IsObject() {
+								s.parseSSEUsageBytesWithType([]byte(rawResponse.Raw), event.Type, &usage)
 							}
 							return response, usage, acc, prior, nil
 						}
@@ -963,14 +960,13 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 			recordPrior(&event)
 
 			if response := openAICompatTerminalResponse(&event, []byte(payload)); isOpenAICompatResponsesTerminalEvent(event.Type) && response != nil {
-				if event.Usage != nil {
-					usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
-					if response.Usage == nil {
-						response.Usage = event.Usage
-					}
+				if event.Usage != nil && response.Usage == nil {
+					response.Usage = event.Usage
 				}
-				if response.Usage != nil {
-					usage = copyOpenAIUsageFromResponsesUsage(response.Usage)
+				// Preserve raw field presence and the existing nested-usage priority;
+				// struct copies would erase progressive details omitted by the terminal.
+				if rawResponse := gjson.Get(payload, "response"); rawResponse.IsObject() {
+					s.parseSSEUsageBytesWithType([]byte(rawResponse.Raw), event.Type, &usage)
 				}
 				return response, usage, acc, prior, nil
 			}
