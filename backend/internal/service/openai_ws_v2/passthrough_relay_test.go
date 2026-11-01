@@ -948,6 +948,8 @@ func TestRelay_BeforeWriteClientTracksDownstreamPerTurn(t *testing.T) {
 	defer cancel()
 
 	wroteStates := make(chan bool, 3)
+	firstWriteReturned := make(chan struct{})
+	releaseFirstWrite := make(chan struct{})
 	done := make(chan *RelayExit, 1)
 	stopErr := errors.New("stop after second-turn error")
 	go func() {
@@ -956,13 +958,24 @@ func TestRelay_BeforeWriteClientTracksDownstreamPerTurn(t *testing.T) {
 			clientConn,
 			upstreamConn,
 			[]byte(`{"type":"response.create","model":"gpt-5.3-codex","input":[]}`),
-			RelayOptions{BeforeWriteClient: func(_ coderws.MessageType, payload []byte, wroteDownstream bool) error {
-				wroteStates <- wroteDownstream
-				if strings.Contains(string(payload), `"type":"error"`) {
-					return stopErr
-				}
-				return nil
-			}},
+			RelayOptions{
+				BeforeWriteClient: func(_ coderws.MessageType, payload []byte, wroteDownstream bool) error {
+					wroteStates <- wroteDownstream
+					if strings.Contains(string(payload), `"type":"error"`) {
+						return stopErr
+					}
+					return nil
+				},
+				AfterClientWrite: func(_ coderws.MessageType, payload []byte, _ error) {
+					if strings.Contains(string(payload), `"id":"resp_first"`) {
+						close(firstWriteReturned)
+						select {
+						case <-releaseFirstWrite:
+						case <-ctx.Done():
+						}
+					}
+				},
+			},
 		)
 		done <- relayExit
 	}()
@@ -973,13 +986,20 @@ func TestRelay_BeforeWriteClientTracksDownstreamPerTurn(t *testing.T) {
 		payload: []byte(`{"type":"response.completed","response":{"id":"resp_first","usage":{"input_tokens":1,"output_tokens":1}}}`),
 	}
 	require.False(t, <-wroteStates)
-	require.Eventually(t, func() bool { return len(clientConn.Writes()) == 1 }, time.Second, time.Millisecond)
+	select {
+	case <-firstWriteReturned:
+	case <-time.After(time.Second):
+		t.Fatal("first downstream write did not return")
+	}
 
 	clientConn.readCh <- passthroughTestFrame{
 		msgType: coderws.MessageText,
 		payload: []byte(`{"type":"response.create","model":"gpt-5.3-codex","input":[]}`),
 	}
 	require.Eventually(t, func() bool { return len(upstreamConn.Writes()) == 2 }, time.Second, time.Millisecond)
+	// The client may start the next turn as soon as it receives the previous
+	// terminal, before the relay finishes recording that downstream write.
+	close(releaseFirstWrite)
 	upstreamConn.readCh <- passthroughTestFrame{
 		msgType: coderws.MessageText,
 		payload: []byte(`{"type":"error","error":{"type":"usage_limit_reached"}}`),
