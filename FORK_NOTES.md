@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`b0a02a330`](https://github.com/Wei-Shaw/sub2api/commit/b0a02a330)（`v0.2.17` 之后仅 1 个 VERSION 同步提交，覆盖 `v0.2.14`～`v0.2.17` 四版本） |
-| 最近一次上游合并提交 | [`86f2f69ff`](https://github.com/CarterLeeAlt/sub2api/commit/86f2f69ff) |
+| 当前已同步上游节点 | [`dece26153`](https://github.com/Wei-Shaw/sub2api/commit/dece26153621959ccd7635814f4b2d08304e681a)（稳定标签 `v0.2.19`） |
+| 上一次同步合并提交 | [`86f2f69ff`](https://github.com/CarterLeeAlt/sub2api/commit/86f2f69ff) |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。自 2026-10-03 起按项目指令（`AGENTS.md` 分支策略）不再创建 `backup/*` 备份分支，回滚点以合并前提交哈希记录。
 
@@ -424,6 +424,19 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-11-01：同步稳定版 `v0.2.19`
+
+- 起点为安全修复提交 `30daab4ed5eb2ffc090185adc391586376213a90`，共同祖先为 `b0a02a3304a0a78cdd003ddda1dd23ba02c03084`，上游固定到标签提交 `dece26153621959ccd7635814f4b2d08304e681a`。采用普通 `--no-ff --no-commit` merge；上游侧 115 个提交、353 个变更文件，其中 61 个文件与 fork 改动重叠。上游 `main` 在该标签之后的管理 MCP/OAuth 等 16 个提交不在本轮范围内。
+- 虚拟试合并与实际合并均出现 7 个冲突文件：`backend/go.sum`、`backend/internal/repository/account_repo.go`、`backend/internal/service/admin_account.go`、`backend/internal/service/openai_gateway_chat_completions.go`、`backend/internal/service/openai_gateway_messages.go`、`frontend/package.json`、`frontend/pnpm-lock.yaml`。
+- 账号仓储将上游的受限管理员事务作用域与 fork 的 Codex 429 状态清除、原子 outbox 及单调额度更新组合；额外字段更新在共用的 `updateExtraGuarded` 层切换事务作用域，覆盖普通更新和带代际守卫的更新。创建账号后的隐私设置在事务提交后启动，同时保留调用方接管标记、独立账号副本和后台上下文。阈值协调在普通管理员路径仍同步完成，在受限管理员事务路径延迟到提交成功后执行，避免独立连接等待外层行锁及提前发布运行态；回滚和提交失败不执行协调。
+- 缓冲 Responses 读取器同时保留上游 Grok 原始模型审计返回值与 fork 原始 payload 图片计数器，调用方按合并后的签名适配。自动合并后的 OAuth 模型清单分支补齐新增的请求返回槽位；新增受限管理员用量投影从服务层记录读取账号 ID，普通用户用量 DTO 继续不含该字段。新增测试夹具补齐 fork 现有的 `RateLimitService` 构造参数，Wire 使用 `v0.7.0` 重新生成。
+- 保留 Go `1.27.3`、Node `24.22.2`、pnpm `9.15.9` 和本轮前已验证的安全依赖：`lib/pq 1.12.3`、`x/net 0.62.0`、DOMPurify `3.4.17`、`follow-redirects 1.16.2`、Vue I18n/消息编译器 `11.4.14`、`decode-uri-component 0.5.1`。上游稳定版的前端依赖变更已由 fork 安全升级覆盖，前端清单与锁文件保持本轮起点内容。标签源码的 `VERSION` 为 `0.2.18`，本地工作树对齐为 `0.2.19`。
+- 接入稳定版的流式计费收尾、Vertex 账号额度、生图权限门、按实际出图张数计费、按操作与资源范围授权的管理员 API Key、Grok 模型目录诊断等改动。按用户确认采用 Grok Fast 官方默认价卡修正；新的 `image_count_billing` 开关默认关闭。
+- 迁移 `246`～`248` 保持上游原文。`246` 将已有 Gemini/Antigravity 分组的生图开关设为开启，Composite 分组不在该更新范围内，关闭的 Composite 分组会被新权限门拒绝 Gemini 生图。此处记录升级行为，本轮不处理生产数据。
+- 专项检查确认 247 个上游本轮未触及的 fork 差异路径保持原样，凭据/用量脱敏、安全版本及退役功能删除状态保留；新增回归覆盖在 bucket 版本不变时，账号阈值与 WHAM 元数据更新对进程内快照的失效与刷新，以及阈值协调在事务提交、回滚、提交失败时的执行边界。
+- 验证：后端构建、全后端 `go test -tags=unit ./... -count=1 -timeout=15m -p=4`、关键定向回归、Linux/amd64 嵌入前端构建通过；前端冻结锁文件安装、类型检查、376 个测试文件共 3007 项 Vitest 测试、生产构建通过，并实际渲染检查本地静态预览登录页。后端符号级漏洞扫描无未批准的可达漏洞，前端生产依赖审计例外校验通过（保留现有两条 `xlsx` 例外）。gofmt 和 `git diff --check` 通过。
+- 未验证项：本机没有 Docker 命令，未运行隔离数据库集成测试；需要 `SCOPED_ADMIN_TEST_DSN` 的真实 PostgreSQL 测试按缺少隔离测试库跳过。迁移源文件与上游一致，静态迁移契约测试通过，这不代表已执行真实数据库迁移。
 
 ### 2026-10-17：同步至上游 `b0a02a330`（v0.2.14～v0.2.17）
 

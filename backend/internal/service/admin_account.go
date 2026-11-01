@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -542,33 +543,35 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		}
 	}
 
-	// OAuth 账号：创建后异步设置隐私。使用独立后台上下文，避免 HTTP
-	// 请求结束或客户端断开后取消隐私设置请求。
-	if account.Type == AccountTypeOAuth && !input.SkipAutomaticPrivacySetup {
-		privacyAccount := *account
-		privacyAccount.Extra = maps.Clone(account.Extra)
-		switch account.Platform {
-		case PlatformOpenAI:
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("create_account_openai_privacy_panic", "account_id", privacyAccount.ID, "recover", r)
-					}
+	AfterAccountCommit(ctx, func(_ context.Context) {
+		// 提交后才启动隐私设置，并使用独立副本与后台上下文。
+		// 调用方已接管隐私设置时跳过，保持同一账号只执行一次。
+		if account.Type == AccountTypeOAuth && !input.SkipAutomaticPrivacySetup {
+			privacyAccount := *account
+			privacyAccount.Extra = maps.Clone(account.Extra)
+			switch privacyAccount.Platform {
+			case PlatformOpenAI:
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("create_account_openai_privacy_panic", "account_id", privacyAccount.ID, "recover", r)
+						}
+					}()
+					mode := s.EnsureOpenAIPrivacy(context.Background(), &privacyAccount)
+					slog.Info("create_account_openai_privacy_done", "account_id", privacyAccount.ID, "mode", mode)
 				}()
-				mode := s.EnsureOpenAIPrivacy(context.Background(), &privacyAccount)
-				slog.Info("create_account_openai_privacy_done", "account_id", privacyAccount.ID, "mode", mode)
-			}()
-		case PlatformAntigravity:
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("create_account_antigravity_privacy_panic", "account_id", privacyAccount.ID, "recover", r)
-					}
+			case PlatformAntigravity:
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("create_account_antigravity_privacy_panic", "account_id", privacyAccount.ID, "recover", r)
+						}
+					}()
+					s.EnsureAntigravityPrivacy(context.Background(), &privacyAccount)
 				}()
-				s.EnsureAntigravityPrivacy(context.Background(), &privacyAccount)
-			}()
+			}
 		}
-	}
+	})
 
 	return account, nil
 }
@@ -676,6 +679,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(normalizedExtra, OllamaCloudUsageSnapshotExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageSnapshotExtraKey)
+		// 目录观察和能力 metadata 只由同步写入。表单里的旧值或注入值不能进入本次更新。
+		delete(normalizedExtra, grokObservedModelsExtraKey)
+		delete(normalizedExtra, UpstreamModelMetadataExtraKey)
 		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
 			"quota_used",
@@ -684,6 +690,8 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			"quota_weekly_used",
 			"quota_weekly_start",
 			grokBillingExtraKey,
+			grokObservedModelsExtraKey,
+			UpstreamModelMetadataExtraKey,
 			UpstreamBillingProbeEnabledExtraKey,
 			UpstreamBillingRateSyncEnabledExtraKey,
 			UpstreamBillingProbeExtraKey,
@@ -911,8 +919,18 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		return nil, err
 	}
 	if s.thresholdReconciler != nil {
-		if err := s.thresholdReconciler.ReconcileAccountSchedulingThresholdPolicy(ctx, updated); err != nil {
-			return nil, err
+		if dbent.TxFromContext(ctx) == nil {
+			if err := s.thresholdReconciler.ReconcileAccountSchedulingThresholdPolicy(ctx, updated); err != nil {
+				return nil, err
+			}
+		} else {
+			// 受限管理员事务仍持有账号行锁；协调器使用独立仓储连接，且会发布
+			// 缓存和运行态变更，因此只能在提交成功后执行。失败时保留原暂停状态。
+			AfterAccountCommit(ctx, func(committedCtx context.Context) {
+				if err := s.thresholdReconciler.ReconcileAccountSchedulingThresholdPolicy(committedCtx, updated); err != nil {
+					slog.Warn("account_scheduling_threshold_post_commit_reconciliation_failed", "account_id", updated.ID, "error", err)
+				}
+			})
 		}
 	}
 	return updated, nil
@@ -1317,10 +1335,16 @@ func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Ac
 	if err := s.accountRepo.ClearTempUnschedulable(ctx, id); err != nil {
 		return nil, err
 	}
-	if s.runtimeBlocker != nil {
-		s.runtimeBlocker.ClearAccountSchedulingBlock(id)
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	return s.accountRepo.GetByID(ctx, id)
+	AfterAccountCommit(ctx, func(context.Context) {
+		if s.runtimeBlocker != nil {
+			s.runtimeBlocker.ClearAccountSchedulingBlock(id)
+		}
+	})
+	return account, nil
 }
 
 func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorMsg string) error {
