@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`dece26153`](https://github.com/Wei-Shaw/sub2api/commit/dece26153621959ccd7635814f4b2d08304e681a)（稳定标签 `v0.2.19`） |
-| 上一次同步合并提交 | [`86f2f69ff`](https://github.com/CarterLeeAlt/sub2api/commit/86f2f69ff) |
+| 当前已同步上游节点 | [`10ba8f9b4`](https://github.com/Wei-Shaw/sub2api/commit/10ba8f9b4dc2e6023d4a9879ab77b21841babd10)（稳定标签 `v0.2.21`） |
+| 前一次稳定版同步合并 | [`e2224a9f5`](https://github.com/CarterLeeAlt/sub2api/commit/e2224a9f5)（`v0.2.19`） |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。自 2026-10-03 起按项目指令（`AGENTS.md` 分支策略）不再创建 `backup/*` 备份分支，回滚点以合并前提交哈希记录。
 
@@ -73,7 +73,7 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - 构建前运行本 fork 的 OpenAI 定向回归测试；
 - 仅在回归测试通过后构建 `linux/amd64` 镜像；
 - 将完整 Git commit 写入镜像标签、OCI revision 和前后端构建信息。
-- Docker 后端构建镜像的 Go 版本必须与 `backend/go.mod` 声明严格一致；当前两者均为 `1.27.3`。
+- Docker 后端构建镜像的 Go 版本必须与 `backend/go.mod` 声明严格一致；当前两者均为 `1.27.4`。
 
 主要文件：
 
@@ -276,6 +276,26 @@ antigravity 三个流式 handler 的 keepalive 采用固定 Ticker + 守卫（`t
 - `backend/internal/service/gemini_sse_comment_compat_test.go`
 - `backend/internal/service/antigravity_gateway_compat_test.go`
 
+### CUSTOM-017：缓冲响应可靠性与 WebSocket 逐轮状态（`active`）
+
+- GPT 非流式入口按实际 SSE 帧识别响应，完整、不完整及取消终态统一返回 JSON；保留自定义工具恢复和渐进用量，JSON 文本中的 SSE 字样不触发误判。
+- Claude 的 Chat Completions／Responses 缓冲路径共用带空闲超时的读取器；失败或截断流不返回成功结果，可重试流内错误继续交给账号切换，客户端断开后只收集用量。
+- WebSocket 下行写出标志按请求轮次隔离，切换轮次使用独立原子状态；终端结果与客户端断开后的用量收尾共用结果构造，保留响应归属校验与错误脱敏。
+
+主要文件：`backend/internal/service/openai_gateway_response_handling.go`、`openai_gateway_passthrough.go`、`gateway_forward_as_chat_completions.go`、`gateway_forward_as_responses.go`、`openai_ws_forwarder_ingress.go`、`openai_ws_v2/passthrough_relay.go`；对应回归为 `openai_nonstreaming_response_reliability_test.go`、`gateway_anthropic_buffered_failure_test.go` 及 WebSocket 现有测试。
+
+### CUSTOM-018：受限管理员用量读取与本地配额协调（`active`）
+
+额度查询保留上游按操作与账号范围验权，同时使用本地同步、单调的 WHAM 快照持久化。受限管理员的读取权限仅刷新展示快照，不触发阈值停调或配额 429 恢复；普通管理员读取与周期刷新保留现有恢复能力。批量用量接口保留本地恢复账号 ID 返回值，新调用方按四返回值契约接入。快照查询没有自动用卡能力。
+
+主要文件：`backend/internal/service/account_usage_service.go`、`openai_quota_service.go`、`custom_admin_key_statistics_test.go`、`backend/internal/handler/admin/custom_admin_key_statistics.go`。
+
+### CUSTOM-019：阿里云验证码本地测试代理隔离（`active`，仅测试）
+
+真实 SDK 的本地假端点测试把服务器完整 `host:port` 加入测试级 `NO_PROXY`。SDK 按完整主机字符串比较代理排除项，仅配置 `127.0.0.1` 无法排除随机端口。测试结束由 `t.Setenv` 自动恢复环境，外部网络代理配置保持有效。
+
+主要文件：`backend/internal/repository/aliyun_captcha_verifier_test.go`。
+
 ## 2026-09-25 全面审查修复轮（Codex 上游泄露面专项）
 
 第三轮分区审查（入站头透传 / 客户端限制执行 / 响应回传泄露 / 会话与状态隔离）后的修复记录。上游同步时必须复核以下决策：
@@ -424,6 +444,18 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-11-13：同步稳定版 `v0.2.21`
+
+- 合并前恢复基点为 `5d2bc058e6cbec272bfaaa4f2bf5d5ad88805798`，共同祖先为 `dece26153621959ccd7635814f4b2d08304e681a`，目标固定为 `10ba8f9b4dc2e6023d4a9879ab77b21841babd10`。普通 `--no-ff --no-commit` merge 涉及上游 194 个提交、607 个路径，100 个路径与 fork 差异重叠；试合并与实际合并均为 24 个冲突文件。
+- WebSocket 组合逐轮下行状态、逐轮首 token 口径、后续轮限流关闭及联网搜索换连；完整重放输出在共用结果构造器中收集。GPT SSE 聚合保留本地终态和工具恢复逻辑并接入 instructions 回显；Claude 缓冲读取共用已有带超时行泵，接入上游 SSE 限额，清理自动合并产生的重复状态处理。错误透传规则重构后的共用出口继续脱敏。
+- 配额读取组合上游受限管理员验权与本地快照代际、阈值恢复语义，受限只读请求不恢复调度；自动用卡服务与通知机制维持退役。保留本地 Antigravity 单 URL 重试结构，接入上游按图像模型处理 INTERNAL 500 的规则。Wire 按合并后的 provider 图重新生成。
+- 账号列表刷新采用上游保留现有行的行为，并保留 fork 的复选框选择和表单状态保护；新增生图尺寸档位与本地动态主模型选择并存。222 个上游未触及的 fork 差异路径中，217 个保持原样，其余 5 个为本轮批准的 Go 版本配置及维护文档。
+- Go 使用 `1.27.4`，三个 Dockerfile、CI 版本断言及开发文档一致；修复已核实的 `GO-2026-6859` 标准库漏洞。Node `24.22.2`、pnpm `9.15.9`；Vue I18n 与消息编译器 `11.4.16`，保留 fork 的依赖安全升级与覆盖规则。标签源码 `VERSION` 为 `0.2.20`，工作树对齐为 `0.2.21`。
+- 三个新增 SQL 迁移保留上游原文：`249_add_usage_logs_api_key_cost_index_notx.sql`、`249_mcp_oauth.sql`、`250_openai_cache_write_ttl.sql`。迁移器以完整文件名登记，因此两个 `249` 文件均执行；`250` 的上游 EOF 空行保留以保证迁移校验和一致。内存预算配置键为 `gateway.request_body_memory_budget_bytes`，管理 MCP 由 `mcp.public_url` 显式启用。
+- 验证：Go 1.27.4 全后端 `go test -tags=unit ./... -count=1 -timeout=15m -p=4` 通过，另验证受限用量读取保持停调、普通管理员读取继续恢复的回归；`go vet`、模块校验、Windows 服务端构建和 Linux/amd64 嵌入前端构建通过。前端冻结锁文件安装、类型检查、385 个文件共 3106 项 Vitest、生产构建通过；Chrome 157 的隔离 API 页面检查覆盖账号刷新保留行、配额颜色、创建／编辑弹窗、生图档位、设置页浮动保存按钮及窄视口，页面无未捕获异常。Windows 与 Linux 目标符号级扫描无可达漏洞；`x/image` 与 `x/crypto` 合计 6 条仅模块级告警，未命中可达调用。前端生产依赖审计通过既有例外校验。
+- 数据库：使用工作区 PostgreSQL `15.14` 独立测试实例，受限管理员仓储／服务／处理器数据库测试通过；真实执行 300 个旧迁移建立基线，再执行 3 个新增迁移及重复启动校验，确认 OAuth 表、缓存 TTL 字段和并发建立的有效索引。此结果覆盖隔离数据库迁移，不代表生产数据规模下的索引耗时或生产升级。
+- 本地测试通过命令级 PATH 使用工作区 Go、Node、pnpm 和 Git 自带 `sh`，阿里云 SDK 假端点的代理排除项包含随机端口。完整 `integration` 标签套件依赖 Docker，本机无 Docker；本轮使用上述原生隔离 PostgreSQL 验证，未运行 Docker 镜像构建和生产服务联调。
 
 ### 2026-11-01：同步稳定版 `v0.2.19`
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -18,6 +19,8 @@ func newAliyunCaptchaTestTarget(t *testing.T, handler http.HandlerFunc) (*aliyun
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
+	// The SDK matches NO_PROXY against the complete host, including its port.
+	t.Setenv("NO_PROXY", os.Getenv("NO_PROXY")+","+strings.TrimPrefix(server.URL, "http://"))
 
 	verifier := &aliyunCaptchaVerifier{protocol: "HTTP", timeoutMillis: 2_000}
 	cred := service.AliyunCaptchaCredentials{

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	httppool "github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	openaipkg "github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -170,6 +171,21 @@ type UsageProgress struct {
 	LimitRequests    int64        `json:"limit_requests,omitempty"`
 }
 
+// AntigravityQuotaGroup is a group of Antigravity models that share their quota windows.
+type AntigravityQuotaGroup struct {
+	Key         string                    `json:"key"` // bucket prefix, e.g. "gemini" or "3p"
+	Name        string                    `json:"name"`
+	Description string                    `json:"description,omitempty"`
+	Windows     []*AntigravityQuotaWindow `json:"windows"`
+}
+
+// AntigravityQuotaWindow is one window ("5h" or "weekly") of an Antigravity quota group.
+type AntigravityQuotaWindow struct {
+	Window      string     `json:"window"`
+	Utilization float64    `json:"utilization"` // used percentage, 0-100
+	ResetsAt    *time.Time `json:"resets_at"`
+}
+
 // AntigravityModelQuota Antigravity 单个模型的配额信息
 type AntigravityModelQuota struct {
 	Utilization int    `json:"utilization"` // 使用率 0-100
@@ -212,6 +228,9 @@ type UsageInfo struct {
 
 	// Antigravity 多模型配额
 	AntigravityQuota map[string]*AntigravityModelQuota `json:"antigravity_quota,omitempty"`
+	// Antigravity per-group 5-hour and weekly windows (retrieveUserQuotaSummary). Within a group
+	// every model shares both windows; fetchAvailableModels cannot tell the two apart.
+	AntigravityQuotaGroups []*AntigravityQuotaGroup `json:"antigravity_quota_groups,omitempty"`
 
 	// Grok / xAI 被动额度快照
 	GrokRequestQuota       *xai.QuotaWindow `json:"grok_request_quota,omitempty"`
@@ -392,6 +411,9 @@ func batchUsageErrorMessage(err error) string {
 }
 
 func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *Account, forceProbe bool) (*UsageInfo, error) {
+	if err := scopedAccountAccess(ctx, s.accountRepo, account, "accounts.usage.read", true); err != nil {
+		return nil, err
+	}
 	if account == nil {
 		return nil, fmt.Errorf("account is required")
 	}
@@ -420,7 +442,7 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 
 	// Antigravity 平台：使用 AntigravityQuotaFetcher 获取额度
 	if account.Platform == PlatformAntigravity {
-		usage, err := s.getAntigravityUsage(ctx, account)
+		usage, err := s.getAntigravityUsage(ctx, account, forceProbe)
 		if err == nil {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
@@ -520,10 +542,12 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		return usage, nil
 	}
 
-	// Setup Token账号：根据session_window推算（没有profile scope，无法调用usage API）
+	// Setup Token 没有 profile scope，复用响应头采样的窗口数据，不能主动调用 usage API。
 	if account.Type == AccountTypeSetupToken {
+		if supportsAnthropicPassiveUsage(account) {
+			return s.getPassiveUsageForAccount(ctx, account)
+		}
 		usage := s.estimateSetupTokenUsage(account)
-		// 添加窗口统计
 		s.addWindowStats(ctx, account, usage)
 		return usage, nil
 	}
@@ -534,7 +558,7 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 
 // GetUsage 获取账号使用量
 // OAuth账号: 调用Anthropic API获取真实数据（需要profile scope），API响应缓存10分钟，窗口统计缓存1分钟
-// Setup Token账号: 根据session_window推算5h窗口，7d数据不可用（没有profile scope）
+// Setup Token账号: 返回响应头采样的5h/7d窗口；无5h采样时回退到session_window估算
 // API Key账号: 不支持usage查询
 func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64, force ...bool) (*UsageInfo, error) {
 	forceProbe := len(force) > 0 && force[0]
@@ -558,6 +582,16 @@ func (s *AccountUsageService) GetUsageForAccount(ctx context.Context, account *A
 // Anthropic OAuth/SetupToken 统一走 passive 链路，其他账号复用现有主动查询逻辑。
 // 单个账号失败不会中断整批请求，错误会按账号返回。
 func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []int64, force bool) (map[int64]*UsageInfo, map[int64]string, []int64, error) {
+	if adminaccess.RestrictedFromContext(ctx) != nil {
+		if len(accountIDs) > 100 {
+			return nil, nil, nil, fmt.Errorf("账户数量超过限制")
+		}
+		for _, id := range accountIDs {
+			if id <= 0 {
+				return nil, nil, nil, fmt.Errorf("账户 ID 无效")
+			}
+		}
+	}
 	uniqueIDs := make([]int64, 0, len(accountIDs))
 	seen := make(map[int64]struct{}, len(accountIDs))
 	for _, accountID := range accountIDs {
@@ -590,6 +624,13 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 		accountsByID[account.ID] = account
 	}
 
+	if adminaccess.RestrictedFromContext(ctx) != nil {
+		for _, id := range uniqueIDs {
+			if err := scopedAccountAccess(ctx, s.accountRepo, accountsByID[id], "accounts.usage.read", true); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	}
 	var mu sync.Mutex
 	recoveredAccountIDs := make([]int64, 0)
 	g, gctx := errgroup.WithContext(ctx)
@@ -652,6 +693,9 @@ func (s *AccountUsageService) GetPassiveUsage(ctx context.Context, accountID int
 }
 
 func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, account *Account) (*UsageInfo, error) {
+	if err := scopedAccountAccess(ctx, s.accountRepo, account, "accounts.usage.read", false); err != nil {
+		return nil, err
+	}
 	if !supportsAnthropicPassiveUsage(account) {
 		return nil, fmt.Errorf("passive usage only supported for Anthropic OAuth/SetupToken accounts")
 	}
@@ -779,8 +823,9 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		hideUnconfirmedCodexWindows(usage, account.Extra)
 	}
 
+	ctx = WithScopedAdminAccountOperation(ctx, "accounts.usage.read")
 	shouldRefreshSnapshot := force || shouldRefreshOpenAICodexSnapshot(account, usage, now)
-	allowThresholdRecovery := true
+	allowThresholdRecovery := adminaccess.RestrictedFromContext(ctx) == nil
 	// Older lightweight deployments may not wire OpenAIQuotaService. Preserve
 	// their existing WS-header behavior instead of attempting an unauthenticated
 	// /responses probe for every account; production wiring uses /wham/usage.
@@ -817,7 +862,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		// headers, and only before any authoritative presence marker exists.
 		// Production refresh failures preserve the last wham result instead of
 		// letting legacy headers resurrect a stale 5h row.
-		if len(updates) == 0 && s.openAIQuotaService == nil && !account.IsShadow() && !hasCodexWhamWindowPresence(account.Extra) {
+		if len(updates) == 0 && s.openAIQuotaService == nil && !account.IsShadow() && !hasCodexWhamWindowPresence(account.Extra) && adminaccess.RestrictedFromContext(ctx) == nil {
 			if probed, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil {
 				updates = probed
 			}
@@ -1055,6 +1100,9 @@ func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(ctx context.Contex
 	}
 	updateCtx, updateCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer updateCancel()
+	if err := scopedAccountIDAccess(updateCtx, s.accountRepo, accountID, "accounts.usage.read", true); err != nil {
+		return false, err
+	}
 	if expectedWhamUpdatedAt := codexWhamSnapshotGeneration(updates); expectedWhamUpdatedAt != "" {
 		repo, ok := s.accountRepo.(OpenAICodexWhamSnapshotRepository)
 		if !ok {
@@ -1225,45 +1273,49 @@ func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Accou
 	return usage, nil
 }
 
-// getAntigravityUsage 获取 Antigravity 账户额度
-func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
+// cachedAntigravityUsage returns the account's cached usage while it is fresh, unless force is
+// set: a manual refresh (the usage cell's query button, force=true) must reach Google, or an
+// account upgraded or reset upstream keeps showing the old figures for the cache TTL.
+func (s *AccountUsageService) cachedAntigravityUsage(accountID int64, force bool) (*UsageInfo, bool) {
+	if force {
+		return nil, false
+	}
+	cached, ok := s.cache.antigravityCache.Load(accountID)
+	if !ok {
+		return nil, false
+	}
+	cache, ok := cached.(*antigravityUsageCache)
+	if !ok || time.Since(cache.timestamp) >= antigravityCacheTTL(cache.usageInfo) {
+		return nil, false
+	}
+	usage := cache.usageInfo
+	// 重新计算 RemainingSeconds，避免返回过时的剩余秒数
+	recalcAntigravityRemainingSeconds(usage)
+	return usage, true
+}
+
+// getAntigravityUsage 获取 Antigravity 账户额度；force 跳过缓存（仍经 singleflight 合并并发请求）。
+func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
 	if s.antigravityQuotaFetcher == nil || !s.antigravityQuotaFetcher.CanFetch(account) {
 		now := time.Now()
 		return &UsageInfo{UpdatedAt: &now}, nil
 	}
 
 	// 1. 检查缓存
-	if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-		if cache, ok := cached.(*antigravityUsageCache); ok {
-			ttl := antigravityCacheTTL(cache.usageInfo)
-			if time.Since(cache.timestamp) < ttl {
-				usage := cache.usageInfo
-				if usage.FiveHour != nil && usage.FiveHour.ResetsAt != nil {
-					usage.FiveHour.RemainingSeconds = int(time.Until(*usage.FiveHour.ResetsAt).Seconds())
-				}
-				return usage, nil
-			}
-		}
+	if usage, ok := s.cachedAntigravityUsage(account.ID, force); ok {
+		return usage, nil
 	}
 
 	// 2. singleflight 防止并发击穿
 	flightKey := fmt.Sprintf("ag-usage:%d", account.ID)
 	result, flightErr, _ := s.cache.antigravityFlight.Do(flightKey, func() (any, error) {
 		// 再次检查缓存（等待期间可能已被填充）
-		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := cached.(*antigravityUsageCache); ok {
-				ttl := antigravityCacheTTL(cache.usageInfo)
-				if time.Since(cache.timestamp) < ttl {
-					usage := cache.usageInfo
-					// 重新计算 RemainingSeconds，避免返回过时的剩余秒数
-					recalcAntigravityRemainingSeconds(usage)
-					return usage, nil
-				}
-			}
+		if usage, ok := s.cachedAntigravityUsage(account.ID, force); ok {
+			return usage, nil
 		}
 
 		// 使用独立 context，避免调用方 cancel 导致所有共享 flight 的请求失败
-		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		fetchCtx, fetchCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer fetchCancel()
 
 		proxyURL := s.antigravityQuotaFetcher.GetProxyURL(fetchCtx, account)
@@ -1592,6 +1644,9 @@ func (s *AccountUsageService) addWindowStats(ctx context.Context, account *Accou
 
 // GetTodayStats 获取账号今日统计
 func (s *AccountUsageService) GetTodayStats(ctx context.Context, accountID int64) (*WindowStats, error) {
+	if err := scopedAccountIDAccess(ctx, s.accountRepo, accountID, "accounts.stats.read", false); err != nil {
+		return nil, err
+	}
 	stats, err := s.usageLogRepo.GetAccountTodayStats(ctx, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("get today stats failed: %w", err)
@@ -1608,6 +1663,16 @@ func (s *AccountUsageService) GetTodayStats(ctx context.Context, accountID int64
 
 // GetTodayStatsBatch 批量获取账号今日统计，优先走批量 SQL，失败时回退单账号查询。
 func (s *AccountUsageService) GetTodayStatsBatch(ctx context.Context, accountIDs []int64) (map[int64]*WindowStats, error) {
+	if adminaccess.RestrictedFromContext(ctx) != nil {
+		if len(accountIDs) > 100 {
+			return nil, fmt.Errorf("账户数量超过限制")
+		}
+		for _, id := range accountIDs {
+			if err := scopedAccountIDAccess(ctx, s.accountRepo, id, "accounts.stats.read", false); err != nil {
+				return nil, err
+			}
+		}
+	}
 	uniqueIDs := make([]int64, 0, len(accountIDs))
 	seen := make(map[int64]struct{}, len(accountIDs))
 	for _, accountID := range accountIDs {
@@ -1750,6 +1815,9 @@ func codexWindowStatsStart(progress *UsageProgress, fallbackWindow time.Duration
 }
 
 func (s *AccountUsageService) GetAccountUsageStats(ctx context.Context, accountID int64, startTime, endTime time.Time) (*usagestats.AccountUsageStatsResponse, error) {
+	if err := scopedAccountIDAccess(ctx, s.accountRepo, accountID, "accounts.stats.read", false); err != nil {
+		return nil, err
+	}
 	stats, err := s.usageLogRepo.GetAccountUsageStats(ctx, accountID, startTime, endTime)
 	if err != nil {
 		return nil, fmt.Errorf("get account usage stats failed: %w", err)
@@ -1806,6 +1874,10 @@ func parseTime(s string) (time.Time, error) {
 }
 
 func (s *AccountUsageService) tryClearRecoverableAccountError(ctx context.Context, account *Account) {
+	// 额度读取不能隐式恢复账户状态或调度。
+	if adminaccess.RestrictedFromContext(ctx) != nil {
+		return
+	}
 	if account == nil || account.Status != StatusError {
 		return
 	}
@@ -1960,7 +2032,6 @@ func (s *AccountUsageService) estimateSetupTokenUsage(account *Account) *UsageIn
 		}
 	}
 
-	// Setup Token无法获取7d数据
 	return info
 }
 
