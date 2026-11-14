@@ -25,6 +25,39 @@ type apiKeyAuthCacheConfig struct {
 	singleflight  bool
 }
 
+// Only active lookups retain these guards; arbitrary invalid credentials do not
+// leave a permanent per-key map. Invalidation detaches the old guard so new
+// requests cannot join its singleflight result.
+type authCacheFill struct {
+	refs    int
+	invalid bool
+}
+
+func (s *APIKeyService) beginAuthCacheFill(cacheKey string) *authCacheFill {
+	s.authFillMu.Lock()
+	defer s.authFillMu.Unlock()
+	if s.authFills == nil {
+		s.authFills = make(map[string]*authCacheFill)
+	}
+	fill := s.authFills[cacheKey]
+	if fill == nil {
+		fill = &authCacheFill{}
+		s.authFills[cacheKey] = fill
+	}
+	fill.refs++
+	return fill
+}
+
+func (s *APIKeyService) endAuthCacheFill(cacheKey string, fill *authCacheFill) bool {
+	s.authFillMu.Lock()
+	defer s.authFillMu.Unlock()
+	fill.refs--
+	if fill.refs == 0 && s.authFills[cacheKey] == fill {
+		delete(s.authFills, cacheKey)
+	}
+	return !fill.invalid
+}
+
 func newAPIKeyAuthCacheConfig(cfg *config.Config) apiKeyAuthCacheConfig {
 	if cfg == nil {
 		return apiKeyAuthCacheConfig{}
@@ -156,11 +189,19 @@ func (s *APIKeyService) invalidateLocalAuthCache(cacheKey string) {
 	if s == nil {
 		return
 	}
+	s.authFillMu.Lock()
+	defer s.authFillMu.Unlock()
+	if fill := s.authFills[cacheKey]; fill != nil {
+		fill.invalid = true
+		delete(s.authFills, cacheKey)
+	}
 	if s.authCacheL1 != nil {
 		s.authCacheL1.Del(cacheKey)
+		s.authCacheL1.Wait()
 	}
 	if s.authNegativeCacheL1 != nil {
 		s.authNegativeCacheL1.Del(cacheKey)
+		s.authNegativeCacheL1.Wait()
 	}
 }
 
@@ -196,86 +237,120 @@ func (s *APIKeyService) authCacheKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *APIKeyService) getAuthCacheEntry(ctx context.Context, cacheKey string) (*APIKeyAuthCacheEntry, bool) {
+func (s *APIKeyService) getAuthCacheEntry(ctx context.Context, cacheKey string, fill *authCacheFill) (*APIKeyAuthCacheEntry, error) {
 	if s.authCacheL1 != nil {
 		if val, ok := s.authCacheL1.Get(cacheKey); ok {
 			if entry, ok := val.(*APIKeyAuthCacheEntry); ok {
-				return entry, true
+				return entry, nil
 			}
 		}
 	}
 	if s.authNegativeCacheL1 != nil {
 		if val, ok := s.authNegativeCacheL1.Get(cacheKey); ok {
 			if entry, ok := val.(*APIKeyAuthCacheEntry); ok && entry.NotFound {
-				return entry, true
+				return entry, nil
 			}
 		}
 	}
 	if s.cache == nil || !s.authCfg.l2Enabled() {
-		return nil, false
+		return nil, nil
 	}
 	entry, err := s.cache.GetAuthCache(ctx, cacheKey)
 	if err != nil {
-		return nil, false
+		return nil, ErrAPIKeyAuthUnavailable.WithCause(err)
 	}
-	s.setAuthCacheL1(cacheKey, entry)
-	return entry, true
+	if entry != nil && entry.Snapshot != nil {
+		// A Redis reply can arrive after a remote invalidation. Verify its
+		// generation before promoting it into this instance's local cache.
+		if err := s.validateAuthGeneration(ctx, cacheKey, entry.Generation); err != nil {
+			return nil, err
+		}
+		if err := s.setAuthCacheL1(cacheKey, entry, fill); err != nil {
+			return nil, err
+		}
+	}
+	return entry, nil
 }
 
-func (s *APIKeyService) setAuthCacheL1(cacheKey string, entry *APIKeyAuthCacheEntry) {
+func (s *APIKeyService) setAuthCacheL1(cacheKey string, entry *APIKeyAuthCacheEntry, fill *authCacheFill) error {
+	s.authFillMu.Lock()
+	defer s.authFillMu.Unlock()
+	if fill.invalid {
+		return ErrAPIKeyAuthChanged
+	}
 	if entry == nil {
-		return
+		return nil
 	}
 	if entry.NotFound {
 		if s.authNegativeCacheL1 != nil && s.authCfg.negativeTTL > 0 {
 			_ = s.authNegativeCacheL1.SetWithTTL(cacheKey, entry, 1, s.authCfg.jitterTTL(s.authCfg.negativeTTL))
+			s.authNegativeCacheL1.Wait()
 		}
-		return
+		return nil
 	}
 	if s.authCacheL1 == nil {
-		return
+		return nil
 	}
 	ttl := s.authCfg.l1TTL
 	ttl = s.authCfg.jitterTTL(ttl)
 	_ = s.authCacheL1.SetWithTTL(cacheKey, entry, 1, ttl)
+	// Drain the buffered set before invalidation can delete the same key.
+	s.authCacheL1.Wait()
+	return nil
 }
 
-func (s *APIKeyService) setAuthCacheEntry(ctx context.Context, cacheKey string, entry *APIKeyAuthCacheEntry, ttl time.Duration) {
-	if entry == nil {
-		return
+func (s *APIKeyService) validateAuthGeneration(ctx context.Context, cacheKey, generation string) error {
+	valid, err := s.cache.ValidateAuthCacheGeneration(ctx, cacheKey, generation)
+	if err != nil {
+		return ErrAPIKeyAuthUnavailable.WithCause(err)
 	}
-	s.setAuthCacheL1(cacheKey, entry)
-	if s.cache == nil || !s.authCfg.l2Enabled() {
-		return
+	if !valid {
+		return ErrAPIKeyAuthChanged
 	}
-	_ = s.cache.SetAuthCache(ctx, cacheKey, entry, s.authCfg.jitterTTL(ttl))
+	return nil
 }
 
 func (s *APIKeyService) deleteAuthCache(ctx context.Context, cacheKey string) {
-	if s.authCacheL1 != nil {
-		s.authCacheL1.Del(cacheKey)
-	}
-	if s.authNegativeCacheL1 != nil {
-		s.authNegativeCacheL1.Del(cacheKey)
-	}
+	s.invalidateLocalAuthCache(cacheKey)
 	if s.cache == nil {
 		return
 	}
 	_ = s.cache.DeleteAuthCache(ctx, cacheKey)
+	s.invalidateLocalAuthCache(cacheKey)
 	// Publish invalidation message to other instances
 	_ = s.cache.PublishAuthCacheInvalidation(ctx, cacheKey)
 }
 
-func (s *APIKeyService) loadAuthCacheEntry(ctx context.Context, key, cacheKey string) (*APIKeyAuthCacheEntry, error) {
+func (s *APIKeyService) loadAuthCacheEntry(ctx context.Context, key, cacheKey, generation string, fill *authCacheFill) (*APIKeyAuthCacheEntry, error) {
 	apiKey, err := s.lookupAPIKeyForAuth(ctx, key)
+	shared := s.cache != nil && s.authCfg.l2Enabled()
+	if err == nil && shared && generation == "" {
+		// Establish metadata only for a DB-confirmed key. The first read was
+		// unfenced, so it cannot be used after acquiring a new generation.
+		generation, err = s.cache.EnsureAuthCacheGeneration(ctx, cacheKey)
+		if err != nil {
+			return nil, ErrAPIKeyAuthUnavailable.WithCause(err)
+		}
+		if generation == "" {
+			return nil, ErrAPIKeyAuthChanged
+		}
+		apiKey, err = s.lookupAPIKeyForAuth(ctx, key)
+	}
 	if err != nil {
 		if errors.Is(err, ErrAPIKeyNotFound) {
+			if shared && generation != "" {
+				if err := s.validateAuthGeneration(ctx, cacheKey, generation); err != nil {
+					return nil, err
+				}
+			}
 			entry := &APIKeyAuthCacheEntry{NotFound: true}
 			if s.authCfg.negativeEnabled() {
 				// Invalid keys are attacker-controlled and high-cardinality. Keep their
 				// negative entries in the bounded process-local cache; do not amplify
 				// random-key scans into Redis writes on every instance.
-				s.setAuthCacheL1(cacheKey, entry)
+				if err := s.setAuthCacheL1(cacheKey, entry, fill); err != nil {
+					return nil, err
+				}
 			}
 			return entry, nil
 		}
@@ -286,8 +361,18 @@ func (s *APIKeyService) loadAuthCacheEntry(ctx context.Context, key, cacheKey st
 	if snapshot == nil {
 		return nil, fmt.Errorf("get api key: %w", ErrAPIKeyNotFound)
 	}
-	entry := &APIKeyAuthCacheEntry{Snapshot: snapshot}
-	s.setAuthCacheEntry(ctx, cacheKey, entry, s.authCfg.l2TTL)
+	entry := &APIKeyAuthCacheEntry{Snapshot: snapshot, Generation: generation}
+	if shared {
+		if err := s.cache.SetAuthCache(ctx, cacheKey, entry, s.authCfg.jitterTTL(s.authCfg.l2TTL)); err != nil {
+			if errors.Is(err, ErrAPIKeyAuthChanged) {
+				return nil, err
+			}
+			return nil, ErrAPIKeyAuthUnavailable.WithCause(err)
+		}
+	}
+	if err := s.setAuthCacheL1(cacheKey, entry, fill); err != nil {
+		return nil, err
+	}
 	return entry, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
 	"math"
@@ -25,16 +26,18 @@ import (
 )
 
 var (
-	ErrAPIKeyNotFound       = infraerrors.NotFound("API_KEY_NOT_FOUND", "api key not found")
-	ErrGroupNotAllowed      = infraerrors.Forbidden("GROUP_NOT_ALLOWED", "user is not allowed to bind this group")
-	ErrAPIKeyExists         = infraerrors.Conflict("API_KEY_EXISTS", "api key already exists")
-	ErrAPIKeyTooShort       = infraerrors.BadRequest("API_KEY_TOO_SHORT", "api key must be at least 16 characters")
-	ErrAPIKeyInvalidChars   = infraerrors.BadRequest("API_KEY_INVALID_CHARS", "api key can only contain letters, numbers, underscores, and hyphens")
-	ErrAPIKeyRateLimited    = infraerrors.TooManyRequests("API_KEY_RATE_LIMITED", "too many failed attempts, please try again later")
-	ErrAPIKeyCreateLimited  = infraerrors.TooManyRequests("API_KEY_CREATE_RATE_LIMITED", "too many api keys created recently, please try again later")
-	ErrAPIKeyCountExceeded  = infraerrors.Forbidden("API_KEY_COUNT_EXCEEDED", "api key count limit reached, please delete unused keys first")
-	ErrAPIKeyAuthOverloaded = infraerrors.ServiceUnavailable("API_KEY_AUTH_OVERLOADED", "api key authentication is temporarily overloaded")
-	ErrInvalidIPPattern     = infraerrors.BadRequest("INVALID_IP_PATTERN", "invalid IP or CIDR pattern")
+	ErrAPIKeyNotFound        = infraerrors.NotFound("API_KEY_NOT_FOUND", "api key not found")
+	ErrGroupNotAllowed       = infraerrors.Forbidden("GROUP_NOT_ALLOWED", "user is not allowed to bind this group")
+	ErrAPIKeyExists          = infraerrors.Conflict("API_KEY_EXISTS", "api key already exists")
+	ErrAPIKeyTooShort        = infraerrors.BadRequest("API_KEY_TOO_SHORT", "api key must be at least 16 characters")
+	ErrAPIKeyInvalidChars    = infraerrors.BadRequest("API_KEY_INVALID_CHARS", "api key can only contain letters, numbers, underscores, and hyphens")
+	ErrAPIKeyRateLimited     = infraerrors.TooManyRequests("API_KEY_RATE_LIMITED", "too many failed attempts, please try again later")
+	ErrAPIKeyCreateLimited   = infraerrors.TooManyRequests("API_KEY_CREATE_RATE_LIMITED", "too many api keys created recently, please try again later")
+	ErrAPIKeyCountExceeded   = infraerrors.Forbidden("API_KEY_COUNT_EXCEEDED", "api key count limit reached, please delete unused keys first")
+	ErrAPIKeyAuthOverloaded  = infraerrors.ServiceUnavailable("API_KEY_AUTH_OVERLOADED", "api key authentication is temporarily overloaded")
+	ErrAPIKeyAuthChanged     = infraerrors.ServiceUnavailable("API_KEY_AUTH_CHANGED", "api key authorization changed during lookup; retry the request")
+	ErrAPIKeyAuthUnavailable = infraerrors.ServiceUnavailable("API_KEY_AUTH_UNAVAILABLE", "api key authorization version could not be verified; retry the request")
+	ErrInvalidIPPattern      = infraerrors.BadRequest("INVALID_IP_PATTERN", "invalid IP or CIDR pattern")
 	// ErrAPIKeyExpired        = infraerrors.Forbidden("API_KEY_EXPIRED", "api key has expired")
 	ErrAPIKeyExpired = infraerrors.Forbidden("API_KEY_EXPIRED", "api key 已过期")
 	// ErrAPIKeyQuotaExhausted = infraerrors.TooManyRequests("API_KEY_QUOTA_EXHAUSTED", "api key quota exhausted")
@@ -183,8 +186,14 @@ type APIKeyCache interface {
 	IncrementDailyUsage(ctx context.Context, apiKey string) error
 	SetDailyUsageExpiry(ctx context.Context, apiKey string, ttl time.Duration) error
 
+	// A miss returns an empty entry carrying the current generation (if any).
 	GetAuthCache(ctx context.Context, key string) (*APIKeyAuthCacheEntry, error)
+	// Initialize only after confirming the key exists, then read the DB again.
+	EnsureAuthCacheGeneration(ctx context.Context, key string) (string, error)
+	ValidateAuthCacheGeneration(ctx context.Context, key, generation string) (bool, error)
+	// Atomically reject mismatched or missing generations with ErrAPIKeyAuthChanged.
 	SetAuthCache(ctx context.Context, key string, entry *APIKeyAuthCacheEntry, ttl time.Duration) error
+	// Rotate the generation and remove the cached snapshot atomically.
 	DeleteAuthCache(ctx context.Context, key string) error
 
 	// Pub/Sub for L1 cache invalidation across instances
@@ -302,6 +311,8 @@ type APIKeyService struct {
 	authNegativeCacheL1       *ristretto.Cache
 	authCfg                   apiKeyAuthCacheConfig
 	authGroup                 singleflight.Group
+	authFillMu                sync.Mutex
+	authFills                 map[string]*authCacheFill
 	authLookupSlots           chan struct{}
 	authLookupTotal           atomic.Uint64
 	authLookupRejected        atomic.Uint64
@@ -742,8 +753,29 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
 		return nil, ErrAPIKeyNotFound
 	}
 	cacheKey := s.authCacheKey(key)
+	for attempt := 0; attempt < 2; attempt++ {
+		fill := s.beginAuthCacheFill(cacheKey)
+		apiKey, err := s.getByKeyAttempt(ctx, key, cacheKey, fill)
+		if !s.endAuthCacheFill(cacheKey, fill) {
+			err = ErrAPIKeyAuthChanged
+		}
+		if errors.Is(err, ErrAPIKeyAuthChanged) {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		return apiKey, err
+	}
+	return nil, ErrAPIKeyAuthChanged
+}
 
-	if entry, ok := s.getAuthCacheEntry(ctx, cacheKey); ok {
+func (s *APIKeyService) getByKeyAttempt(ctx context.Context, key, cacheKey string, fill *authCacheFill) (*APIKey, error) {
+	entry, err := s.getAuthCacheEntry(ctx, cacheKey, fill)
+	if err != nil {
+		return nil, err
+	}
+	if entry != nil {
 		if apiKey, used, err := s.applyAuthCacheEntry(key, entry); used {
 			if err != nil {
 				return nil, fmt.Errorf("get api key: %w", err)
@@ -752,10 +784,14 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
 			return apiKey, nil
 		}
 	}
+	generation := ""
+	if entry != nil {
+		generation = entry.Generation
+	}
 
 	if s.authCfg.singleflight {
-		value, err, _ := s.authGroup.Do(cacheKey, func() (any, error) {
-			return s.loadAuthCacheEntry(ctx, key, cacheKey)
+		value, err, _ := s.authGroup.Do(fmt.Sprintf("%s/%p", cacheKey, fill), func() (any, error) {
+			return s.loadAuthCacheEntry(ctx, key, cacheKey, generation, fill)
 		})
 		if err != nil {
 			return nil, err
@@ -769,7 +805,7 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
 			return apiKey, nil
 		}
 	} else {
-		entry, err := s.loadAuthCacheEntry(ctx, key, cacheKey)
+		entry, err := s.loadAuthCacheEntry(ctx, key, cacheKey, generation, fill)
 		if err != nil {
 			return nil, err
 		}
@@ -782,13 +818,7 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
 		}
 	}
 
-	apiKey, err := s.lookupAPIKeyForAuth(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("get api key: %w", err)
-	}
-	apiKey.Key = key
-	s.compileAPIKeyIPRules(apiKey)
-	return apiKey, nil
+	return nil, ErrAPIKeyAuthUnavailable
 }
 
 // Update 更新API Key

@@ -151,6 +151,7 @@ type APIKeyAuthGroupSnapshot struct {
 
 // APIKeyAuthCacheEntry 缓存条目，支持负缓存
 type APIKeyAuthCacheEntry struct {
-	NotFound bool                `json:"not_found"`
-	Snapshot *APIKeyAuthSnapshot `json:"snapshot,omitempty"`
+	Generation string              `json:"generation,omitempty"`
+	NotFound   bool                `json:"not_found"`
+	Snapshot   *APIKeyAuthSnapshot `json:"snapshot,omitempty"`
 }

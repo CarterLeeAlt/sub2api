@@ -54,6 +54,13 @@ func (s *quotaStateCacheStub) SetDailyUsageExpiry(context.Context, string, time.
 	return nil
 }
 
+func (s *quotaStateCacheStub) EnsureAuthCacheGeneration(context.Context, string) (string, error) {
+	return "test-generation", nil
+}
+func (s *quotaStateCacheStub) ValidateAuthCacheGeneration(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
 func (s *quotaStateCacheStub) GetAuthCache(context.Context, string) (*APIKeyAuthCacheEntry, error) {
 	return nil, nil
 }

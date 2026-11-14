@@ -73,6 +73,25 @@ func TestGoogleAPIKeyAuthMarksLookupBulkheadRejection(t *testing.T) {
 	require.Equal(t, IngressRejectAPIKeyAuthOverloaded, reason)
 }
 
+func TestGoogleAPIKeyAuthVersionErrorsAreRetryable(t *testing.T) {
+	for _, lookupErr := range []error{service.ErrAPIKeyAuthChanged, service.ErrAPIKeyAuthUnavailable} {
+		t.Run(lookupErr.Error(), func(t *testing.T) {
+			repo := fakeAPIKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) { return nil, lookupErr }}
+			cfg := &config.Config{RunMode: config.RunModeSimple}
+			svc := service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg)
+			r := gin.New()
+			r.Use(APIKeyAuthGoogle(svc, cfg))
+			r.GET("/v1beta/models", func(c *gin.Context) { t.Error("unverified authorization reached handler") })
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
+			req.Header.Set("x-goog-api-key", "valid-shape")
+			r.ServeHTTP(w, req)
+			require.Equal(t, http.StatusServiceUnavailable, w.Code)
+			require.Equal(t, "1", w.Header().Get("Retry-After"))
+		})
+	}
+}
+
 type fakeAPIKeyRepo struct {
 	getByKey       func(ctx context.Context, key string) (*service.APIKey, error)
 	updateLastUsed func(ctx context.Context, id int64, usedAt time.Time) error

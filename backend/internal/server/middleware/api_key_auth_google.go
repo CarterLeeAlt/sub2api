@@ -74,6 +74,11 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			if abortIfAPIKeyLookupClientGone(c, err) {
 				return
 			}
+			if errors.Is(err, service.ErrAPIKeyAuthChanged) || errors.Is(err, service.ErrAPIKeyAuthUnavailable) {
+				c.Header("Retry-After", "1")
+				abortWithGoogleError(c, 503, "API key authorization could not be confirmed; retry the request")
+				return
+			}
 			abortWithGoogleError(c, 500, "Failed to validate API key")
 			return
 		}

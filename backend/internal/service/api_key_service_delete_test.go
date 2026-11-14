@@ -267,6 +267,13 @@ func (s *apiKeyCacheStub) SetDailyUsageExpiry(ctx context.Context, apiKey string
 	return nil
 }
 
+func (s *apiKeyCacheStub) EnsureAuthCacheGeneration(context.Context, string) (string, error) {
+	return "test-generation", nil
+}
+func (s *apiKeyCacheStub) ValidateAuthCacheGeneration(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
 func (s *apiKeyCacheStub) GetAuthCache(ctx context.Context, key string) (*APIKeyAuthCacheEntry, error) {
 	return nil, nil
 }

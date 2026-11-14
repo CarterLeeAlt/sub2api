@@ -1759,6 +1759,13 @@ func (stubApiKeyCache) SetDailyUsageExpiry(ctx context.Context, apiKey string, t
 	return nil
 }
 
+func (stubApiKeyCache) EnsureAuthCacheGeneration(context.Context, string) (string, error) {
+	return "test-generation", nil
+}
+func (stubApiKeyCache) ValidateAuthCacheGeneration(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
 func (stubApiKeyCache) GetAuthCache(ctx context.Context, key string) (*service.APIKeyAuthCacheEntry, error) {
 	return nil, nil
 }

@@ -74,6 +74,13 @@ func (*authInvalidationCacheStub) IncrementDailyUsage(context.Context, string) e
 func (*authInvalidationCacheStub) SetDailyUsageExpiry(context.Context, string, time.Duration) error {
 	return nil
 }
+func (*authInvalidationCacheStub) EnsureAuthCacheGeneration(context.Context, string) (string, error) {
+	return "test-generation", nil
+}
+func (*authInvalidationCacheStub) ValidateAuthCacheGeneration(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
 func (*authInvalidationCacheStub) GetAuthCache(context.Context, string) (*APIKeyAuthCacheEntry, error) {
 	return nil, errors.New("miss")
 }

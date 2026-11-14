@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -156,9 +156,23 @@ func (s *authCacheStub) SetDailyUsageExpiry(ctx context.Context, apiKey string, 
 
 func (s *authCacheStub) GetAuthCache(ctx context.Context, key string) (*APIKeyAuthCacheEntry, error) {
 	if s.getAuthCache == nil {
-		return nil, redis.Nil
+		return &APIKeyAuthCacheEntry{Generation: "test-generation"}, nil
 	}
-	return s.getAuthCache(ctx, key)
+	entry, err := s.getAuthCache(ctx, key)
+	if entry != nil && entry.Generation == "" {
+		copy := *entry
+		copy.Generation = "test-generation"
+		entry = &copy
+	}
+	return entry, err
+}
+
+func (s *authCacheStub) EnsureAuthCacheGeneration(context.Context, string) (string, error) {
+	return "test-generation", nil
+}
+
+func (s *authCacheStub) ValidateAuthCacheGeneration(context.Context, string, string) (bool, error) {
+	return true, nil
 }
 
 func (s *authCacheStub) SetAuthCache(ctx context.Context, key string, entry *APIKeyAuthCacheEntry, ttl time.Duration) error {
@@ -177,6 +191,97 @@ func (s *authCacheStub) PublishAuthCacheInvalidation(ctx context.Context, cacheK
 
 func (s *authCacheStub) SubscribeAuthCacheInvalidation(ctx context.Context, handler func(cacheKey string)) error {
 	return nil
+}
+
+func TestAPIKeyService_RevocationRejectsInFlightCacheFill(t *testing.T) {
+	for _, source := range []string{"database", "redis"} {
+		for _, singleflight := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/singleflight=%t", source, singleflight), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				entered, release := make(chan struct{}), make(chan struct{})
+				var disabled atomic.Bool
+				var reads atomic.Int32
+				read := func() *APIKey {
+					status := StatusActive
+					if disabled.Load() {
+						status = StatusDisabled
+					}
+					key := &APIKey{ID: 1, UserID: 1, Key: "revoked", Status: status, User: &User{ID: 1, Status: StatusActive}}
+					if reads.Add(1) == 1 {
+						close(entered)
+						select {
+						case <-release:
+						case <-ctx.Done():
+						}
+					}
+					return key
+				}
+				repo := &authRepoStub{getByKeyForAuth: func(context.Context, string) (*APIKey, error) { return read(), nil }}
+				cfg := &config.Config{APIKeyAuth: config.APIKeyAuthCacheConfig{L1Size: 100, L1TTLSeconds: 60, Singleflight: singleflight}}
+				var cache APIKeyCache
+				if source == "redis" {
+					cfg.APIKeyAuth.L2TTLSeconds = 60
+					cache = &authCacheStub{getAuthCache: func(context.Context, string) (*APIKeyAuthCacheEntry, error) {
+						return &APIKeyAuthCacheEntry{Snapshot: (&APIKeyService{}).snapshotFromAPIKey(ctx, read())}, nil
+					}}
+				}
+				svc := NewAPIKeyService(repo, nil, nil, nil, nil, cache, cfg)
+				defer svc.authCacheL1.Close()
+				type result struct {
+					key *APIKey
+					err error
+				}
+				done := make(chan result, 1)
+				go func() { key, err := svc.GetByKey(ctx, "revoked"); done <- result{key, err} }()
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				disabled.Store(true)
+				svc.InvalidateAuthCacheByKey(ctx, "revoked")
+				freshDone := make(chan result, 1)
+				go func() { key, err := svc.GetByKey(ctx, "revoked"); freshDone <- result{key, err} }()
+				select {
+				case fresh := <-freshDone:
+					require.NoError(t, fresh.err)
+					require.False(t, fresh.key.IsActive(), "post-revocation requests must not join the blocked old lookup")
+				case <-ctx.Done():
+					t.Fatal("post-revocation lookup joined old singleflight")
+				}
+				close(release)
+				var old result
+				select {
+				case old = <-done:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				svc.authCacheL1.Wait()
+				current, err := svc.GetByKey(ctx, "revoked")
+				require.NoError(t, err)
+				require.False(t, current.IsActive(), "an invalidated in-flight read must never repopulate an active cache entry")
+				require.True(t, old.err != nil || (old.key != nil && !old.key.IsActive()), "the invalidated read must not grant stale authorization")
+				require.Empty(t, svc.authFills, "completed requests must not retain per-key guards")
+			})
+		}
+	}
+}
+
+func TestAPIKeyService_RevocationRetryIsBounded(t *testing.T) {
+	var svc *APIKeyService
+	calls := 0
+	repo := &authRepoStub{getByKeyForAuth: func(ctx context.Context, key string) (*APIKey, error) {
+		calls++
+		svc.InvalidateAuthCacheByKey(ctx, key)
+		return &APIKey{ID: 1, Status: StatusActive, User: &User{ID: 1}}, nil
+	}}
+	svc = NewAPIKeyService(repo, nil, nil, nil, nil, nil, &config.Config{})
+	key, err := svc.GetByKey(context.Background(), "changing")
+	require.Nil(t, key)
+	require.ErrorIs(t, err, ErrAPIKeyAuthChanged)
+	require.Equal(t, 2, calls)
+	require.Empty(t, svc.authFills)
 }
 
 func TestAPIKeyService_GetByKey_UsesL2Cache(t *testing.T) {
@@ -451,7 +556,7 @@ func TestAPIKeyService_GetByKey_CacheMissStoresL2(t *testing.T) {
 	}
 	svc := NewAPIKeyService(repo, nil, nil, nil, nil, cache, cfg)
 	cache.getAuthCache = func(ctx context.Context, key string) (*APIKeyAuthCacheEntry, error) {
-		return nil, redis.Nil
+		return &APIKeyAuthCacheEntry{Generation: "test-generation"}, nil
 	}
 
 	apiKey, err := svc.GetByKey(context.Background(), "k2")
@@ -574,7 +679,7 @@ func TestAPIKeyService_GetByKey_CachesNegativeOnRepoMiss(t *testing.T) {
 	}
 	svc := NewAPIKeyService(repo, nil, nil, nil, nil, cache, cfg)
 	cache.getAuthCache = func(ctx context.Context, key string) (*APIKeyAuthCacheEntry, error) {
-		return nil, redis.Nil
+		return &APIKeyAuthCacheEntry{Generation: "test-generation"}, nil
 	}
 
 	_, err := svc.GetByKey(context.Background(), "missing")
@@ -590,7 +695,7 @@ func TestAPIKeyService_GetByKeyRejectsInvalidLengthBeforeCaches(t *testing.T) {
 	var cacheCalls atomic.Int32
 	cache := &authCacheStub{getAuthCache: func(context.Context, string) (*APIKeyAuthCacheEntry, error) {
 		cacheCalls.Add(1)
-		return nil, redis.Nil
+		return &APIKeyAuthCacheEntry{Generation: "test-generation"}, nil
 	}}
 	repo := &authRepoStub{getByKeyForAuth: func(context.Context, string) (*APIKey, error) {
 		t.Fatal("invalid credential reached repository")

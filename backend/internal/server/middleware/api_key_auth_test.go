@@ -710,6 +710,14 @@ func TestAPIKeyAuthMarksOnlyExpectedIngressRejections(t *testing.T) {
 			wantCode:   "API_KEY_AUTH_OVERLOADED",
 			wantReason: IngressRejectAPIKeyAuthOverloaded,
 		},
+		{
+			name: "authorization changed during lookup", path: "/t", key: "valid-shape",
+			repoErr: service.ErrAPIKeyAuthChanged, wantStatus: http.StatusServiceUnavailable, wantCode: "API_KEY_AUTH_CHANGED",
+		},
+		{
+			name: "authorization generation cannot be checked", path: "/t", key: "valid-shape",
+			repoErr: service.ErrAPIKeyAuthUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "API_KEY_AUTH_UNAVAILABLE",
+		},
 	}
 
 	for _, tt := range tests {

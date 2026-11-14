@@ -118,6 +118,15 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			if abortIfAPIKeyLookupClientGone(c, err) {
 				return
 			}
+			if errors.Is(err, service.ErrAPIKeyAuthChanged) || errors.Is(err, service.ErrAPIKeyAuthUnavailable) {
+				c.Header("Retry-After", "1")
+				code := "API_KEY_AUTH_UNAVAILABLE"
+				if errors.Is(err, service.ErrAPIKeyAuthChanged) {
+					code = "API_KEY_AUTH_CHANGED"
+				}
+				AbortWithError(c, http.StatusServiceUnavailable, code, "API key authorization could not be confirmed; retry the request")
+				return
+			}
 			AbortWithError(c, 500, "INTERNAL_ERROR", "Failed to validate API key")
 			return
 		}

@@ -180,6 +180,9 @@ func (w *AuthCacheInvalidationWorker) processEvent(parent context.Context, event
 	}
 	ctx, cancel := context.WithTimeout(parent, authInvalidationRedisTimeout)
 	err := w.cache.DeleteAuthCache(ctx, event.CacheKey)
+	if w.local != nil {
+		w.local.invalidateLocalAuthCache(event.CacheKey)
+	}
 	if err == nil {
 		err = w.cache.PublishAuthCacheInvalidation(ctx, event.CacheKey)
 	}

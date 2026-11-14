@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -18,6 +19,10 @@ const (
 	apiKeyCreateCountKeyPrefix = "apikey:create_count:"
 	apiKeyAuthCachePrefix      = "apikey:auth:"
 	authCacheInvalidateChannel = "auth:cache:invalidate"
+	apiKeyAuthGenerationPrefix = "apikey:auth:generation:"
+	// Missing/expired generations must be initialized before a fresh DB read.
+	// UUIDs prevent an expired or evicted generation from matching an old fill.
+	apiKeyAuthGenerationTTL = 5 * time.Minute
 )
 
 // apiKeyRateLimitKey generates the Redis key for API key creation rate limiting.
@@ -83,16 +88,52 @@ func (c *apiKeyCache) SetDailyUsageExpiry(ctx context.Context, apiKey string, tt
 }
 
 func (c *apiKeyCache) GetAuthCache(ctx context.Context, key string) (*service.APIKeyAuthCacheEntry, error) {
-	val, err := c.rdb.Get(ctx, apiKeyAuthCacheKey(key)).Bytes()
+	values, err := c.rdb.MGet(ctx, apiKeyAuthGenerationPrefix+key, apiKeyAuthCacheKey(key)).Result()
 	if err != nil {
 		return nil, err
 	}
+	generation, _ := values[0].(string)
+	val, _ := values[1].(string)
+	if generation == "" || val == "" {
+		return &service.APIKeyAuthCacheEntry{Generation: generation}, nil
+	}
 	var entry service.APIKeyAuthCacheEntry
-	if err := json.Unmarshal(val, &entry); err != nil {
+	if err := json.Unmarshal([]byte(val), &entry); err != nil {
 		return nil, err
+	}
+	if entry.Generation != generation {
+		return &service.APIKeyAuthCacheEntry{Generation: generation}, nil
 	}
 	return &entry, nil
 }
+
+var ensureAuthGenerationScript = redis.NewScript(`
+local generation = redis.call('GET', KEYS[1])
+if generation then return generation end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return ARGV[1]
+`)
+
+// Only called after the database confirms the key exists, so random invalid
+// credentials cannot allocate Redis metadata.
+func (c *apiKeyCache) EnsureAuthCacheGeneration(ctx context.Context, key string) (string, error) {
+	return ensureAuthGenerationScript.Run(ctx, c.rdb, []string{apiKeyAuthGenerationPrefix + key}, uuid.NewString(), apiKeyAuthGenerationTTL.Milliseconds()).Text()
+}
+
+func (c *apiKeyCache) ValidateAuthCacheGeneration(ctx context.Context, key, generation string) (bool, error) {
+	current, err := c.rdb.Get(ctx, apiKeyAuthGenerationPrefix+key).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	return generation != "" && current == generation, err
+}
+
+var setAuthCacheScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+return 1
+`)
 
 func (c *apiKeyCache) SetAuthCache(ctx context.Context, key string, entry *service.APIKeyAuthCacheEntry, ttl time.Duration) error {
 	if entry == nil {
@@ -102,11 +143,27 @@ func (c *apiKeyCache) SetAuthCache(ctx context.Context, key string, entry *servi
 	if err != nil {
 		return err
 	}
-	return c.rdb.Set(ctx, apiKeyAuthCacheKey(key), payload, ttl).Err()
+	if entry.Generation == "" {
+		return service.ErrAPIKeyAuthChanged
+	}
+	stored, err := setAuthCacheScript.Run(ctx, c.rdb, []string{apiKeyAuthGenerationPrefix + key, apiKeyAuthCacheKey(key)}, entry.Generation, payload, max(ttl.Milliseconds(), 1), max(ttl, apiKeyAuthGenerationTTL).Milliseconds()).Int()
+	if err != nil {
+		return err
+	}
+	if stored != 1 {
+		return service.ErrAPIKeyAuthChanged
+	}
+	return nil
 }
 
+var deleteAuthCacheScript = redis.NewScript(`
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('DEL', KEYS[2])
+return 1
+`)
+
 func (c *apiKeyCache) DeleteAuthCache(ctx context.Context, key string) error {
-	return c.rdb.Del(ctx, apiKeyAuthCacheKey(key)).Err()
+	return deleteAuthCacheScript.Run(ctx, c.rdb, []string{apiKeyAuthGenerationPrefix + key, apiKeyAuthCacheKey(key)}, uuid.NewString(), apiKeyAuthGenerationTTL.Milliseconds()).Err()
 }
 
 // PublishAuthCacheInvalidation publishes a cache invalidation message to all instances
