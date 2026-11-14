@@ -986,6 +986,23 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		}
 		input.AccountIDs = accountIDs
 	}
+	input.AccountIDs = deduplicateAccountIDs(input.AccountIDs)
+	if err := validateBulkModelMappingCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
+	appServerValue, appServerEdited := input.Extra["codex_cli_only_allow_app_server"]
+	appServerEnabled, validAppServer := appServerValue.(bool)
+	if appServerEdited && !validAppServer {
+		return nil, infraerrors.BadRequest("INVALID_CODEX_APP_SERVER", "codex_cli_only_allow_app_server must be a boolean")
+	}
+	if input.ModelRestriction != nil {
+		if err := input.ModelRestriction.Validate(); err != nil {
+			return nil, err
+		}
+		if _, exists := input.Credentials["model_mapping"]; exists || input.ModelCatalog != nil {
+			return nil, infraerrors.BadRequest("MODEL_CATALOG_MAPPING_CONFLICT", "choose one model configuration edit per request")
+		}
+	}
 
 	result := &BulkUpdateAccountsResult{
 		SuccessIDs: make([]int64, 0, len(input.AccountIDs)),
@@ -1013,7 +1030,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || input.ModelCatalog != nil {
+	if len(input.Credentials) > 0 || input.ModelRestriction != nil || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || input.ModelCatalog != nil || appServerEdited {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1027,16 +1044,32 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		}
 	}
 	if openAISettings.any() {
-		inheritedCount, err := validateBulkOpenAISettingsTargets(input, openAISettings, targetsByID)
+		_, err := validateBulkOpenAISettingsTargets(input, openAISettings, targetsByID)
 		if err != nil {
 			return nil, err
 		}
-		result.LongContextInheritedCount = inheritedCount
 	}
 	if input.ModelCatalog != nil {
 		for _, accountID := range input.AccountIDs {
 			if _, err := input.ModelCatalog.Apply(targetsByID[accountID], input.Credentials, input.Extra); err != nil {
 				return nil, err
+			}
+		}
+	}
+	if appServerEdited {
+		for _, id := range input.AccountIDs {
+			account := targetsByID[id]
+			if account == nil {
+				return nil, ErrAccountNotFound
+			}
+			effective := *account
+			effective.Extra = maps.Clone(account.Extra)
+			if effective.Extra == nil {
+				effective.Extra = make(map[string]any)
+			}
+			maps.Copy(effective.Extra, input.Extra)
+			if appServerEnabled && !effective.IsCodexCLIOnlyEnabled() {
+				return nil, infraerrors.BadRequest("CODEX_APP_SERVER_PARENT_REQUIRED", fmt.Sprintf("account %d requires Codex CLI-only mode before allowing app-server", id))
 			}
 		}
 	}
@@ -1053,7 +1086,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 	// 影子账号绝不持有凭据:批量更新携带凭据时,目标中不得含影子(外审 G5,与单账号
 	// UpdateAccount 守卫对齐)。覆盖显式 IDs 与 filter 解析出的 IDs(此处 AccountIDs 已解析完成)。
-	if len(input.Credentials) > 0 {
+	if len(input.Credentials) > 0 || input.ModelRestriction != nil {
 		for _, acc := range cachedTargets {
 			if acc != nil && acc.IsCredentialShadow() {
 				return nil, infraerrors.Newf(http.StatusBadRequest, "SPARK_SHADOW_NO_CREDENTIALS",
@@ -1133,6 +1166,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	// Prepare bulk updates for columns and JSONB fields.
 	repoUpdates := AccountBulkUpdate{
+		ModelRestriction:           input.ModelRestriction,
+		GroupIDs:                   input.GroupIDs,
+		PropagateProxy:             input.ProxyID != nil,
 		ModelCatalog:               input.ModelCatalog,
 		Credentials:                input.Credentials,
 		Extra:                      input.Extra,
@@ -1172,13 +1208,10 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		repoUpdates.RateMultiplier = input.RateMultiplier
 	}
 	if input.LoadFactor != nil {
-		if *input.LoadFactor <= 0 {
-			repoUpdates.LoadFactor = nil // 0 或负数表示清除
-		} else if *input.LoadFactor > 10000 {
+		if *input.LoadFactor > 10000 {
 			return nil, errors.New("load_factor must be <= 10000")
-		} else {
-			repoUpdates.LoadFactor = input.LoadFactor
 		}
+		repoUpdates.LoadFactor = input.LoadFactor
 	}
 	if input.Status != "" {
 		repoUpdates.Status = &input.Status
@@ -1187,46 +1220,44 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		repoUpdates.Schedulable = input.Schedulable
 	}
 
-	// Run bulk update for column/jsonb fields first.
-	if _, err := s.accountRepo.BulkUpdate(ctx, input.AccountIDs, repoUpdates); err != nil {
-		return nil, err
-	}
-
-	// 将 proxy 变更传播到每个目标账号的 spark 影子账号
-	if repoUpdates.ProxyID != nil {
-		var effectiveProxyID *int64
-		if *repoUpdates.ProxyID != 0 {
-			effectiveProxyID = repoUpdates.ProxyID
-		}
-		for _, accountID := range input.AccountIDs {
-			if err := s.propagateProxyToShadows(ctx, accountID, effectiveProxyID); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	// Handle group bindings per account (requires individual operations).
+	// Each account's fields, groups and inherited proxy commit together. Failures
+	// remain attributable to that account and can be retried without replaying successes.
 	for _, accountID := range input.AccountIDs {
 		entry := BulkUpdateAccountResult{AccountID: accountID}
-
-		if input.GroupIDs != nil {
-			if err := s.accountRepo.BindGroups(ctx, accountID, *input.GroupIDs); err != nil {
-				entry.Success = false
-				entry.Error = err.Error()
-				result.Failed++
-				result.FailedIDs = append(result.FailedIDs, accountID)
-				result.Results = append(result.Results, entry)
-				continue
-			}
+		rows, err := s.accountRepo.BulkUpdate(ctx, []int64{accountID}, repoUpdates)
+		if err == nil && rows != 1 {
+			err = ErrAccountNotFound
+		}
+		if err != nil {
+			entry.Error = err.Error()
+			result.Failed++
+			result.FailedIDs = append(result.FailedIDs, accountID)
+			result.Results = append(result.Results, entry)
+			continue
 		}
 
 		entry.Success = true
+		if openAISettings.longContextBilling && targetsByID[accountID].IsShadow() {
+			result.LongContextInheritedCount++
+		}
 		result.Success++
 		result.SuccessIDs = append(result.SuccessIDs, accountID)
 		result.Results = append(result.Results, entry)
 	}
 
 	return result, nil
+}
+
+func deduplicateAccountIDs(ids []int64) []int64 {
+	seen := make(map[int64]bool, len(ids))
+	unique := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	return unique
 }
 
 func updatesUpstreamBillingProbeIdentity(credentials map[string]any) bool {

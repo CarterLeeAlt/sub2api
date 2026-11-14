@@ -535,6 +535,14 @@ export default {
         partialSuccess: 'Partially completed: {success} succeeded, {failed} failed'
       },
       bulkEdit: {
+        whitelistHint: 'Replace each account’s model whitelist while preserving its aliases. An empty list clears the whitelist; existing aliases remain available.',
+        mappingHint: 'Replace each account’s aliases while preserving its whitelist. Existing aliases not listed here are removed.',
+        invalidWhitelist: 'Use exact, nonempty model names in the whitelist. Wildcards are only supported in model mappings.',
+        invalidMapping: 'Complete every mapping row with unique source models. A wildcard is only allowed at the end of a source; targets cannot contain wildcards.',
+        failedAccountsHint: 'These accounts failed. Review the reasons below; submitting again retries only these accounts.',
+        retryFailed: 'Retry failed accounts',
+        appServerParentHint: 'Edit this separately for accounts with Codex CLI-only mode enabled, or enable the parent setting in this batch.',
+        appServerParentRequired: 'All targets must have Codex CLI-only mode enabled before allowing app-server. You can enable the parent setting in this batch.',
         title: 'Bulk Edit Accounts',
         selectionInfo:
           '{count} account(s) selected. Only checked or filled fields will be updated; others stay unchanged.',
@@ -1118,8 +1126,8 @@ export default {
           strategyStickyExemptHint: 'Only sticky sessions allowed when over limit',
           strategyHint: 'Tiered: gradually restrict when exceeded; Sticky Exempt: existing sessions unrestricted',
           stickyBuffer: 'Sticky Buffer',
-          stickyBufferPlaceholder: 'Default: 20% of base RPM',
-          stickyBufferHint: 'Extra requests allowed for sticky sessions after exceeding base RPM. Leave empty to use default (20% of base RPM, min 1)',
+          stickyBufferPlaceholder: 'Leave empty for automatic buffer',
+          stickyBufferHint: 'Extra requests allowed for sticky sessions above base RPM. Empty restores the automatic value: concurrency plus maximum sessions, at least 20% of base RPM rounded down (minimum 1).',
           userMsgQueue: 'User Message Rate Control',
           userMsgQueueHint: 'Rate-limit user messages to avoid triggering upstream RPM limits',
           umqModeOff: 'Off',

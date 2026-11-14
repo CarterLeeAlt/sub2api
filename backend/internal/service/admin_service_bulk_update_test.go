@@ -53,12 +53,19 @@ type accountRepoStubForBulkUpdate struct {
 	}
 }
 
-func (s *accountRepoStubForBulkUpdate) BulkUpdate(_ context.Context, ids []int64, updates AccountBulkUpdate) (int64, error) {
+func (s *accountRepoStubForBulkUpdate) BulkUpdate(ctx context.Context, ids []int64, updates AccountBulkUpdate) (int64, error) {
 	s.bulkUpdateCalls++
-	s.bulkUpdateIDs = append([]int64{}, ids...)
+	s.bulkUpdateIDs = append(s.bulkUpdateIDs, ids...)
 	s.lastBulkUpdate = updates
 	if s.bulkUpdateErr != nil {
 		return 0, s.bulkUpdateErr
+	}
+	if updates.GroupIDs != nil {
+		for _, id := range ids {
+			if err := s.BindGroups(ctx, id, *updates.GroupIDs); err != nil {
+				return 0, err
+			}
+		}
 	}
 	return int64(len(ids)), nil
 }
@@ -401,7 +408,7 @@ func TestAdminServiceBulkUpdateAccounts_NormalizesOpenAISettings(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, result.Success)
 	require.Zero(t, result.LongContextInheritedCount)
-	require.Equal(t, 1, repo.bulkUpdateCalls)
+	require.Equal(t, 2, repo.bulkUpdateCalls)
 	require.Contains(t, repo.lastBulkUpdate.Credentials, openAIEndpointCapabilitiesCredentialKey)
 	require.Nil(t, repo.lastBulkUpdate.Credentials[openAIEndpointCapabilitiesCredentialKey])
 	require.Equal(t, true, repo.lastBulkUpdate.Extra[openAILongContextBillingEnabledKey])
@@ -596,7 +603,7 @@ func TestAdminServiceBulkUpdateAccounts_ReportsLongContextShadowInheritance(t *t
 
 	require.NoError(t, err)
 	require.Equal(t, 1, result.LongContextInheritedCount)
-	require.Equal(t, 1, repo.bulkUpdateCalls)
+	require.Equal(t, 2, repo.bulkUpdateCalls)
 }
 
 func TestAdminServiceBulkUpdateAccounts_RequiresParentForShadowOnlyLongContextUpdate(t *testing.T) {

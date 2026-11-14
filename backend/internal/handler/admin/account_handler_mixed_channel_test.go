@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,51 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type bulkPreviewAdminService struct{ *stubAdminService }
+
+func (s *bulkPreviewAdminService) GetAccountsByIDs(_ context.Context, ids []int64) ([]*service.Account, error) {
+	wanted := map[int64]bool{}
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	var result []*service.Account
+	for i := range s.accounts {
+		if wanted[s.accounts[i].ID] {
+			result = append(result, &s.accounts[i])
+		}
+	}
+	return result, nil
+}
+
+func TestBulkUpdatePreviewIncludesAllTargets(t *testing.T) {
+	svc := &bulkPreviewAdminService{newStubAdminService()}
+	svc.accounts = nil
+	for i := 1; i <= 501; i++ {
+		svc.accounts = append(svc.accounts, service.Account{ID: int64(i), Platform: "openai", Type: "oauth"})
+	}
+	svc.accounts[500].Platform, svc.accounts[500].Type = "anthropic", "apikey"
+	h := NewAccountHandler(svc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router := gin.New()
+	router.POST("/preview", h.PreviewBulkUpdate)
+	for _, body := range []string{`{"filters":{}}`, `{"account_ids":[1,501]}`} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/preview", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var response struct {
+			Data struct {
+				Platforms []string `json:"platforms"`
+				Types     []string `json:"types"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+		require.ElementsMatch(t, []string{"openai", "anthropic"}, response.Data.Platforms)
+		require.ElementsMatch(t, []string{"oauth", "apikey"}, response.Data.Types)
+	}
+	require.Equal(t, 2, svc.lastListAccounts.calls)
+}
 
 func setupAccountMixedChannelRouter(adminSvc *stubAdminService) *gin.Engine {
 	gin.SetMode(gin.TestMode)

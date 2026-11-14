@@ -17,8 +17,17 @@
               d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
             />
           </svg>
-          {{ t('admin.accounts.bulkEdit.selectionInfo', { count: targetMode === 'filtered' ? targetPreviewCount : accountIds.length }) }}
+          {{ t('admin.accounts.bulkEdit.selectionInfo', { count: retryAccountIds?.length ?? (targetMode === 'filtered' ? targetPreviewCount : accountIds.length) }) }}
         </p>
+      </div>
+
+      <div v-if="failedResults.length" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-900/20" role="alert" data-testid="bulk-update-failures">
+        <p class="mb-2 text-sm font-medium text-red-700 dark:text-red-300">{{ t('admin.accounts.bulkEdit.failedAccountsHint') }}</p>
+        <ul class="max-h-40 space-y-1 overflow-auto text-xs text-red-700 dark:text-red-300">
+          <li v-for="failure in failedResults" :key="failure.account_id" class="break-words">
+            #{{ failure.account_id }}：{{ failure.error }}
+          </li>
+        </ul>
       </div>
 
       <!-- Mixed platform warning -->
@@ -377,7 +386,7 @@
                   <span v-if="useUpstreamModelCatalog" data-testid="bulk-upstream-catalog-hint">
                     {{ t('admin.accounts.modelCatalog.bulkUpstreamHint') }}
                   </span>
-                  <span v-else>{{ t('admin.accounts.selectAllowedModels') }}</span>
+                  <span v-else>{{ t('admin.accounts.bulkEdit.whitelistHint') }}</span>
                 </p>
               </div>
 
@@ -393,9 +402,6 @@
 
               <p v-if="!useUpstreamModelCatalog" class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-                <span v-if="allowedModels.length === 0">{{
-                  t('admin.accounts.supportsAllModels')
-                }}</span>
               </p>
             </div>
 
@@ -416,7 +422,7 @@
                       d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
                     />
                   </svg>
-                  {{ t('admin.accounts.mapRequestModels') }}
+                  {{ t('admin.accounts.bulkEdit.mappingHint') }}
                 </p>
               </div>
 
@@ -997,7 +1003,8 @@
           :class="!enableCodexCLIOnlyAppServer && 'pointer-events-none opacity-50'"
         >
           <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
-            {{ t('admin.accounts.openai.codexCLIOnlyAppServerDesc') }}
+              {{ t('admin.accounts.openai.codexCLIOnlyAppServerDesc') }}
+              {{ t('admin.accounts.bulkEdit.appServerParentHint') }}
           </p>
           <button
             id="bulk-edit-openai-codex-app-server-toggle"
@@ -1498,7 +1505,7 @@
             />
           </svg>
           {{
-            submitting ? t('admin.accounts.bulkEdit.updating') : t('admin.accounts.bulkEdit.submit')
+            submitting ? t('admin.accounts.bulkEdit.updating') : t(retryAccountIds ? 'admin.accounts.bulkEdit.retryFailed' : 'admin.accounts.bulkEdit.submit')
           }}
         </button>
       </div>
@@ -1518,7 +1525,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
@@ -1541,6 +1548,7 @@ import type { ModelCatalogSource } from '@/components/account/modelCatalog'
 import Icon from '@/components/icons/Icon.vue'
 import {
   buildModelMappingObject as buildModelMappingPayload,
+  isValidWildcardPattern,
   getPresetMappingsByPlatform
 } from '@/composables/useModelWhitelist'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
@@ -1588,7 +1596,7 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
   close: []
-  updated: []
+  updated: [result: { failedIds: number[] }]
 }>()
 
 const { t } = useI18n()
@@ -1727,6 +1735,10 @@ const enableRpmLimit = ref(false)
 
 // State - field values
 const submitting = ref(false)
+let dialogVersion = 0
+const retryAccountIds = ref<number[] | null>(null)
+const failedResults = ref<Array<{ account_id: number; error: string }>>([])
+onBeforeUnmount(() => { dialogVersion++ })
 const showMixedChannelWarning = ref(false)
 const mixedChannelWarningMessage = ref('')
 const pendingUpdatesForConfirm = ref<Record<string, unknown> | null>(null)
@@ -2086,19 +2098,9 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     if (useUpstreamModelCatalog.value) {
       updates.model_catalog = { source: 'upstream' }
     } else if (modelRestrictionMode.value === 'whitelist') {
-      // 白名单模式：将模型转换为 model_mapping 格式（key=value）
-      // 空白名单表示“支持所有模型”，需显式发送空对象以覆盖已有限制。
-      const mapping: Record<string, string> = {}
-      for (const m of allowedModels.value) {
-        mapping[m] = m
-      }
-      credentials.model_mapping = mapping
-      credentialsChanged = true
+      updates.model_restriction = { mode: 'whitelist', models: [...allowedModels.value] }
     } else {
-      // 映射模式下空配置同样表示“支持所有模型”。
-      const modelMapping = buildModelMappingObject()
-      credentials.model_mapping = modelMapping ?? {}
-      credentialsChanged = true
+      updates.model_restriction = { mode: 'mapping', mappings: buildModelMappingObject() ?? {} }
     }
   }
 
@@ -2147,13 +2149,8 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_cli_only = codexCLIOnlyEnabled.value
   }
 
-  // 子开关从属于 codex_cli_only：仅当同一次批量编辑也把父开关设为开启时才写入，
-  // 与 Create/Edit 语义对齐，避免在父开关关闭的账号上写入无意义的孤立字段。
-  if (
-    enableCodexCLIOnlyAppServer.value &&
-    enableCodexCLIOnly.value &&
-    codexCLIOnlyEnabled.value
-  ) {
+  // 父开关可沿用账号当前值；后端逐账号校验有效父设置。
+  if (enableCodexCLIOnlyAppServer.value) {
     const extra = ensureExtra()
     extra.codex_cli_only_allow_app_server = codexCLIOnlyAppServerEnabled.value
   }
@@ -2195,9 +2192,8 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     if (rpmLimitEnabled.value && bulkBaseRpm.value != null && bulkBaseRpm.value > 0) {
       extra.base_rpm = bulkBaseRpm.value
       extra.rpm_strategy = bulkRpmStrategy.value
-      if (bulkRpmStickyBuffer.value != null && bulkRpmStickyBuffer.value > 0) {
-        extra.rpm_sticky_buffer = bulkRpmStickyBuffer.value
-      }
+      extra.rpm_sticky_buffer = bulkRpmStrategy.value === 'tiered' && bulkRpmStickyBuffer.value != null && bulkRpmStickyBuffer.value > 0
+        ? bulkRpmStickyBuffer.value : 0
     } else {
       // 关闭 RPM 限制 - 设置 base_rpm 为 0，并用空值覆盖关联字段
       // 后端使用 JSONB || merge 语义，不会删除已有 key，
@@ -2234,6 +2230,7 @@ const canPreCheck = () =>
   (targetSelectedPlatforms.value[0] === 'antigravity' || targetSelectedPlatforms.value[0] === 'anthropic')
 
 const handleClose = () => {
+  dialogVersion++
   showMixedChannelWarning.value = false
   mixedChannelWarningMessage.value = ''
   pendingUpdatesForConfirm.value = null
@@ -2242,7 +2239,7 @@ const handleClose = () => {
 }
 
 // 预检查：提交前调接口检测，有风险就弹窗阻止，返回 false 表示需要用户确认
-const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise<boolean> => {
+const preCheckMixedChannelRisk = async (built: Record<string, unknown>, version: number): Promise<boolean> => {
   if (!canPreCheck()) return true
   if (mixedChannelConfirmed.value) return true
 
@@ -2251,6 +2248,7 @@ const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise
       platform: targetSelectedPlatforms.value[0],
       group_ids: groupIds.value
     })
+    if (version !== dialogVersion || !props.show) return false
     if (!result.has_risk) return true
 
     pendingUpdatesForConfirm.value = built
@@ -2258,12 +2256,14 @@ const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise
     showMixedChannelWarning.value = true
     return false
   } catch (error: any) {
+    if (version !== dialogVersion || !props.show) return false
     appStore.showError(error.message || t('admin.accounts.bulkEdit.failed'))
     return false
   }
 }
 
 const handleSubmit = async () => {
+  if (submitting.value) return
   if (targetMode.value === 'selected' && props.accountIds.length === 0) {
     appStore.showError(t('admin.accounts.bulkEdit.noSelection'))
     return
@@ -2328,19 +2328,52 @@ const handleSubmit = async () => {
     }
   }
 
+  if (enableModelRestriction.value && !isOpenAIModelRestrictionDisabled.value && !useUpstreamModelCatalog.value) {
+    if (modelRestrictionMode.value === 'whitelist' && allowedModels.value.some(model => !model.trim() || model.includes('*'))) {
+      appStore.showError(t('admin.accounts.bulkEdit.invalidWhitelist'))
+      return
+    }
+    if (modelRestrictionMode.value === 'mapping' && !validateMappingRows(modelMappings.value)) return
+  }
+  if (enableOpenAICompactModelMapping.value && !validateMappingRows(openAICompactModelMappings.value)) return
+  if (enableCodexCLIOnlyAppServer.value && codexCLIOnlyAppServerEnabled.value && enableCodexCLIOnly.value && !codexCLIOnlyEnabled.value) {
+    appStore.showError(t('admin.accounts.bulkEdit.appServerParentRequired'))
+    return
+  }
+
   const built = buildUpdatePayload()
   if (!built) {
     appStore.showError(t('admin.accounts.bulkEdit.noFieldsSelected'))
     return
   }
 
-  const canContinue = await preCheckMixedChannelRisk(built)
-  if (!canContinue) return
+  const version = dialogVersion
+  submitting.value = true
+  try {
+    const canContinue = await preCheckMixedChannelRisk(built, version)
+    if (!canContinue || version !== dialogVersion || !props.show) return
+    await submitBulkUpdate(built)
+  } finally {
+    if (version === dialogVersion) submitting.value = false
+  }
+}
 
-  await submitBulkUpdate(built)
+const validateMappingRows = (rows: ModelMapping[]) => {
+  const sources = new Set<string>()
+  for (const row of rows) {
+    const from = row.from.trim()
+    const to = row.to.trim()
+    if (!from || !to || !isValidWildcardPattern(from) || to.includes('*') || sources.has(from)) {
+      appStore.showError(t('admin.accounts.bulkEdit.invalidMapping'))
+      return false
+    }
+    sources.add(from)
+  }
+  return true
 }
 
 const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
+  const version = dialogVersion
   // 无论是预检查确认还是 409 兜底确认，只要 mixedChannelConfirmed 为 true 就带上 flag
   const updates = mixedChannelConfirmed.value
     ? { ...baseUpdates, confirm_mixed_channel_risk: true }
@@ -2349,15 +2382,22 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
   submitting.value = true
 
   try {
-    const res = targetMode.value === 'filtered' && props.target?.filters
+    const res = retryAccountIds.value
+      ? await adminAPI.accounts.bulkUpdate([...retryAccountIds.value], updates)
+      : targetMode.value === 'filtered' && props.target?.filters
       ? await adminAPI.accounts.bulkUpdate({
         filters: props.target.filters,
         ...updates
       })
       : await adminAPI.accounts.bulkUpdate(props.accountIds, updates)
+    if (version !== dialogVersion || !props.show) return
     const success = res.success || 0
     const failed = res.failed || 0
     const inherited = res.long_context_inherited_count || 0
+    failedResults.value = res.results.filter(result => !result.success).map(result => ({
+      account_id: result.account_id, error: result.error || t('admin.accounts.bulkEdit.failed')
+    }))
+    retryAccountIds.value = failed > 0 ? failedResults.value.map(result => result.account_id) : null
 
     if (success > 0 && failed === 0) {
       if (inherited > 0) {
@@ -2379,10 +2419,11 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
 
     if (success > 0) {
       pendingUpdatesForConfirm.value = null
-      emit('updated')
-      handleClose()
+      emit('updated', { failedIds: retryAccountIds.value ?? [] })
+      if (failed === 0) handleClose()
     }
   } catch (error: any) {
+    if (version !== dialogVersion || !props.show) return
     // 兜底：多平台混合场景下，预检查跳过，由后端 409 触发确认框
     if (error.status === 409 && error.error === 'mixed_channel_warning') {
       pendingUpdatesForConfirm.value = baseUpdates
@@ -2396,12 +2437,14 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
       appStore.showError(t('admin.accounts.bulkEdit.longContextParentRequired'))
     } else if (error.reason === 'MODEL_CATALOG_UNSUPPORTED') {
       appStore.showError(t('admin.accounts.modelCatalog.bulkUnsupported'))
+    } else if (error.reason === 'CODEX_APP_SERVER_PARENT_REQUIRED') {
+      appStore.showError(t('admin.accounts.bulkEdit.appServerParentRequired'))
     } else {
       appStore.showError(error.message || t('admin.accounts.bulkEdit.failed'))
       console.error('Error bulk updating accounts:', error)
     }
   } finally {
-    submitting.value = false
+    if (version === dialogVersion) submitting.value = false
   }
 }
 
@@ -2422,7 +2465,11 @@ const handleMixedChannelCancel = () => {
 watch(
   () => props.show,
   (newShow) => {
+    dialogVersion++
+    submitting.value = false
     if (!newShow) {
+      retryAccountIds.value = null
+      failedResults.value = []
       // Reset all enable flags
       enableBaseUrl.value = false
       enableModelRestriction.value = false

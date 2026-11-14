@@ -69,6 +69,29 @@ func (s *sparkShadowRepoStub) BindGroups(_ context.Context, accountID int64, gro
 	return nil
 }
 
+func (s *sparkShadowRepoStub) BulkUpdate(ctx context.Context, ids []int64, updates AccountBulkUpdate) (int64, error) {
+	var affected int64
+	for _, id := range ids {
+		account := s.accounts[id]
+		if account == nil {
+			continue
+		}
+		if updates.ProxyID != nil {
+			account.ProxyID = updates.ProxyID
+			if *updates.ProxyID == 0 {
+				account.ProxyID = nil
+			}
+			if updates.PropagateProxy {
+				if err := propagateAccountProxyToShadows(ctx, s, id, account.ProxyID); err != nil {
+					return 0, err
+				}
+			}
+		}
+		affected++
+	}
+	return affected, nil
+}
+
 func (s *sparkShadowRepoStub) ListSchedulableByGroupID(_ context.Context, groupID int64) ([]Account, error) {
 	var result []Account
 	for accID, groups := range s.groupsOf {

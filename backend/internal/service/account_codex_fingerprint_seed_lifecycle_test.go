@@ -158,10 +158,12 @@ func TestBulkUpdateAccountsDoesNotPrewriteCodexSeed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, result.Success)
 	require.Empty(t, repo.updates, "bulk enable must not loop through UpdateExtra before BulkUpdate")
-	require.Len(t, repo.bulkUpdates, 1)
-	require.True(t, repo.bulkUpdates[0].EnsureCodexFingerprintSeed)
-	require.Equal(t, "session", repo.bulkUpdates[0].Extra[codexFingerprintModeExtraKey])
-	require.NotContains(t, repo.bulkUpdates[0].Extra, codexFingerprintSeedExtraKey)
+	require.Len(t, repo.bulkUpdates, 2)
+	for _, update := range repo.bulkUpdates {
+		require.True(t, update.EnsureCodexFingerprintSeed)
+		require.Equal(t, "session", update.Extra[codexFingerprintModeExtraKey])
+		require.NotContains(t, update.Extra, codexFingerprintSeedExtraKey)
+	}
 }
 
 type codexSeedDuplicateRepo struct {

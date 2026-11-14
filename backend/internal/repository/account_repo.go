@@ -2153,13 +2153,6 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 		return err
 	}
 
-	if len(groupIDs) == 0 {
-		if tx != nil {
-			return tx.Commit()
-		}
-		return nil
-	}
-
 	builders := make([]*dbent.AccountGroupCreate, 0, len(groupIDs))
 	for i, groupID := range groupIDs {
 		builders = append(builders, txClient.AccountGroup.Create().
@@ -2169,18 +2162,20 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 		)
 	}
 
-	if _, err := txClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
-		return err
+	if len(builders) > 0 {
+		if _, err := txClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
+			return err
+		}
 	}
 
+	payload := buildSchedulerGroupPayload(mergeGroupIDs(existingGroupIDs, groupIDs))
+	if err := enqueueSchedulerOutbox(ctx, txClient, service.SchedulerOutboxEventAccountGroupsChanged, &accountID, nil, payload); err != nil {
+		return err
+	}
 	if tx != nil {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-	}
-	payload := buildSchedulerGroupPayload(mergeGroupIDs(existingGroupIDs, groupIDs))
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountGroupsChanged, &accountID, nil, payload); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue bind groups failed: account=%d err=%v", accountID, err)
 	}
 	return nil
 }
@@ -3938,7 +3933,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		setClauses = append(setClauses, "extra = "+extraExpression)
 	}
 
-	if len(setClauses) == 0 && updates.ModelCatalog == nil {
+	if len(setClauses) == 0 && updates.ModelCatalog == nil && updates.ModelRestriction == nil && updates.GroupIDs == nil {
 		return 0, nil
 	}
 
@@ -3973,6 +3968,19 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	}
 
 	var catalogStates []byte
+	var modelRestrictions []byte
+	if updates.ModelRestriction != nil || updates.GroupIDs != nil || updates.PropagateProxy {
+		if contextTx == nil && tx == nil {
+			return 0, errors.New("compound bulk account update requires a transaction")
+		}
+	}
+	if updates.ModelRestriction != nil {
+		var err error
+		modelRestrictions, err = prepareBulkModelRestriction(ctx, exec, ids, updates.ModelRestriction)
+		if err != nil {
+			return 0, err
+		}
+	}
 	if updates.ModelCatalog != nil {
 		if contextTx == nil && tx == nil {
 			return 0, errors.New("bulk model catalog update requires a transaction")
@@ -4006,6 +4014,15 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 	}
 	if rows > 0 {
+		if updates.ModelRestriction != nil {
+			_, err := exec.ExecContext(ctx, `UPDATE accounts SET
+				credentials=jsonb_set(COALESCE(credentials,'{}'::jsonb),'{model_mapping}',edit.value->'mapping'),
+				extra=CASE WHEN edit.value->'catalog' <> 'null'::jsonb THEN jsonb_set(COALESCE(extra,'{}'::jsonb),'{model_catalog}',edit.value->'catalog') ELSE extra END
+				FROM jsonb_each($1::jsonb) AS edit WHERE accounts.id=edit.key::bigint AND accounts.deleted_at IS NULL`, string(modelRestrictions))
+			if err != nil {
+				return 0, err
+			}
+		}
 		if updates.ModelCatalog != nil {
 			_, err := exec.ExecContext(ctx, `UPDATE accounts SET extra=jsonb_set(COALESCE(extra,'{}'::jsonb),'{model_catalog}',catalog.value)
 				FROM jsonb_each($1::jsonb) AS catalog WHERE accounts.id=catalog.key::bigint AND accounts.deleted_at IS NULL`, string(catalogStates))
@@ -4017,6 +4034,27 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		payload := map[string]any{"account_ids": ids}
 		if err := enqueueSchedulerOutbox(ctx, exec, service.SchedulerOutboxEventAccountBulkChanged, nil, nil, payload); err != nil {
 			return 0, err
+		}
+		if updates.GroupIDs != nil {
+			for _, id := range ids {
+				if err := r.BindGroups(ctx, id, *updates.GroupIDs); err != nil {
+					return 0, err
+				}
+			}
+		}
+		if updates.PropagateProxy && updates.ProxyID != nil {
+			var proxyID any
+			if *updates.ProxyID != 0 {
+				proxyID = *updates.ProxyID
+			}
+			_, err := exec.ExecContext(ctx, `WITH changed AS (
+				UPDATE accounts SET proxy_id=$1,updated_at=NOW()
+				WHERE parent_account_id=ANY($2) AND quota_dimension='spark' AND deleted_at IS NULL RETURNING id
+			) INSERT INTO scheduler_outbox(event_type,account_id,payload)
+			SELECT 'account_changed',id,'{}'::jsonb FROM changed`, proxyID, pq.Array(ids))
+			if err != nil {
+				return 0, err
+			}
 		}
 	}
 	if tx != nil {

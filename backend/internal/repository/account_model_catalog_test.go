@@ -104,6 +104,51 @@ func TestModelCatalogPostgresConsistency(t *testing.T) {
 	// A source edit starts a new round and cannot be delayed by the previous round's completion.
 	require.Empty(t, read().ModelCatalog().NextSyncAt)
 
+	t.Run("compound bulk edits roll back fields groups and shadows", func(t *testing.T) {
+		before := read()
+		priority := before.Priority + 10
+		invalidGroups := []int64{99999999}
+		_, err := repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{Priority: &priority, GroupIDs: &invalidGroups})
+		require.Error(t, err)
+		require.Equal(t, before.Priority, read().Priority)
+		shadow := &service.Account{Name: "bulk-shadow", Platform: "openai", Type: "oauth", Status: "active", ParentAccountID: &a.ID, QuotaDimension: "spark", Credentials: map[string]any{}}
+		require.NoError(t, repo.Create(ctx, shadow))
+		_, err = db.Exec(`CREATE FUNCTION reject_shadow_proxy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.parent_account_id IS NOT NULL THEN RAISE EXCEPTION 'shadow write rejected'; END IF; RETURN NEW; END $$;
+			CREATE TRIGGER reject_shadow_proxy BEFORE UPDATE ON accounts FOR EACH ROW EXECUTE FUNCTION reject_shadow_proxy()`)
+		require.NoError(t, err)
+		clearProxy := int64(0)
+		_, err = repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{Priority: &priority, ProxyID: &clearProxy, PropagateProxy: true})
+		require.ErrorContains(t, err, "shadow write rejected")
+		require.Equal(t, before.Priority, read().Priority)
+		_, err = db.Exec(`DROP TRIGGER reject_shadow_proxy ON accounts`)
+		require.NoError(t, err)
+		_, err = repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{Priority: &priority, ProxyID: &clearProxy, PropagateProxy: true})
+		require.NoError(t, err)
+		require.Equal(t, priority, read().Priority)
+		storedShadow, err := repo.GetByID(ctx, shadow.ID)
+		require.NoError(t, err)
+		require.Nil(t, storedShadow.ProxyID)
+		factor := 20
+		_, err = repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{LoadFactor: &factor})
+		require.NoError(t, err)
+		factor = 0
+		_, err = repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{LoadFactor: &factor})
+		require.NoError(t, err)
+		require.Nil(t, read().LoadFactor)
+	})
+
+	t.Run("bulk model parts preserve aliases and whitelist independently", func(t *testing.T) {
+		_, err := repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{Credentials: map[string]any{"model_mapping": map[string]any{"old": "old", "alias": "target"}}})
+		require.NoError(t, err)
+		_, err = repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{ModelRestriction: &service.BulkModelRestrictionEdit{Mode: "whitelist", Models: []string{"new"}}})
+		require.NoError(t, err)
+		require.Equal(t, map[string]string{"new": "new", "alias": "target"}, read().GetModelMapping())
+		_, err = repo.BulkUpdate(ctx, []int64{a.ID}, service.AccountBulkUpdate{ModelRestriction: &service.BulkModelRestrictionEdit{Mode: "mapping"}})
+		require.NoError(t, err)
+		require.Equal(t, map[string]string{"new": "new"}, read().GetModelMapping())
+		require.Equal(t, "custom", read().ModelCatalog().Source)
+	})
+
 	t.Run("bulk upstream preserves per-account models and commits atomically", func(t *testing.T) {
 		second := &service.Account{Name: "second", Platform: "openai", Type: "oauth", Status: "active", Credentials: map[string]any{
 			"access_token": "second-token", "model_mapping": map[string]any{"second-model": "second-model", "second-alias": "second-target"},

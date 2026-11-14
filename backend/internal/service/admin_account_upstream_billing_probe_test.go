@@ -694,7 +694,7 @@ func TestBulkUpdateAccountsAcceptsDedicatedUpstreamBillingProbeSetting(t *testin
 
 			require.NoError(t, err)
 			require.Equal(t, 2, result.Success)
-			require.Len(t, repo.bulkUpdates, 1)
+			require.Len(t, repo.bulkUpdates, 2)
 			require.Equal(t, enabled, repo.bulkUpdates[0].Extra[UpstreamBillingProbeEnabledExtraKey])
 			if !enabled {
 				require.Equal(t, false, repo.bulkUpdates[0].Extra[UpstreamBillingRateSyncEnabledExtraKey])

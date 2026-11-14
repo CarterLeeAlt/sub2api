@@ -13,7 +13,7 @@ import (
 
 // Lock targets in ID order and derive each catalog from the latest row, including
 // concurrent background observations. The caller keeps these locks until commit.
-func prepareBulkModelCatalog(ctx context.Context, exec sqlQueryer, ids []int64, updates service.AccountBulkUpdate) ([]byte, error) {
+func loadLockedBulkAccounts(ctx context.Context, exec sqlQueryer, ids []int64) (map[int64]*service.Account, error) {
 	rows, err := exec.QueryContext(ctx, `SELECT id,platform,type,parent_account_id,
 		COALESCE(credentials,'{}'::jsonb),COALESCE(extra,'{}'::jsonb)
 		FROM accounts WHERE id=ANY($1) AND deleted_at IS NULL ORDER BY id FOR NO KEY UPDATE`, pq.Array(ids))
@@ -21,7 +21,7 @@ func prepareBulkModelCatalog(ctx context.Context, exec sqlQueryer, ids []int64, 
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	states := make(map[int64]service.AccountModelCatalog, len(ids))
+	accounts := make(map[int64]*service.Account, len(ids))
 	for rows.Next() {
 		var account service.Account
 		var credentials, extra []byte
@@ -34,22 +34,50 @@ func prepareBulkModelCatalog(ctx context.Context, exec sqlQueryer, ids []int64, 
 		if err := json.Unmarshal(extra, &account.Extra); err != nil {
 			return nil, err
 		}
-		state, err := updates.ModelCatalog.Apply(&account, updates.Credentials, updates.Extra)
-		if err != nil {
-			return nil, err
-		}
-		states[account.ID] = state
+		accounts[account.ID] = &account
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
 	}
-	payload := make(map[string]service.AccountModelCatalog, len(states))
 	for _, id := range ids {
-		state, ok := states[id]
-		if !ok {
+		if accounts[id] == nil {
 			return nil, service.ErrAccountNotFound
 		}
+	}
+	return accounts, nil
+}
+
+func prepareBulkModelCatalog(ctx context.Context, exec sqlQueryer, ids []int64, updates service.AccountBulkUpdate) ([]byte, error) {
+	accounts, err := loadLockedBulkAccounts(ctx, exec, ids)
+	if err != nil {
+		return nil, err
+	}
+	payload := make(map[string]service.AccountModelCatalog, len(accounts))
+	for id, account := range accounts {
+		state, err := updates.ModelCatalog.Apply(account, updates.Credentials, updates.Extra)
+		if err != nil {
+			return nil, err
+		}
 		payload[strconv.FormatInt(id, 10)] = state
+	}
+	return json.Marshal(payload)
+}
+
+func prepareBulkModelRestriction(ctx context.Context, exec sqlQueryer, ids []int64, edit *service.BulkModelRestrictionEdit) ([]byte, error) {
+	accounts, err := loadLockedBulkAccounts(ctx, exec, ids)
+	if err != nil {
+		return nil, err
+	}
+	payload := make(map[string]map[string]any, len(accounts))
+	for id, account := range accounts {
+		if err := edit.Apply(account); err != nil {
+			return nil, err
+		}
+		mapping := account.GetModelMapping()
+		if mapping == nil {
+			mapping = map[string]string{}
+		}
+		payload[strconv.FormatInt(id, 10)] = map[string]any{"mapping": mapping, "catalog": account.Extra[service.AccountModelCatalogExtraKey]}
 	}
 	return json.Marshal(payload)
 }

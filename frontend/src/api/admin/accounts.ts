@@ -526,12 +526,17 @@ export async function batchUpdateCredentials(request: {
   return data
 }
 
-/**
- * Bulk update multiple accounts
- * @param accountIds - Array of account IDs
- * @param updates - Fields to update
- * @returns Success confirmation
- */
+/** Summarize platforms and types across the complete bulk-edit target. */
+export async function previewBulkUpdate(target: { account_ids?: number[]; filters?: Record<string, unknown> }): Promise<{
+  count: number
+  platforms: Account['platform'][]
+  types: Account['type'][]
+}> {
+  const { data } = await apiClient.post('/admin/accounts/bulk-update/preview', target)
+  return data
+}
+
+/** Bulk update selected accounts or filtered results with per-account outcomes. */
 export async function bulkUpdate(
   accountIdsOrPayload: number[] | Record<string, unknown>,
   updates?: Record<string, unknown>
@@ -1174,6 +1179,7 @@ export const accountsAPI = {
   batchCreate,
   batchUpdateCredentials,
   bulkUpdate,
+  previewBulkUpdate,
   previewFromCrs,
   syncFromCrs,
   exportData,

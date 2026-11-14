@@ -5,6 +5,7 @@ import AccountsView from '../AccountsView.vue'
 
 const {
   listAccounts,
+  previewBulkUpdate,
   listWithEtag,
   getUpstreamBillingRatesWithEtag,
   getBatchTodayStats,
@@ -17,6 +18,7 @@ const {
   showSuccess
 } = vi.hoisted(() => ({
   listAccounts: vi.fn(),
+  previewBulkUpdate: vi.fn(),
   listWithEtag: vi.fn(),
   getUpstreamBillingRatesWithEtag: vi.fn(),
   getBatchTodayStats: vi.fn(),
@@ -33,6 +35,7 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       list: listAccounts,
+      previewBulkUpdate,
       listWithEtag,
       getUpstreamBillingRatesWithEtag,
       getBatchTodayStats,
@@ -129,6 +132,8 @@ describe('admin AccountsView bulk edit scope', () => {
     localStorage.clear()
 
     listAccounts.mockReset()
+    previewBulkUpdate.mockReset()
+    previewBulkUpdate.mockResolvedValue({count: 200, platforms: ['openai', 'anthropic'], types: ['oauth', 'apikey']})
     listWithEtag.mockReset()
     getUpstreamBillingRatesWithEtag.mockReset()
     getBatchTodayStats.mockReset()
@@ -209,6 +214,10 @@ describe('admin AccountsView bulk edit scope', () => {
 
     expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-show')).toBe('true')
     expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-target-mode')).toBe('filtered')
+    expect(previewBulkUpdate).toHaveBeenCalledWith({ filters: expect.any(Object) })
+    expect(wrapper.getComponent(BulkEditAccountModalStub).props('target')).toMatchObject({
+      previewCount: 200, selectedPlatforms: ['openai', 'anthropic'], selectedTypes: ['oauth', 'apikey']
+    })
   })
 
   it('renders the created_at column by default', async () => {

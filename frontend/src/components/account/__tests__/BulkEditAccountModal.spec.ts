@@ -98,6 +98,64 @@ describe('BulkEditAccountModal', () => {
     } as any)
   })
 
+  it('拒绝白名单通配符和不完整映射，保留表单而不清空服务器配置', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    await wrapper.get('input[placeholder="admin.accounts.enterCustomModelName"]').setValue('gpt-*')
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.addModel')!.trigger('click')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.bulkEdit.invalidWhitelist')
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.addMapping')!.trigger('click')
+    await wrapper.get('input[placeholder="admin.accounts.requestModel"]').setValue('alias')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.bulkEdit.invalidMapping')
+  })
+
+  it('部分失败保留明细和弹窗，重试只提交失败账号', async () => {
+    vi.mocked(adminAPI.accounts.bulkUpdate).mockResolvedValueOnce({ success: 1, failed: 1, failed_ids: [2], results: [
+      { account_id: 1, success: true }, { account_id: 2, success: false, error: 'group update failed' }
+    ] })
+    const wrapper = mountModal()
+    await wrapper.get('#bulk-edit-priority-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(wrapper.emitted('updated')).toEqual([[{ failedIds: [2] }]])
+    expect(wrapper.get('[data-testid="bulk-update-failures"]').text()).toContain('#2：group update failed')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([2], { priority: 1 })
+  })
+
+  it('旧请求返回不会关闭新批次的弹窗或清空新选择', async () => {
+    let finish!: (value: any) => void
+    vi.mocked(adminAPI.accounts.bulkUpdate).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const wrapper = mountModal()
+    await wrapper.get('#bulk-edit-priority-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true, accountIds: [3, 4] })
+    finish({ success: 2, failed: 0, results: [] })
+    await flushPromises()
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(wrapper.emitted('updated')).toBeUndefined()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('RPM 缓冲留空显式清除旧覆盖以恢复自动值', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['anthropic'], selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-rpm-limit-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-rpm-limit-body button').trigger('click')
+    await wrapper.get('input[placeholder="admin.accounts.quotaControl.rpmLimit.baseRpmPlaceholder"]').setValue(15)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], { extra: { base_rpm: 15, rpm_strategy: 'tiered', rpm_sticky_buffer: 0 } })
+  })
+
   it('批量修改倍率时提示自动同步账号需要先关闭同步', async () => {
     const wrapper = mountModal()
 
@@ -176,7 +234,7 @@ describe('BulkEditAccountModal', () => {
     await flushPromises()
     const updates = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1]!
     expect(updates).not.toHaveProperty('model_catalog')
-    expect(updates).toHaveProperty('credentials.model_mapping')
+    expect(updates).toHaveProperty('model_restriction')
   })
 
   it('非普通 OpenAI OAuth 目标不提供批量上游目录；后端资格拒绝保留弹窗', async () => {
@@ -207,7 +265,7 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.text()).not.toContain('GPT-5.3 Codex Spark')
   })
 
-  it('仅勾选模型限制且白名单留空时，应提交空 model_mapping 以支持所有模型', async () => {
+  it('仅勾选白名单且留空时只清空白名单，保留各账号别名', async () => {
     const wrapper = mountModal({
       selectedPlatforms: ['anthropic'],
       selectedTypes: ['apikey']
@@ -219,9 +277,7 @@ describe('BulkEditAccountModal', () => {
 
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
-      credentials: {
-        model_mapping: {}
-      }
+      model_restriction: { mode: 'whitelist', models: [] }
     })
   })
 
@@ -426,13 +482,13 @@ describe('BulkEditAccountModal', () => {
     })
   })
 
-  it('OpenAI OAuth 批量编辑应提交 codex_cli_only_allow_app_server 字段（需同时开启父开关）', async () => {
+  it('OpenAI OAuth 批量编辑可同时开启 Codex CLI 和 app-server', async () => {
     const wrapper = mountModal({
       selectedPlatforms: ['openai'],
       selectedTypes: ['oauth']
     })
 
-    // 子开关从属于 codex_cli_only：必须同时批量开启父开关才写入
+    // 同时开启父设置和子设置。
     await wrapper.get('#bulk-edit-openai-codex-cli-only-enabled').setValue(true)
     await wrapper.get('#bulk-edit-openai-codex-cli-only-toggle').trigger('click')
     await wrapper.get('#bulk-edit-openai-codex-app-server-enabled').setValue(true)
@@ -449,19 +505,18 @@ describe('BulkEditAccountModal', () => {
     })
   })
 
-  it('未同时开启父开关时不应写入 codex_cli_only_allow_app_server', async () => {
+  it('app-server 可单独提交，由后端校验各账号已有父开关', async () => {
     const wrapper = mountModal({
       selectedPlatforms: ['openai'],
       selectedTypes: ['oauth']
     })
 
-    // 仅开启子开关、不批量设置父开关 codex_cli_only：不应写入孤立字段，也不应调用接口
     await wrapper.get('#bulk-edit-openai-codex-app-server-enabled').setValue(true)
     await wrapper.get('#bulk-edit-openai-codex-app-server-toggle').trigger('click')
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
 
-    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], { extra: { codex_cli_only_allow_app_server: true } })
   })
 
   it('OpenAI API Key 批量编辑应提交 API Key 专属 WS mode 字段', async () => {
@@ -792,7 +847,8 @@ describe('BulkEditAccountModal', () => {
       success: 1,
       failed: 1,
       long_context_inherited_count: 1,
-      results: []
+      failed_ids: [2],
+      results: [{ account_id: 1, success: true }, { account_id: 2, success: false, error: 'test failure' }]
     } as any)
     const wrapper = mountModal({
       selectedPlatforms: ['openai'],

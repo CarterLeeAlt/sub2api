@@ -165,22 +165,23 @@ type UpdateAccountRequest struct {
 
 // BulkUpdateAccountsRequest represents the payload for bulk editing accounts
 type BulkUpdateAccountsRequest struct {
-	ModelCatalog            *service.BulkModelCatalogEdit `json:"model_catalog"`
-	AccountIDs              []int64                       `json:"account_ids"`
-	Filters                 *BulkUpdateAccountFilters     `json:"filters"`
-	Name                    string                        `json:"name"`
-	ProxyID                 *int64                        `json:"proxy_id"`
-	Concurrency             *int                          `json:"concurrency"`
-	Priority                *int                          `json:"priority"`
-	RateMultiplier          *float64                      `json:"rate_multiplier"`
-	LoadFactor              *int                          `json:"load_factor"`
-	Status                  string                        `json:"status" binding:"omitempty,oneof=active inactive error"`
-	Schedulable             *bool                         `json:"schedulable"`
-	GroupIDs                *[]int64                      `json:"group_ids"`
-	Credentials             map[string]any                `json:"credentials"`
-	Extra                   map[string]any                `json:"extra"`
-	ProbeEnabled            *bool                         `json:"upstream_billing_probe_enabled"`
-	ConfirmMixedChannelRisk *bool                         `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	ModelRestriction        *service.BulkModelRestrictionEdit `json:"model_restriction"`
+	ModelCatalog            *service.BulkModelCatalogEdit     `json:"model_catalog"`
+	AccountIDs              []int64                           `json:"account_ids"`
+	Filters                 *BulkUpdateAccountFilters         `json:"filters"`
+	Name                    string                            `json:"name"`
+	ProxyID                 *int64                            `json:"proxy_id"`
+	Concurrency             *int                              `json:"concurrency"`
+	Priority                *int                              `json:"priority"`
+	RateMultiplier          *float64                          `json:"rate_multiplier"`
+	LoadFactor              *int                              `json:"load_factor"`
+	Status                  string                            `json:"status" binding:"omitempty,oneof=active inactive error"`
+	Schedulable             *bool                             `json:"schedulable"`
+	GroupIDs                *[]int64                          `json:"group_ids"`
+	Credentials             map[string]any                    `json:"credentials"`
+	Extra                   map[string]any                    `json:"extra"`
+	ProbeEnabled            *bool                             `json:"upstream_billing_probe_enabled"`
+	ConfirmMixedChannelRisk *bool                             `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 type BulkUpdateAccountFilters struct {
@@ -2317,6 +2318,81 @@ func (h *AccountHandler) BatchUpdateCredentials(c *gin.Context) {
 	})
 }
 
+// PreviewBulkUpdate summarizes every target, including accounts outside the visible page.
+func (h *AccountHandler) PreviewBulkUpdate(c *gin.Context) {
+	var req struct {
+		AccountIDs []int64                   `json:"account_ids"`
+		Filters    *BulkUpdateAccountFilters `json:"filters"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	var accounts []*service.Account
+	if len(req.AccountIDs) > 0 {
+		var err error
+		accounts, err = h.adminService.GetAccountsByIDs(c.Request.Context(), req.AccountIDs)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	} else if req.Filters != nil {
+		groupID := int64(0)
+		if req.Filters.Group == "ungrouped" {
+			groupID = service.AccountListGroupUngrouped
+		} else if req.Filters.Group != "" {
+			var err error
+			groupID, err = strconv.ParseInt(req.Filters.Group, 10, 64)
+			if err != nil || groupID <= 0 {
+				response.BadRequest(c, "invalid group filter")
+				return
+			}
+		}
+		for page := 1; ; page++ {
+			items, total, err := h.adminService.ListAccounts(c.Request.Context(), page, 500,
+				req.Filters.Platform, req.Filters.Type, req.Filters.Status, req.Filters.Search, groupID, req.Filters.PrivacyMode, "id", "asc")
+			if err != nil {
+				response.ErrorFrom(c, err)
+				return
+			}
+			for i := range items {
+				accounts = append(accounts, &items[i])
+			}
+			if int64(len(accounts)) >= total || len(items) == 0 {
+				break
+			}
+		}
+	} else {
+		response.BadRequest(c, "account_ids or filters is required")
+		return
+	}
+	ids := make(map[int64]bool, len(accounts))
+	platforms, accountTypes := map[string]bool{}, map[string]bool{}
+	for _, account := range accounts {
+		if account != nil {
+			ids[account.ID] = true
+			platforms[account.Platform] = true
+			accountTypes[account.Type] = true
+		}
+	}
+	for _, id := range req.AccountIDs {
+		if !ids[id] {
+			response.ErrorFrom(c, service.ErrAccountNotFound)
+			return
+		}
+	}
+	platformList, typeList := make([]string, 0, len(platforms)), make([]string, 0, len(accountTypes))
+	for platform := range platforms {
+		platformList = append(platformList, platform)
+	}
+	for accountType := range accountTypes {
+		typeList = append(typeList, accountType)
+	}
+	sort.Strings(platformList)
+	sort.Strings(typeList)
+	response.Success(c, gin.H{"count": len(ids), "platforms": platformList, "types": typeList})
+}
+
 // BulkUpdate handles bulk updating accounts with selected fields/credentials.
 // POST /api/v1/admin/accounts/bulk-update
 func (h *AccountHandler) BulkUpdate(c *gin.Context) {
@@ -2354,7 +2430,7 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 		req.GroupIDs != nil ||
 		len(req.Credentials) > 0 ||
 		len(req.Extra) > 0 ||
-		req.ProbeEnabled != nil || req.ModelCatalog != nil
+		req.ProbeEnabled != nil || req.ModelCatalog != nil || req.ModelRestriction != nil
 
 	if !hasUpdates {
 		response.BadRequest(c, "No updates provided")
@@ -2365,6 +2441,7 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 		AccountIDs:            req.AccountIDs,
 		Filters:               toServiceBulkUpdateAccountFilters(req.Filters),
 		ModelCatalog:          req.ModelCatalog,
+		ModelRestriction:      req.ModelRestriction,
 		Name:                  req.Name,
 		ProxyID:               req.ProxyID,
 		Concurrency:           req.Concurrency,

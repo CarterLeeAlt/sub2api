@@ -464,7 +464,7 @@
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
       :show="showBulkEdit"
-      :account-ids="selIds"
+      :account-ids="bulkEditTarget?.mode === 'selected' ? bulkEditTarget.accountIds : selIds"
       :selected-platforms="selPlatforms"
       :selected-types="selTypes"
       :target="bulkEditTarget ?? undefined"
@@ -596,6 +596,7 @@ const showImportData = ref(false)
 const showExportDataDialog = ref(false)
 const includeProxyOnExport = ref(true)
 const showBulkEdit = ref(false)
+let bulkEditPreviewVersion = 0
 const bulkEditTarget = ref<AccountBulkEditTarget | null>(null)
 const showTempUnsched = ref(false)
 const showDeleteDialog = ref(false)
@@ -1157,6 +1158,7 @@ const allResultsSelected = computed(() => {
 })
 
 const clearSelection = () => {
+  bulkEditPreviewVersion++
   selectionRequestVersion.value++
   selectingAllResults.value = false
   selectedAllResultIDs.value = null
@@ -2120,40 +2122,47 @@ const handleSelectAllResults = async () => {
   }
 }
 
-const collectSelectionMetadata = (rows: Account[]) => {
-  const selectedPlatforms = Array.from(new Set(rows.map(account => account.platform)))
-  const selectedTypes = Array.from(new Set(rows.map(account => account.type)))
-  return { selectedPlatforms, selectedTypes }
-}
-
-const openBulkEditSelected = () => {
-  bulkEditTarget.value = {
-    mode: 'selected',
-    accountIds: [...selIds.value],
-    selectedPlatforms: [...selPlatforms.value],
-    selectedTypes: [...selTypes.value]
+const openBulkEditSelected = async () => {
+  const version = ++bulkEditPreviewVersion
+  const accountIds = [...selIds.value]
+  try {
+    const preview = await adminAPI.accounts.previewBulkUpdate({ account_ids: accountIds })
+    if (version !== bulkEditPreviewVersion) return
+    bulkEditTarget.value = {
+      mode: 'selected', accountIds,
+      selectedPlatforms: preview.platforms,
+      selectedTypes: preview.types
+    }
+    showBulkEdit.value = true
+  } catch (error) {
+    if (version === bulkEditPreviewVersion) appStore.showError(extractApiErrorMessage(error, t('admin.accounts.bulkEdit.failed')))
   }
-  showBulkEdit.value = true
 }
 
 const openBulkEditFiltered = async () => {
+  const version = ++bulkEditPreviewVersion
   const filters = buildBulkEditFilterSnapshot()
-  const preview = await adminAPI.accounts.list(1, 100, filters)
-  const { selectedPlatforms, selectedTypes } = collectSelectionMetadata(preview.items)
-  bulkEditTarget.value = {
-    mode: 'filtered',
-    filters,
-    previewCount: preview.total,
-    selectedPlatforms,
-    selectedTypes
+  try {
+    const preview = await adminAPI.accounts.previewBulkUpdate({ filters })
+    if (version !== bulkEditPreviewVersion) return
+    bulkEditTarget.value = {
+      mode: 'filtered', filters, previewCount: preview.count,
+      selectedPlatforms: preview.platforms, selectedTypes: preview.types
+    }
+    showBulkEdit.value = true
+  } catch (error) {
+    if (version === bulkEditPreviewVersion) appStore.showError(extractApiErrorMessage(error, t('admin.accounts.bulkEdit.failed')))
   }
-  showBulkEdit.value = true
 }
 
-const handleBulkUpdated = () => {
-  showBulkEdit.value = false
-  bulkEditTarget.value = null
-  clearSelection()
+const handleBulkUpdated = (result: {failedIds: number[]}) => {
+  if (result.failedIds.length > 0) {
+    setSelectedIds(result.failedIds)
+  } else {
+    showBulkEdit.value = false
+    bulkEditTarget.value = null
+    clearSelection()
+  }
   reload()
 }
 const handleDataImported = () => { showImportData.value = false; reload() }
@@ -2602,6 +2611,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  bulkEditPreviewVersion++
   upstreamBillingRateAbortController?.abort()
   if (usageBatchFlushTimer !== null) {
     clearTimeout(usageBatchFlushTimer)
