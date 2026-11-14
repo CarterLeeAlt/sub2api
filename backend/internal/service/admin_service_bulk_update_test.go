@@ -159,18 +159,19 @@ func TestAdminServiceBulkUpdateAccounts_ModelCatalog(t *testing.T) {
 		t.Run(fmt.Sprintf("filtered=%t", filtered), func(t *testing.T) {
 			accounts := []*Account{
 				{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
-				{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+				{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModePersonalAccessToken}},
+				{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModeAgentIdentity}},
 			}
-			repo := &accountRepoStubForBulkUpdate{getByIDsAccounts: accounts, listData: []Account{*accounts[0], *accounts[1]}}
+			repo := &accountRepoStubForBulkUpdate{getByIDsAccounts: accounts, listData: []Account{*accounts[0], *accounts[1], *accounts[2]}}
 			svc := &adminServiceImpl{accountRepo: repo}
-			input := &BulkUpdateAccountsInput{AccountIDs: []int64{1, 2}, ModelCatalog: &BulkModelCatalogEdit{Source: "upstream"}}
+			input := &BulkUpdateAccountsInput{AccountIDs: []int64{1, 2, 3}, ModelCatalog: &BulkModelCatalogEdit{Source: "upstream"}}
 			if filtered {
 				input.AccountIDs = nil
 				input.Filters = &BulkUpdateAccountFilters{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 			}
 			result, err := svc.BulkUpdateAccounts(context.Background(), input)
 			require.NoError(t, err)
-			require.Equal(t, 2, result.Success)
+			require.Equal(t, 3, result.Success)
 			require.Equal(t, input.ModelCatalog, repo.lastBulkUpdate.ModelCatalog)
 			require.Empty(t, repo.lastBulkUpdate.Credentials)
 		})

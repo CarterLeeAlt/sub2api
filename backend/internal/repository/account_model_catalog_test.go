@@ -151,7 +151,8 @@ func TestModelCatalogPostgresConsistency(t *testing.T) {
 
 	t.Run("bulk upstream preserves per-account models and commits atomically", func(t *testing.T) {
 		second := &service.Account{Name: "second", Platform: "openai", Type: "oauth", Status: "active", Credentials: map[string]any{
-			"access_token": "second-token", "model_mapping": map[string]any{"second-model": "second-model", "second-alias": "second-target"},
+			"auth_mode":    service.OpenAIAuthModePersonalAccessToken,
+			"access_token": "at-second-token", "model_mapping": map[string]any{"second-model": "second-model", "second-alias": "second-target"},
 		}}
 		require.NoError(t, repo.Create(ctx, second))
 		beforeFirst := read()

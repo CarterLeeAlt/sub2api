@@ -346,8 +346,9 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
-  it('saves an explicit source and revision only after a model selection changes', async () => {
+  it.each(['chatgpt', 'personalAccessToken', 'agentIdentity'])('saves an explicit source and revision only after a model selection changes (%s)', async (authMode) => {
     const account = buildOpenAIOAuthParentAccount()
+    account.credentials.auth_mode = authMode
     account.extra.model_catalog = { source: 'upstream', revision: 'r1', ready: true }
     account.credentials.model_mapping = { fresh: 'fresh', alias: 'manual' }
     updateAccountMock.mockReset().mockResolvedValue(account)

@@ -15,12 +15,18 @@ func catalogTestAccount() *Account {
 }
 
 func TestModelCatalogCreationAndEligibility(t *testing.T) {
-	for _, excluded := range []string{"", "apikey", "setup-token", "agent", "pat", "legacy-pat", "shadow", "passthrough", "legacy-passthrough", "other"} {
-		t.Run(excluded, func(t *testing.T) {
+	for _, mode := range []string{"manual", "refresh-token", "mobile-refresh-token", "auth-json", "agent", "pat", "legacy-pat", "apikey", "setup-token", "shadow", "passthrough", "legacy-passthrough", "other"} {
+		t.Run(mode, func(t *testing.T) {
 			a := catalogTestAccount()
-			switch excluded {
+			eligible := true
+			switch mode {
+			case "refresh-token", "mobile-refresh-token":
+				a.Credentials["refresh_token"] = "refresh-token"
+			case "auth-json":
+				a.Credentials["auth_mode"] = "chatgpt"
 			case "apikey", "setup-token":
-				a.Type = excluded
+				a.Type = mode
+				eligible = false
 			case "agent":
 				a.Credentials["auth_mode"] = OpenAIAuthModeAgentIdentity
 			case "pat":
@@ -28,18 +34,22 @@ func TestModelCatalogCreationAndEligibility(t *testing.T) {
 			case "legacy-pat":
 				a.Credentials["openai_auth_mode"] = "personal_access_token"
 			case "shadow":
+				eligible = false
 				id := int64(2)
 				a.ParentAccountID = &id
 			case "passthrough":
+				eligible = false
 				a.Extra = map[string]any{"openai_passthrough": true}
 			case "legacy-passthrough":
+				eligible = false
 				a.Extra = map[string]any{"openai_oauth_passthrough": true}
 			case "other":
+				eligible = false
 				a.Platform = PlatformAnthropic
 			}
 			require.NoError(t, InitializeAccountModelCatalog(a))
-			require.Equal(t, excluded == "", a.ModelCatalogPending())
-			if excluded == "" {
+			require.Equal(t, eligible, a.ModelCatalogPending())
+			if eligible {
 				require.False(t, a.IsSchedulable())
 				require.True(t, a.Schedulable)
 			} else {

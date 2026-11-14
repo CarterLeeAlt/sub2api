@@ -82,6 +82,7 @@ func TestImportCodexSessionsKeepsAgentIdentityTeamsSeparate(t *testing.T) {
 	handler := NewAccountHandler(svc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.importCodexSessions(context.Background(), CodexSessionImportRequest{
+		ModelCatalog:         &service.ModelCatalogEdit{Source: "upstream"},
 		SkipDefaultGroupBind: boolPtr(true),
 	}, []codexImportEntry{{Index: 1, Value: first}, {Index: 2, Value: second}})
 	require.NoError(t, err)
@@ -89,6 +90,9 @@ func TestImportCodexSessionsKeepsAgentIdentityTeamsSeparate(t *testing.T) {
 	require.Zero(t, result.Updated)
 	require.Zero(t, result.Skipped)
 	require.Len(t, svc.createdAccounts, 2)
+	for _, input := range svc.createdAccounts {
+		require.Equal(t, &service.ModelCatalogEdit{Source: "upstream"}, input.ModelCatalog)
+	}
 }
 
 func TestImportCodexSessionsMergesAgentIdentityRuntimesForSameTeam(t *testing.T) {

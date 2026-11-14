@@ -854,6 +854,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await flushPromises()
 
     expect(importCodexSessionMock).toHaveBeenCalledTimes(1)
+    expect(importCodexSessionMock.mock.calls[0]?.[0]?.model_catalog).toEqual({ source: 'upstream', revision: '' })
   })
 
   it('sends true explicitly when OpenAI long-context billing is enabled', async () => {
@@ -935,7 +936,30 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await flushPromises()
 
     expect(createOpenAICodexPATMock).toHaveBeenCalledTimes(1)
+    expect(createOpenAICodexPATMock.mock.calls[0]?.[0]?.model_catalog).toEqual({ source: 'upstream', revision: '' })
     expect(createOpenAICodexPATMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBeUndefined()
+  })
+
+  it.each(['codex_pat', 'agent_identity'])('preserves the selected built-in model source when importing %s', async (method) => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    const selector = wrapper.getComponent(ModelWhitelistSelectorStub)
+    selector.vm.$emit('catalog-source', 'builtin')
+    selector.vm.$emit('update:modelValue', ['chosen-model'])
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Codex import')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    const flow = wrapper.getComponent(OAuthAuthorizationFlowStub)
+    flow.vm.inputMethod = method
+    if (method === 'codex_pat') {
+      flow.vm.$emit('import-codex-pat', 'at-test-token')
+    } else {
+      flow.vm.$emit('import-codex-session', JSON.stringify({ auth_mode: 'agentIdentity', agent_identity: { agent_runtime_id: 'runtime' } }))
+    }
+    await flushPromises()
+    const payload = (method === 'codex_pat' ? createOpenAICodexPATMock : importCodexSessionMock).mock.calls[0]?.[0]
+    expect(payload?.model_catalog).toEqual({ source: 'builtin', revision: '' })
+    expect(payload?.credential_extras?.model_mapping).toEqual({ 'chosen-model': 'chosen-model' })
+    wrapper.unmount()
   })
 
   it('sends explicit true for Codex session import after the toggle is enabled', async () => {

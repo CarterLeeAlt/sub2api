@@ -3,14 +3,69 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+func TestModelCatalogRefreshOAuthAuthorizationModes(t *testing.T) {
+	key, privateKey := newTestAgentIdentityKey(t)
+	accounts := []Account{
+		{ID: 91001, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "oauth-test-token", "chatgpt_account_id": "oauth"}},
+		{ID: 91002, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "at-test-token", "auth_mode": OpenAIAuthModePersonalAccessToken, "chatgpt_account_id": "pat"}},
+		{ID: 91003, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModeAgentIdentity, "agent_runtime_id": key.runtimeID, "agent_private_key": privateKey, "task_id": key.taskID, "chatgpt_account_id": "agent"}},
+		{ID: 91004, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "at-failed-token", "auth_mode": OpenAIAuthModePersonalAccessToken, "chatgpt_account_id": "failed"}},
+	}
+	for i := range accounts {
+		account := &accounts[i]
+		account.Credentials["model_mapping"] = map[string]any{"old": "old", "alias": fmt.Sprintf("target-%d", account.ID)}
+		state, err := (&BulkModelCatalogEdit{Source: "upstream"}).Apply(account, nil, nil)
+		require.NoError(t, err)
+		SetAccountModelCatalog(account, state)
+	}
+	authByAccount := make(map[string]string)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("ChatGPT-Account-ID")
+		authByAccount[id] = r.Header.Get("Authorization")
+		if id == "failed" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"models":[{"slug":"model-%s","supported_in_api":true}]}`, id)
+	}))
+	defer server.Close()
+	originalURL := chatgptCodexModelsURL
+	chatgptCodexModelsURL = server.URL
+	t.Cleanup(func() { chatgptCodexModelsURL = originalURL })
+	store := &catalogRefreshTestStore{accounts: accounts}
+	worker := NewOpenAIModelCatalogRefreshService(store, &AccountTestService{}, &fakeLeaderLockCache{})
+	defer worker.Stop()
+	require.NoError(t, worker.RunOnce(context.Background()))
+	require.Len(t, store.saved, len(accounts))
+	require.Equal(t, "Bearer oauth-test-token", authByAccount["oauth"])
+	require.Equal(t, "Bearer at-test-token", authByAccount["pat"])
+	require.True(t, strings.HasPrefix(authByAccount["agent"], "AgentAssertion "))
+	for _, account := range store.saved {
+		id := account.GetCredential("chatgpt_account_id")
+		require.Equal(t, fmt.Sprintf("target-%d", account.ID), account.GetModelMapping()["alias"])
+		if id == "failed" {
+			require.NotEmpty(t, account.ModelCatalog().Error)
+			require.Equal(t, "old", account.GetModelMapping()["old"])
+		} else {
+			require.Empty(t, account.ModelCatalog().Error)
+			require.True(t, account.ModelCatalog().Ready)
+			require.Equal(t, "model-"+id, account.GetModelMapping()["model-"+id])
+			require.NotContains(t, account.GetModelMapping(), "old")
+		}
+	}
+}
 
 func TestExtractOpenAICodexManifestModelIDs(t *testing.T) {
 	t.Parallel()

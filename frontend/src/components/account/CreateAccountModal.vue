@@ -4662,7 +4662,7 @@ const openAICompactModelMappings = ref<ModelMapping[]>([])
 const modelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const allowedModels = ref<string[]>([])
 const modelCatalogSource = ref<ModelCatalogSource>('upstream')
-const automaticModelCatalogEligible = computed(() => form.platform === 'openai' && form.type === 'oauth' && !openaiPassthroughEnabled.value && !['agent_identity', 'codex_pat'].includes(oauthFlowRef.value?.inputMethod ?? ''))
+const automaticModelCatalogEligible = computed(() => supportsAutomaticModelCatalog({ platform: form.platform, type: form.type, credentials: {}, extra: { openai_passthrough: openaiPassthroughEnabled.value }, parent_account_id: undefined }))
 const modelCatalogForCreate = (credentials: Record<string, unknown>, extra?: Record<string, unknown>) => {
   if (!supportsAutomaticModelCatalog({ platform: form.platform, type: form.type, credentials, extra, parent_account_id: undefined })) return undefined
   const mapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
@@ -6852,7 +6852,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
   try {
     const extra = buildOpenAICodexImportExtra()
     const result = await adminAPI.accounts.importCodexSession({
-      model_catalog: isAgentIdentityImportContent(trimmed) ? undefined : modelCatalogForCreate(credentialExtras, extra),
+      model_catalog: modelCatalogForCreate(credentialExtras, extra),
       content: trimmed,
       name: form.name,
       notes: form.notes || null,
@@ -6931,6 +6931,7 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
   try {
     const extra = buildOpenAICodexImportExtra()
     await adminAPI.accounts.createOpenAICodexPAT({
+      model_catalog: modelCatalogForCreate(credentialExtras, extra),
       access_token: trimmed,
       name: form.name,
       notes: form.notes || null,

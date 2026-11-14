@@ -1762,6 +1762,7 @@ export interface CodexSessionImportRequest {
 }
 
 export interface OpenAICodexPATCreateRequest {
+  model_catalog?: { source: 'upstream' | 'builtin' | 'custom'; revision?: string }
   access_token: string
   name?: string
   notes?: string | null

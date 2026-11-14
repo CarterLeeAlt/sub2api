@@ -61,7 +61,7 @@ type AccountModelCatalog struct {
 
 func (a *Account) SupportsAutomaticModelCatalog() bool {
 	return a != nil && a.Platform == PlatformOpenAI && a.Type == AccountTypeOAuth &&
-		!a.IsCredentialShadow() && !a.IsOpenAIAgentIdentity() && !a.IsOpenAIPersonalAccessToken() && !a.IsOpenAIPassthroughEnabled()
+		!a.IsCredentialShadow() && !a.IsOpenAIPassthroughEnabled()
 }
 
 func (a *Account) ModelCatalog() AccountModelCatalog {
@@ -115,7 +115,7 @@ func InitializeAccountModelCatalog(a *Account) error {
 	delete(a.Extra, AccountModelCatalogExtraKey)
 	if !a.SupportsAutomaticModelCatalog() {
 		if a.ModelCatalogEdit != nil {
-			return infraerrors.BadRequest("MODEL_CATALOG_UNSUPPORTED", "automatic model catalog requires a regular OpenAI OAuth parent account")
+			return infraerrors.BadRequest("MODEL_CATALOG_UNSUPPORTED", "automatic model catalog requires an OpenAI OAuth parent account with passthrough disabled")
 		}
 		return nil
 	}
@@ -145,7 +145,7 @@ func MergeAccountModelCatalog(incoming, current *Account) error {
 	edit := incoming.ModelCatalogEdit
 	if edit != nil {
 		if !incoming.SupportsAutomaticModelCatalog() {
-			return infraerrors.BadRequest("MODEL_CATALOG_UNSUPPORTED", "model source is only supported for regular OpenAI OAuth parent accounts")
+			return infraerrors.BadRequest("MODEL_CATALOG_UNSUPPORTED", "model source requires an OpenAI OAuth parent account with passthrough disabled")
 		}
 		if err := validateModelCatalogSource(edit.Source); err != nil {
 			return err

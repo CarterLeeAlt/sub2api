@@ -237,7 +237,7 @@ describe('BulkEditAccountModal', () => {
     expect(updates).toHaveProperty('model_restriction')
   })
 
-  it('非普通 OpenAI OAuth 目标不提供批量上游目录；后端资格拒绝保留弹窗', async () => {
+  it('不符合条件的目标不提供批量上游目录；后端资格拒绝保留弹窗', async () => {
     const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['apikey'] })
     expect(wrapper.find('[data-testid="sync-upstream-models"]').exists()).toBe(false)
     await wrapper.setProps({ selectedTypes: ['oauth'] })

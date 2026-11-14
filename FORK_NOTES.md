@@ -46,11 +46,11 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - 账户满足套餐和图像能力条件时，补充虚拟模型 `gpt-image-2`，供现有生图入口使用；
 - 前端账户模型白名单选择器允许展示和保存同步结果。
 
-普通 OpenAI OAuth 主账号新建后默认使用上游来源，由服务端立即安排首次同步，首次成功前独立阻止调度；用户关闭的调度开关保持关闭。排除透传、Spark 影子、Agent Identity、PAT、Setup Token、API Key 和其他平台。已有账号保持配置，可在编辑页选用上游后保存加入自动维护。
+OpenAI OAuth 主账号支持手动授权、RT、Mobile RT、Codex auth.json／AT 导入、Agent Identity 和 PAT 的自动模型目录；这些授权方式统一归入 `oauth` 账号类型，并复用各自的 Codex 目录认证路径。新建后默认使用上游来源，由服务端立即安排首次同步，首次成功前独立阻止调度；用户关闭的调度开关保持关闭。排除透传、Spark 影子、Setup Token、API Key 和其他平台。已有账号保持配置，可在编辑页或批量编辑中选用上游后保存加入自动维护。
 
 后台逐账号串行刷新，用跨实例锁避免重复拉取，每轮结束后随机等待 30～45 分钟；失败或空清单保留旧结果。来源和配置 revision、凭据、代理及上一观测时间共同保护写入，令牌刷新及旧表单保留数据库最新白名单。来源通过请求顶层 `model_catalog: {source, revision}` 显式保存，观测状态由服务端维护在 `extra.model_catalog`；受限管理接口沿用 `accounts.models.write` 授权。
 
-批量编辑支持以所选账号或筛选结果为目标，打开弹窗前由 `/admin/accounts/bulk-update/preview` 汇总全部目标的平台和类型。通过 `model_catalog: {source: "upstream"}` 让各账号分别使用自己的上游目录，保留各自当前白名单和别名映射，提交后启动自动同步。保存前校验全部目标均为支持自动目录的普通 OpenAI OAuth 主账号；写入时锁行并再次校验各账号独立的配置 revision。
+批量编辑支持以所选账号或筛选结果为目标，打开弹窗前由 `/admin/accounts/bulk-update/preview` 汇总全部目标的平台和类型。通过 `model_catalog: {source: "upstream"}` 让各账号分别使用自己的上游目录，保留各自当前白名单和别名映射，提交后启动自动同步。保存前校验全部目标均为支持自动目录的 OpenAI OAuth 主账号，允许不同授权方式混选；写入时锁行并再次校验各账号独立的配置 revision。
 
 批量手动模型配置使用 `model_restriction`：`{mode: "whitelist", models: [...]}` 只替换白名单并保留别名；`{mode: "mapping", mappings: {...}}` 替换别名并保留白名单。空列表或空映射只清除对应部分。手动修改转为自定义；上游来源、分项模型配置与完整 `credentials.model_mapping` 只能选一种。白名单只接受完整模型名称，映射源允许一个末尾通配符，空值、重复源和目标通配符在提交前拒绝。
 
