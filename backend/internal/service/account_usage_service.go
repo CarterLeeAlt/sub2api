@@ -1026,7 +1026,7 @@ func (s *AccountUsageService) shouldProbeOpenAICodexSnapshot(accountID int64, no
 		if !loaded {
 			return true
 		}
-		if !forceProbe && now.Before(cached.(time.Time)) {
+		if nextProbe, ok := cached.(time.Time); ok && !forceProbe && now.Before(nextProbe) {
 			return false
 		}
 		if s.cache.openAIProbeCache.CompareAndSwap(accountID, cached, next) {
