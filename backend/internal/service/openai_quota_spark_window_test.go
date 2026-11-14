@@ -302,7 +302,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 			_, _ = w.Write([]byte(`{"error":{"code":"invalid_task_id"}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"code":"ok","windows_reset":2}`))
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":2}`))
 	}))
 	defer srv.Close()
 	oldBase := openAIAgentIdentityAuthAPIBaseURL
@@ -315,7 +315,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 
 	result, err := svc.resetCredit(context.Background(), account.ID, "test-redemption", "")
 	require.NoError(t, err)
-	require.Equal(t, "ok", result.Code)
+	require.Equal(t, "reset", result.Code)
 	require.Equal(t, 2, result.WindowsReset)
 	require.Equal(t, 2, resetCalls)
 	require.Equal(t, 1, registerCalls)
@@ -365,7 +365,7 @@ func TestResetCreditAgentIdentityReusesConcurrentlyRecoveredTask(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"code":"invalid_task_id"}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"code":"ok","windows_reset":1}`))
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":1}`))
 	}))
 	defer srv.Close()
 	oldBase := openAIAgentIdentityAuthAPIBaseURL
@@ -375,7 +375,7 @@ func TestResetCreditAgentIdentityReusesConcurrentlyRecoveredTask(t *testing.T) {
 	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	result, err := svc.resetCredit(context.Background(), account.ID, "test-redemption", "")
 	require.NoError(t, err)
-	require.Equal(t, "ok", result.Code)
+	require.Equal(t, "reset", result.Code)
 	require.Equal(t, 2, resetCalls)
 	require.Zero(t, registerCalls)
 	require.Equal(t, "task-reset-old", decodeAgentAssertionTask(t, assertions[0]))

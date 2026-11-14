@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,7 +20,9 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/google/uuid"
 	"github.com/imroc/req/v3"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -39,8 +42,9 @@ func resetCoordinationRedis(t *testing.T) *redis.Client {
 
 type resetCompletionFaultRepository struct {
 	service.IdempotencyRepository
-	db   *sql.DB
-	fail atomic.Bool
+	db    *sql.DB
+	scope string
+	fail  atomic.Bool
 }
 
 func (r *resetCompletionFaultRepository) MarkSucceeded(ctx context.Context, id int64, status int, body string, expires time.Time) error {
@@ -48,7 +52,7 @@ func (r *resetCompletionFaultRepository) MarkSucceeded(ctx context.Context, id i
 	if err := r.db.QueryRowContext(ctx, `SELECT scope FROM idempotency_records WHERE id=$1`, id).Scan(&scope); err != nil {
 		return err
 	}
-	if scope == "openai_reset_redeem" && r.fail.CompareAndSwap(true, false) {
+	if scope == r.scope && r.fail.CompareAndSwap(true, false) {
 		return errors.New("simulated completion write failure")
 	}
 	return r.IdempotencyRepository.MarkSucceeded(ctx, id, status, body, expires)
@@ -84,7 +88,7 @@ func TestResetCoordinationPostgresRedis(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":"ok","windows_reset":2}`))
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":2}`))
 	}))
 	defer upstream.Close()
 	defer unblock()
@@ -99,7 +103,7 @@ func TestResetCoordinationPostgresRedis(t *testing.T) {
 		}), nil
 	}
 	base := NewIdempotencyRepository(nil, db)
-	fault := &resetCompletionFaultRepository{IdempotencyRepository: base, db: db}
+	fault := &resetCompletionFaultRepository{IdempotencyRepository: base, db: db, scope: "openai_reset_redeem"}
 	fault.fail.Store(true)
 	cfg := service.DefaultIdempotencyConfig()
 	cfg.FailedRetryBackoff = 0
@@ -147,6 +151,123 @@ func TestResetCoordinationPostgresRedis(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Equal(t, "new", rdb2.Get(ctx, leaderLockKeyPrefix+key).Val())
+}
+
+type resetTestTransport func(*http.Request) (*http.Response, error)
+
+func (f resetTestTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestClaudeResetCoordinationPostgresRedis(t *testing.T) {
+	for _, outcome := range []string{"reset", "unknown"} {
+		t.Run(outcome, func(t *testing.T) {
+			rdb1, rdb2 := resetCoordinationRedis(t), resetCoordinationRedis(t)
+			accounts, db := oauthStateTestRepository(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "057_add_idempotency_records.sql"))
+			require.NoError(t, err)
+			_, err = db.ExecContext(ctx, string(migration))
+			require.NoError(t, err)
+			makeAccount := func(name string) *service.Account {
+				a := &service.Account{Name: name, Platform: service.PlatformAnthropic, Type: service.AccountTypeOAuth, Status: service.StatusActive, Credentials: map[string]any{"access_token": "synthetic", "scope": "user:profile", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}}
+				require.NoError(t, accounts.Create(ctx, a))
+				return a
+			}
+			a, duplicate := makeAccount("claude-first"), makeAccount("claude-duplicate")
+			require.NoError(t, accounts.SetRateLimited(ctx, a.ID, time.Now().Add(time.Hour)))
+			org := uuid.NewString()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			var posts atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/oauth/profile":
+					_, _ = fmt.Fprintf(w, `{"organization":{"uuid":%q}}`, org)
+				case "/api/oauth/usage":
+					_, _ = w.Write([]byte(`{"cedar_ember":{"eligible":true,"at_limit":true,"next_grant_id":"grant","grants":[{"id":"grant","resets_left":2,"usable_now":true,"use_requires_limit":true,"clears":["five_hour","seven_day"]}]}}`))
+				case "/api/organizations/" + org + "/reset_rate_limits":
+					var body map[string]string
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+					require.Equal(t, "grant", body["grant_id"])
+					if posts.Add(1) == 1 {
+						close(entered)
+					}
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return
+					}
+					_, _ = fmt.Fprintf(w, `{"result":%q,"cleared":["five_hour","seven_day"]}`, outcome)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer upstream.Close()
+			defer unblock()
+			// The public service uses the shared client pool. Route that client's
+			// transport only to this local upstream, restoring it after the test.
+			client, err := httpclient.GetClient(httpclient.Options{Timeout: 25 * time.Second, ValidateResolvedIP: true})
+			require.NoError(t, err)
+			original := client.Transport
+			t.Cleanup(func() { client.Transport = original })
+			target, err := url.Parse(upstream.URL)
+			require.NoError(t, err)
+			client.Transport = resetTestTransport(func(r *http.Request) (*http.Response, error) {
+				copy := r.Clone(r.Context())
+				copy.URL.Scheme, copy.URL.Host = target.Scheme, target.Host
+				return upstream.Client().Transport.RoundTrip(copy)
+			})
+			base := NewIdempotencyRepository(nil, db)
+			fault := &resetCompletionFaultRepository{IdempotencyRepository: base, db: db, scope: "claude_reset_redeem"}
+			fault.fail.Store(true)
+			cfg := service.DefaultIdempotencyConfig()
+			cfg.FailedRetryBackoff = 0
+			first := service.NewClaudeResetCreditService(accounts, service.NewClaudeTokenProvider(accounts, nil, nil), nil, nil)
+			first.ConfigureRedemption(service.NewIdempotencyCoordinator(fault, cfg), NewLeaderLockCache(rdb1))
+			second := service.NewClaudeResetCreditService(accounts, service.NewClaudeTokenProvider(accounts, nil, nil), nil, nil)
+			second.ConfigureRedemption(service.NewIdempotencyCoordinator(base, cfg), NewLeaderLockCache(rdb2))
+			done := make(chan error, 1)
+			go func() { _, err := first.Redeem(ctx, a.ID, "confirmation"); done <- err }()
+			select {
+			case <-entered:
+			case err := <-done:
+				t.Fatalf("redemption ended before POST: %v", err)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			_, err = second.Redeem(ctx, a.ID, "confirmation")
+			require.ErrorIs(t, err, service.ErrIdempotencyInProgress)
+			_, err = second.Redeem(ctx, duplicate.ID, "other-confirmation")
+			require.Equal(t, "CLAUDE_RESET_BUSY", infraerrors.Reason(err))
+			unblock()
+			require.ErrorIs(t, <-done, service.ErrIdempotencyStoreUnavail)
+			_, err = db.ExecContext(ctx, `UPDATE idempotency_records SET locked_until=NOW()-INTERVAL '1 minute' WHERE scope='claude_reset_redeem' AND status='processing'`)
+			require.NoError(t, err)
+			if outcome == "reset" {
+				recovered, err := accounts.GetByID(ctx, a.ID)
+				require.NoError(t, err)
+				require.Nil(t, recovered.RateLimitResetAt)
+			}
+			require.NoError(t, accounts.SetRateLimited(ctx, a.ID, time.Now().Add(2*time.Hour)))
+			result, err := second.Redeem(ctx, a.ID, "confirmation")
+			require.NoError(t, err)
+			require.True(t, result.Replayed)
+			require.Equal(t, outcome, result.Outcome)
+			if outcome == "reset" {
+				require.Equal(t, []string{"five_hour", "seven_day"}, result.Cleared)
+			}
+			current, err := accounts.GetByID(ctx, a.ID)
+			require.NoError(t, err)
+			require.NotNil(t, current.RateLimitResetAt, "recovery replay must preserve a newer rate limit")
+			if outcome == "unknown" {
+				_, err = second.Redeem(ctx, duplicate.ID, "other-confirmation")
+				require.Equal(t, "CLAUDE_RESET_UNRESOLVED", infraerrors.Reason(err))
+			}
+			require.Equal(t, int32(1), posts.Load())
+		})
+	}
 }
 
 type crossInstanceAuthRepository struct {

@@ -312,6 +312,8 @@ func TestClaudeResetRecoversLostOperationCompletion(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, out.Replayed)
 	require.Equal(t, ClaudeResetOutcomeReset, out.Outcome)
+	require.Equal(t, []string{"five_hour"}, out.Cleared)
+	require.Equal(t, "account_state_recovery_failed", out.RecoveryWarning)
 	require.Equal(t, 1, f.postCount())
 }
 

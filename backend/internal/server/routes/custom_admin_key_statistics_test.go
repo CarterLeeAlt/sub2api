@@ -151,7 +151,7 @@ func TestScopedAdminRegisteredStatisticsAndOpenAIRoutes(t *testing.T) {
 					calls.Add(1)
 					w.Header().Set("Content-Type", "application/json")
 					if strings.HasSuffix(r.URL.Path, "/consume") {
-						_, _ = w.Write([]byte(`{"code":"success","windows_reset":1}`))
+						_, _ = w.Write([]byte(`{"code":"reset","windows_reset":1}`))
 					} else if strings.HasSuffix(r.URL.Path, "/credits") {
 						_, _ = w.Write([]byte(`{"available_count":0,"credits":[]}`))
 					} else {

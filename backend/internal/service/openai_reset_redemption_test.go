@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,13 +28,15 @@ func TestOpenAIResetRetryAndReplayConsumeOnce(t *testing.T) {
 		ids = append(ids, id)
 		consumed[id] = true
 		if len(ids) == 1 {
-			conn, _, err := w.(http.Hijacker).Hijack()
+			hijacker, ok := w.(http.Hijacker)
+			require.True(t, ok)
+			conn, _, err := hijacker.Hijack()
 			require.NoError(t, err)
 			_ = conn.Close()
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":"ok","windows_reset":2}`))
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":2}`))
 	}))
 	defer server.Close()
 	svc := NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, cache, nil), newQuotaRedirectingFactory(server), nil)
@@ -55,6 +59,66 @@ func TestOpenAIResetRetryAndReplayConsumeOnce(t *testing.T) {
 	require.Len(t, ids, 2)
 	require.Equal(t, ids[0], ids[1])
 	require.Len(t, consumed, 1)
+}
+
+func TestOpenAIResetRejectsUnconfirmedSuccessResponse(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"code":"reset"}`, `{"code":"reset","windows_reset":null}`, `{"code":"reset","windows_reset":-1}`, `{"code":"unknown","windows_reset":1}`} {
+		t.Run(body, func(t *testing.T) {
+			a := &Account{ID: 100, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "token", "chatgpt_account_id": "upstream"}}
+			accounts := &stubQuotaAccountRepo{accounts: map[int64]*Account{100: a}}
+			var posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				posts.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			svc := NewOpenAIQuotaService(accounts, nil, NewOpenAITokenProvider(accounts, nil, nil), newQuotaRedirectingFactory(server), nil)
+			cfg := DefaultIdempotencyConfig()
+			cfg.FailedRetryBackoff = 0
+			svc.ConfigureRedemption(NewIdempotencyCoordinator(newInMemoryIdempotencyRepo(), cfg), &redeemLeaseStub{})
+			out, err := svc.ResetCredit(context.Background(), 100, "first")
+			require.Nil(t, out)
+			require.Equal(t, "OPENAI_RESET_UNCONFIRMED", infraerrors.Reason(err))
+			_, err = svc.ResetCredit(context.Background(), 100, "second")
+			require.Equal(t, "OPENAI_RESET_UNRESOLVED", infraerrors.Reason(err))
+			require.Equal(t, int32(1), posts.Load())
+		})
+	}
+}
+
+type switchingResetIdentityRepo struct {
+	*stubQuotaAccountRepo
+	reads int
+}
+
+func (r *switchingResetIdentityRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
+	a, err := r.stubQuotaAccountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	copy := *a
+	copy.Credentials = maps.Clone(a.Credentials)
+	r.reads++
+	copy.Credentials["chatgpt_account_is_fedramp"] = r.reads > 1
+	return &copy, nil
+}
+
+func TestOpenAIResetRejectsFedRAMPIdentityChange(t *testing.T) {
+	a := &Account{ID: 100, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "token", "chatgpt_account_id": "upstream"}}
+	accounts := &switchingResetIdentityRepo{stubQuotaAccountRepo: &stubQuotaAccountRepo{accounts: map[int64]*Account{100: a}}}
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":1}`))
+	}))
+	defer server.Close()
+	svc := NewOpenAIQuotaService(accounts, nil, NewOpenAITokenProvider(accounts, nil, nil), newQuotaRedirectingFactory(server), nil)
+	svc.ConfigureRedemption(NewIdempotencyCoordinator(newInMemoryIdempotencyRepo(), DefaultIdempotencyConfig()), &redeemLeaseStub{})
+	_, err := svc.ResetCredit(context.Background(), 100, "identity-change")
+	require.Error(t, err)
+	require.Zero(t, posts.Load(), "identity changes must be rejected before redemption reaches upstream")
 }
 
 // A crash or failed final write leaves the outer operation processing even when
@@ -99,7 +163,7 @@ func TestOpenAIResetRecoversLostOperationCompletion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posts++
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":"ok","windows_reset":2}`))
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":2}`))
 	}))
 	defer server.Close()
 	repo := &resetCompletionFailureRepo{inMemoryIdempotencyRepo: newInMemoryIdempotencyRepo(), failScope: "openai_reset_redeem"}

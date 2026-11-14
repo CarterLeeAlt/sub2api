@@ -34,7 +34,7 @@
     "vue-draggable-plus": "^0.6.1",
     "vue-i18n": "^11.4.16",
     "vue-router": "^4.2.5",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@intlify/message-compiler": "11.4.16",
@@ -68,7 +68,13 @@
       "dompurify@<3.4.17": ">=3.4.17",
       "source-map-js@<1.2.2": ">=1.2.2",
       "follow-redirects@<1.16.2": ">=1.16.2",
-      "decode-uri-component@<0.5.1": ">=0.5.1"
+      "decode-uri-component@<0.5.1": ">=0.5.1",
+      "mermaid@<11.16.1": "11.16.1",
+      "yaml@>=1.0.0 <1.10.3": "1.10.3",
+      "uuid@>=11.0.0 <11.1.1": "11.1.1",
+      "uuid@>=13.0.0 <13.0.1": "13.0.2",
+      "colord@<2.9.4": "2.9.4",
+      "katex@<0.18.2": "0.18.2"
     }
   }
 }

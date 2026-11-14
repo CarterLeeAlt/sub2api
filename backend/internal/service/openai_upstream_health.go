@@ -46,14 +46,14 @@ func classifyOpenAIUpstreamHealth(account *Account, source string, status int, b
 		}
 	}
 	state := OpenAIUpstreamHealth{Kind: "request_failed", Source: source, Code: code, Message: truncate(SanitizeUpstreamErrorMessage(message), 1024), ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	switch {
-	case status == 0:
+	switch status {
+	case 0:
 		state.Kind = "network_error"
-	case status == 429:
+	case 429:
 		state.Kind = "rate_limited"
-	case status == 402:
+	case 402:
 		state.Kind = "quota_exhausted"
-	case status == 403:
+	case 403:
 		state.Kind = "permission_denied"
 	}
 	if account == nil || !account.IsOpenAIOAuth() || account.IsOpenAIAgentIdentity() {

@@ -491,15 +491,20 @@ const confirmReset = async () => {
       data.value = result.quota
       markResetCreditDataFresh(result.quota)
     } else {
-      // A credit was consumed but the post-reset count could not be read back.
-      // Whatever we still hold is one generation stale, so report the count as
-      // unknown instead of letting a second consumption start from stale data.
+      // A completed attempt invalidates the old count, including no-op outcomes.
+      // Keep another redemption disabled until an authoritative refresh.
       data.value = null
       cachedSnapshotStale.value = true
     }
     if (result.account) emit('account-updated', result.account)
 
-    if (result.replayed) {
+    if (result.code === 'no_credit') {
+      resetWarning.value = t('admin.accounts.openaiQuotaReset.resetNoCredit')
+    } else if (result.code === 'nothing_to_reset' || (result.code === 'reset' && result.windows_reset === 0)) {
+      resetMessage.value = t('admin.accounts.openaiQuotaReset.resetNotNeeded')
+    } else if (result.code === 'already_redeemed') {
+      resetMessage.value = t('admin.accounts.openaiQuotaReset.resetAlreadyRedeemed')
+    } else if (result.replayed) {
       resetMessage.value = t('admin.accounts.openaiQuotaReset.replayed')
     } else if (result.warning_code === 'reset_credit_cache_refresh_failed') {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.resetCacheRefreshFailed')

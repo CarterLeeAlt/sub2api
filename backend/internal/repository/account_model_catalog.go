@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -37,14 +38,11 @@ func (r *accountRepository) ListDueModelCatalogAccounts(ctx context.Context, aft
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
+			return nil, errors.Join(err, rows.Close())
 		}
 		ids = append(ids, id)
 	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
 	}
 	accounts, err := r.GetByIDs(ctx, ids)

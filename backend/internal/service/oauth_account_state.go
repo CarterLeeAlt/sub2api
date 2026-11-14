@@ -80,7 +80,7 @@ func (s *RateLimitService) handleOAuthAuthenticationFailure(ctx context.Context,
 		return false, false
 	}
 	identity := oauthRequestIdentity(ctx, account)
-	if status != http.StatusUnauthorized && !(account.Platform == PlatformOpenAI && isOpenAIHTTPUpstreamAccessStateError(status, "", body)) {
+	if status != http.StatusUnauthorized && (account.Platform != PlatformOpenAI || !isOpenAIHTTPUpstreamAccessStateError(status, "", body)) {
 		return false, false
 	}
 	state := classifyOpenAIUpstreamHealth(identity, "gateway", status, body)

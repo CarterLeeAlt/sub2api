@@ -144,7 +144,7 @@ func performOpenAIQuotaRefreshRequest(t *testing.T, handler *OpenAIOAuthHandler)
 func successfulOpenAIQuotaWorkflowStub() *openAIQuotaWorkflowStub {
 	return &openAIQuotaWorkflowStub{
 		resetResult: &service.OpenAIQuotaResetResult{
-			Code:         "success",
+			Code:         "reset",
 			WindowsReset: 1,
 		},
 		queryResult: &service.OpenAIQuotaUsage{
@@ -166,6 +166,22 @@ func recoveredAccountStub() *openAIResetAdminServiceStub {
 		Status:      service.StatusActive,
 		Schedulable: false,
 	}}
+}
+
+func TestOpenAIResetQuota_NoResetOutcomePreservesAccountLimits(t *testing.T) {
+	for _, code := range []string{"nothing_to_reset", "no_credit", "already_redeemed"} {
+		t.Run(code, func(t *testing.T) {
+			quota := successfulOpenAIQuotaWorkflowStub()
+			quota.resetResult.Code, quota.resetResult.WindowsReset = code, 0
+			recoverer := &openAIAccountStateRecovererStub{}
+			handler := &OpenAIOAuthHandler{adminService: recoveredAccountStub(), quotaService: quota, rateLimitService: recoverer}
+			status, envelope := performOpenAIQuotaResetRequest(t, handler)
+			require.Equal(t, http.StatusOK, status)
+			require.Equal(t, code, envelope.Data.Code)
+			require.False(t, envelope.Data.AccountStateRecovered)
+			require.Zero(t, recoverer.calls, "no new reset must not clear account limits")
+		})
+	}
 }
 
 func TestOpenAIResetQuota_ResetFailureStopsWorkflow(t *testing.T) {

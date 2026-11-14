@@ -69,10 +69,11 @@ type ClaudeResetOutcome struct {
 // claudeResetFence is stored in the idempotency table, one row per provider
 // organization, so duplicate local accounts share it and account edits cannot erase it.
 type claudeResetFence struct {
-	Operation string    `json:"operation"`
-	Outcome   string    `json:"outcome"`
-	Reason    string    `json:"reason,omitempty"`
-	At        time.Time `json:"at"`
+	Operation string              `json:"operation"`
+	Outcome   string              `json:"outcome"`
+	Reason    string              `json:"reason,omitempty"`
+	At        time.Time           `json:"at"`
+	Result    *ClaudeResetOutcome `json:"result,omitempty"`
 }
 
 // ConfigureRedemption enables Redeem. Without both stores Redeem refuses to run.
@@ -170,6 +171,11 @@ func (s *ClaudeResetCreditService) redeemOnce(ctx context.Context, id int64, ope
 		}
 		if prior.Operation == operation {
 			// A crashed or interrupted attempt of this same confirmation: never resend.
+			if prior.Result != nil {
+				outcome := *prior.Result
+				outcome.Replayed = true
+				return &outcome, nil
+			}
 			return &ClaudeResetOutcome{Outcome: prior.Outcome, Reason: prior.Reason, Replayed: true}, nil
 		}
 		if prior.Outcome == ClaudeResetOutcomeUnknown && prior.Reason == claudeResetReasonUnavailable {
@@ -217,6 +223,7 @@ func (s *ClaudeResetCreditService) redeemOnce(ctx context.Context, id int64, ope
 		cancel()
 	}
 	marker.Outcome, marker.Reason = outcome.Outcome, outcome.Reason
+	marker.Result = outcome
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	persistErr := s.persistFence(persistCtx, fence.ID, marker)
 	cancel()

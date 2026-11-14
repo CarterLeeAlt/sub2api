@@ -443,7 +443,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
       error_message: null,
     })
     vi.mocked(resetOpenAIQuota).mockResolvedValue({
-      code: 'success',
+      code: 'reset',
       windows_reset: 1,
       cache_refreshed: true,
       account_state_recovered: true,
@@ -481,6 +481,26 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    ['no_credit', 'resetNoCredit'],
+    ['nothing_to_reset', 'resetNotNeeded'],
+    ['already_redeemed', 'resetAlreadyRedeemed'],
+  ])('展示 %s 的实际结果并保留待查询状态', async (code, message) => {
+    vi.mocked(resetOpenAIQuota).mockResolvedValue({ code, windows_reset: 0, cache_refreshed: false, account_state_recovered: false })
+    const account = makeAccount({ parent_account_id: null, extra: {
+      codex_reset_credit_snapshot: { available_count: 1, credits: [{ expires_at: FUTURE_EXPIRY_EARLY }], fetched_at: FRESH_FETCHED_AT },
+    } })
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+    await resetButton(wrapper).trigger('click')
+    wrapper.findComponent(ConfirmDialog).vm.$emit('confirm')
+    await flushPromises()
+    expect(wrapper.text()).toContain(`admin.accounts.openaiQuotaReset.${message}`)
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.resetSuccess')
+    expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(wrapper.emitted('account-updated')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   // 缓存回读失败不影响「账号状态已恢复」这一主目标:恢复后的账号行必须照常回传,
   // 否则列表会继续显示已经不存在的限流状态。
   it('缓存刷新失败时仍回传恢复后的账号并把次数标为未知', async () => {
@@ -490,7 +510,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
       rate_limit_reset_at: null,
     })
     vi.mocked(resetOpenAIQuota).mockResolvedValue({
-      code: 'success',
+      code: 'reset',
       windows_reset: 1,
       cache_refreshed: false,
       account_state_recovered: true,
@@ -526,7 +546,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
 
   it('账号状态恢复失败时停止后续步骤并提示手动恢复', async () => {
     vi.mocked(resetOpenAIQuota).mockResolvedValue({
-      code: 'success',
+      code: 'reset',
       windows_reset: 1,
       cache_refreshed: false,
       account_state_recovered: false,

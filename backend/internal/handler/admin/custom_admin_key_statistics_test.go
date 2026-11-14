@@ -164,7 +164,7 @@ func TestScopedAdminMutationResponseRequiresReadPermission(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/read=%v", kind, read), func(t *testing.T) {
 				count := 2
 				svc := &scopedStatisticsAccounts{accounts: map[int64]*service.Account{1: {ID: 1, Platform: "openai", Type: "oauth", GroupIDs: []int64{1}}}}
-				quota := &openAIQuotaWorkflowStub{resetResult: &service.OpenAIQuotaResetResult{Code: "success"}, queryResult: &service.OpenAIQuotaUsage{RateLimitResetCredits: &service.OpenAIRateLimitResetCredits{AvailableCount: 3}, Email: "IDENTITY_SECRET"}}
+				quota := &openAIQuotaWorkflowStub{resetResult: &service.OpenAIQuotaResetResult{Code: "reset", WindowsReset: 1}, queryResult: &service.OpenAIQuotaUsage{RateLimitResetCredits: &service.OpenAIRateLimitResetCredits{AvailableCount: 3}, Email: "IDENTITY_SECRET"}}
 				referral := &referralHandlerStub{eligibility: &service.OpenAIReferralEligibility{ShouldShow: true, AvailableInvites: &count}}
 				h := &OpenAIOAuthHandler{adminService: svc, quotaService: quota, referralService: referral, rateLimitService: &openAIAccountStateRecovererStub{}}
 				action, readAction, path := "openai.quota.reset", "openai.quota.read", "/1/reset"

@@ -65,7 +65,7 @@ func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, id int64, key stri
 		IdempotencyKey: operation, Payload: map[string]any{"account_id": id, "identity": identity}, TTL: openAIResetRetention, RequireKey: true, ExecutionTimeout: 60 * time.Second,
 		RecoverExpiredProcessing: true,
 	}, func(exec context.Context) (any, error) {
-		return s.redeemResetOnce(exec, id, operation, identity, upstreamID)
+		return s.redeemResetOnce(exec, id, operation, identity)
 	})
 	if err != nil {
 		return nil, err
@@ -82,7 +82,7 @@ func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, id int64, key stri
 	return &out, nil
 }
 
-func (s *OpenAIQuotaService) redeemResetOnce(ctx context.Context, id int64, operation, identity, upstreamID string) (*OpenAIQuotaResetResult, error) {
+func (s *OpenAIQuotaService) redeemResetOnce(ctx context.Context, id int64, operation, identity string) (*OpenAIQuotaResetResult, error) {
 	lockKey := "openai:reset-credit:" + identity
 	owner := uuid.NewString()
 	acquired, err := s.resetLocks.TryAcquireLeaderLock(ctx, lockKey, owner, 90*time.Second)
@@ -135,7 +135,7 @@ func (s *OpenAIQuotaService) redeemResetOnce(ctx context.Context, id int64, oper
 		return nil, ErrIdempotencyStoreUnavail
 	}
 	redeemID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(operation)).String()
-	out, err := s.resetCredit(ctx, id, redeemID, upstreamID)
+	out, err := s.resetCredit(ctx, id, redeemID, identity)
 	if err != nil {
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_RESET_UNCONFIRMED", "Reset outcome is unconfirmed; retry the same confirmation: "+err.Error())
 	}

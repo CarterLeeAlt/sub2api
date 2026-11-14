@@ -422,7 +422,7 @@ func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client
 	return &details, nil
 }
 
-func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, redeemRequestID, expectedUpstreamID string) (*OpenAIQuotaResetResult, error) {
+func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, redeemRequestID, expectedIdentity string) (*OpenAIQuotaResetResult, error) {
 	ctx = WithScopedAdminAccountOperation(ctx, "openai.quota.reset")
 	if err := scopedAccountIDAccess(ctx, s.accountRepo, accountID, "openai.quota.reset", false); err != nil {
 		return nil, err
@@ -452,7 +452,7 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 	if err != nil {
 		return nil, err
 	}
-	if expectedUpstreamID != "" && chatGPTAccountID != expectedUpstreamID {
+	if expectedIdentity != "" && HashIdempotencyKey(fmt.Sprintf("%t:%s", fedRAMP, chatGPTAccountID)) != expectedIdentity {
 		return nil, infraerrors.Conflict("OPENAI_CREDENTIALS_CHANGED", "Account identity changed during reset")
 	}
 	identity, err := captureOpenAIQuotaIdentity(ctx, s.accountRepo, accountID, accessToken, chatGPTAccountID, proxyURL, fedRAMP)
@@ -480,7 +480,6 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 			SetContext(callCtx).
 			SetHeaders(headers).
 			SetBody(map[string]string{"redeem_request_id": redeemRequestID}).
-			SetSuccessResult(&payload).
 			Post(chatGPTRateLimitResetURL)
 		if err != nil {
 			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_RESET_REQUEST_FAILED", "upstream request failed: %v", err)
@@ -497,6 +496,20 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 			body := truncate(s.redactQuotaErrorBody(callCtx, accountID, resp.String()), 240)
 			slog.Warn("openai_quota_reset_failed", "account_id", accountID, "status", status, "body", body)
 			return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota_reset", status, resp.Bytes())
+		}
+		var decoded struct {
+			Code         string                  `json:"code"`
+			Credit       *OpenAIQuotaResetCredit `json:"credit"`
+			WindowsReset *int                    `json:"windows_reset"`
+		}
+		if err := json.Unmarshal(resp.Bytes(), &decoded); err != nil || decoded.WindowsReset == nil || *decoded.WindowsReset < 0 {
+			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_RESET_RESPONSE_INVALID", "Reset response is missing a valid window count")
+		}
+		switch decoded.Code {
+		case "reset", "nothing_to_reset", "no_credit", "already_redeemed":
+			payload = OpenAIQuotaResetResult{Code: decoded.Code, Credit: decoded.Credit, WindowsReset: *decoded.WindowsReset}
+		default:
+			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_RESET_RESPONSE_INVALID", "Reset response contains an unrecognized outcome")
 		}
 		break
 	}

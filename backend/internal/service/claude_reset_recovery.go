@@ -21,7 +21,7 @@ type ClaudeResetRecoveryRepository interface {
 func (s *ClaudeResetCreditService) recoverReset(ctx context.Context, account *Account, outcome *ClaudeResetOutcome) error {
 	store, ok := s.accounts.(ClaudeResetRecoveryRepository)
 	if !ok {
-		return fmt.Errorf("Claude reset recovery repository is not configured")
+		return fmt.Errorf("claude reset recovery repository is not configured")
 	}
 	five := slices.Contains(outcome.Cleared, "five_hour")
 	seven := slices.Contains(outcome.Cleared, "seven_day")

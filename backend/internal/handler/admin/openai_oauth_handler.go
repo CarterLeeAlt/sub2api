@@ -628,8 +628,9 @@ func (h *OpenAIOAuthHandler) ResetQuota(c *gin.Context) {
 	}
 
 	resetResponse := openAIQuotaResetResponse{OpenAIQuotaResetResult: *result}
-	if result.Replayed {
-		// Replaying an old confirmation must not clear newer account limits.
+	if result.Replayed || result.Code != "reset" || result.WindowsReset == 0 {
+		// Only a newly confirmed reset may clear account limits. Replays and
+		// no-op outcomes must preserve limits established since the old attempt.
 		response.Success(c, resetResponse)
 		return
 	}

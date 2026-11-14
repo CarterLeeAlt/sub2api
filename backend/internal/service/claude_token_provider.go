@@ -93,7 +93,7 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			refreshFailed = true
 		} else if result.LockHeld {
 			if forceRefresh {
-				return "", errors.New("Claude authentication refresh is in progress")
+				return "", errors.New("claude authentication refresh is in progress")
 			}
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
 				time.Sleep(claudeLockWaitTime)
