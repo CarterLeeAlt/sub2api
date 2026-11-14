@@ -86,7 +86,7 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 
 ### CUSTOM-003：自有 GHCR 镜像与回归门禁（`active`）
 
-每次向 `main` 推送或手动触发工作流时，构建并推送 `ghcr.io/carterleealt/sub2api`：
+用户授权后手动触发工作流，构建并推送 `ghcr.io/carterleealt/sub2api`：
 
 - 发布 `latest` 和固定 7 位的 `sha-xxxxxxx` 标签；
 - 构建前运行本 fork 的 OpenAI 定向回归测试；
@@ -772,7 +772,7 @@ GitHub 仓库元数据中的 `created_at` 为 `2026-08-09T17:14:19Z`。按该时
 5. 不恢复 `retired` 的一次性工作流。
 6. 完成合并后运行上游测试以及 `.github/workflows/custom-docker.yml` 中列出的 fork 定向回归测试。
 7. 更新本文档中的已同步上游节点、冲突处理记录、提交索引和定制状态。
-8. 推送后确认 GitHub Actions 成功，并核对 `latest`、`sha-xxxxxxx` 镜像标签与界面显示的 SHA 一致。
+8. 需要云端验证或发布镜像时，取得用户授权后手动触发工作流，确认成功并核对 `latest`、`sha-xxxxxxx` 镜像标签与界面显示的 SHA 一致；普通推送不启动云端构建。
 
 ## 高冲突概率文件
 

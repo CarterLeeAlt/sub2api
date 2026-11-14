@@ -1,9 +1,6 @@
 name: Build Custom Docker Image
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
