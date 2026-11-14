@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -144,6 +145,66 @@ func (s *accountRepoStubForBulkUpdate) ListWithFilters(_ context.Context, params
 		return s.listData, s.listResult, nil
 	}
 	return s.listData, &pagination.PaginationResult{Total: int64(len(s.listData))}, nil
+}
+
+func TestAdminServiceBulkUpdateAccounts_ModelCatalog(t *testing.T) {
+	for _, filtered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("filtered=%t", filtered), func(t *testing.T) {
+			accounts := []*Account{
+				{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+				{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+			}
+			repo := &accountRepoStubForBulkUpdate{getByIDsAccounts: accounts, listData: []Account{*accounts[0], *accounts[1]}}
+			svc := &adminServiceImpl{accountRepo: repo}
+			input := &BulkUpdateAccountsInput{AccountIDs: []int64{1, 2}, ModelCatalog: &BulkModelCatalogEdit{Source: "upstream"}}
+			if filtered {
+				input.AccountIDs = nil
+				input.Filters = &BulkUpdateAccountFilters{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+			}
+			result, err := svc.BulkUpdateAccounts(context.Background(), input)
+			require.NoError(t, err)
+			require.Equal(t, 2, result.Success)
+			require.Equal(t, input.ModelCatalog, repo.lastBulkUpdate.ModelCatalog)
+			require.Empty(t, repo.lastBulkUpdate.Credentials)
+		})
+	}
+	parentID := int64(1)
+	for _, tc := range []struct {
+		name        string
+		account     *Account
+		credentials map[string]any
+		extra       map[string]any
+		source      string
+		reason      string
+	}{
+		{name: "missing", reason: "ACCOUNT_NOT_FOUND"},
+		{name: "apikey", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, reason: "MODEL_CATALOG_UNSUPPORTED"},
+		{name: "shadow", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &parentID}, reason: "MODEL_CATALOG_UNSUPPORTED"},
+		{name: "passthrough", extra: map[string]any{"openai_passthrough": true}, reason: "MODEL_CATALOG_UNSUPPORTED"},
+		{name: "mapping", credentials: map[string]any{"model_mapping": map[string]any{}}, reason: "MODEL_CATALOG_MAPPING_CONFLICT"},
+		{name: "invalid source", source: "custom", reason: "INVALID_MODEL_CATALOG_SOURCE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := tc.account
+			if account == nil && tc.name != "missing" {
+				account = &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+			}
+			if account != nil {
+				account.ID = 2
+			}
+			repo := &accountRepoStubForBulkUpdate{getByIDsAccounts: []*Account{{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, account}}
+			svc := &adminServiceImpl{accountRepo: repo}
+			source := tc.source
+			if source == "" {
+				source = "upstream"
+			}
+			_, err := svc.BulkUpdateAccounts(context.Background(), &BulkUpdateAccountsInput{
+				AccountIDs: []int64{1, 2}, ModelCatalog: &BulkModelCatalogEdit{Source: source}, Credentials: tc.credentials, Extra: tc.extra,
+			})
+			requireApplicationErrorReason(t, err, tc.reason)
+			require.Zero(t, repo.bulkUpdateCalls)
+		})
+	}
 }
 
 // TestAdminService_BulkUpdateAccounts_AllSuccessIDs 验证批量更新成功时返回 success_ids/failed_ids。

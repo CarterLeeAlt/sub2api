@@ -137,6 +137,64 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.text()).not.toContain('gpt-5.3-codex')
   })
 
+  it.each(['selected', 'filtered'])('批量上游目录按 %s 目标提交来源，不覆盖各账号模型映射', async (mode) => {
+    const filters = { platform: 'openai', type: 'oauth' }
+    const wrapper = mountModal({
+      selectedPlatforms: ['openai'],
+      selectedTypes: ['oauth'],
+      ...(mode === 'filtered' ? { target: { mode, filters, previewCount: 2 } } : {})
+    })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    await wrapper.get('[data-testid="sync-upstream-models"]').trigger('click')
+    expect(wrapper.get('[data-testid="bulk-upstream-catalog-hint"]').text()).toContain('admin.accounts.modelCatalog.bulkUpstreamHint')
+    expect(wrapper.find('[data-testid="model-catalog-status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.supportsAllModels')
+    expect(wrapper.text()).not.toContain('admin.accounts.selectAllowedModels')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const updates = { model_catalog: { source: 'upstream' } }
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith(
+      ...(mode === 'filtered' ? [{ filters, ...updates }] : [[1, 2], updates])
+    )
+  })
+
+  it.each(['builtin', 'custom', 'mapping'])('选择上游后切换为 %s 应恢复手动模型更新', async (mode) => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    await wrapper.get('[data-testid="sync-upstream-models"]').trigger('click')
+    if (mode === 'mapping') {
+      await wrapper.findAll('button').find(button => button.text().includes('admin.accounts.modelMapping'))!.trigger('click')
+    } else if (mode === 'builtin') {
+      await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.fillRelatedModels')!.trigger('click')
+    } else {
+      const selector = wrapper.findComponent(ModelWhitelistSelector)
+      await selector.get('input[placeholder="admin.accounts.enterCustomModelName"]').setValue('my-model')
+      await selector.findAll('button').find(button => button.text() === 'admin.accounts.addModel')!.trigger('click')
+    }
+    expect(wrapper.find('[data-testid="bulk-upstream-catalog-hint"]').exists()).toBe(false)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const updates = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1]!
+    expect(updates).not.toHaveProperty('model_catalog')
+    expect(updates).toHaveProperty('credentials.model_mapping')
+  })
+
+  it('非普通 OpenAI OAuth 目标不提供批量上游目录；后端资格拒绝保留弹窗', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['apikey'] })
+    expect(wrapper.find('[data-testid="sync-upstream-models"]').exists()).toBe(false)
+    await wrapper.setProps({ selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    await wrapper.get('[data-testid="sync-upstream-models"]').trigger('click')
+    vi.mocked(adminAPI.accounts.bulkUpdate).mockRejectedValueOnce({ reason: 'MODEL_CATALOG_UNSUPPORTED' })
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.modelCatalog.bulkUnsupported')
+    expect(wrapper.emitted('close')).toBeUndefined()
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    expect(wrapper.find('[data-testid="bulk-upstream-catalog-hint"]').exists()).toBe(false)
+  })
+
   it('antigravity 映射预设包含图片映射并过滤 OpenAI 预设', async () => {
     const wrapper = mountModal()
 

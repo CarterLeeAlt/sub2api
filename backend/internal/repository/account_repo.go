@@ -3938,7 +3938,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		setClauses = append(setClauses, "extra = "+extraExpression)
 	}
 
-	if len(setClauses) == 0 {
+	if len(setClauses) == 0 && updates.ModelCatalog == nil {
 		return 0, nil
 	}
 
@@ -3972,6 +3972,17 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 	}
 
+	var catalogStates []byte
+	if updates.ModelCatalog != nil {
+		if contextTx == nil && tx == nil {
+			return 0, errors.New("bulk model catalog update requires a transaction")
+		}
+		var err error
+		catalogStates, err = prepareBulkModelCatalog(ctx, exec, ids, updates)
+		if err != nil {
+			return 0, err
+		}
+	}
 	result, err := exec.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
@@ -3995,6 +4006,14 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 	}
 	if rows > 0 {
+		if updates.ModelCatalog != nil {
+			_, err := exec.ExecContext(ctx, `UPDATE accounts SET extra=jsonb_set(COALESCE(extra,'{}'::jsonb),'{model_catalog}',catalog.value)
+				FROM jsonb_each($1::jsonb) AS catalog WHERE accounts.id=catalog.key::bigint AND accounts.deleted_at IS NULL`, string(catalogStates))
+			if err != nil {
+				return 0, err
+			}
+			r.wakeModelCatalogAfterCommit(ctx)
+		}
 		payload := map[string]any{"account_ids": ids}
 		if err := enqueueSchedulerOutbox(ctx, exec, service.SchedulerOutboxEventAccountBulkChanged, nil, nil, payload); err != nil {
 			return 0, err

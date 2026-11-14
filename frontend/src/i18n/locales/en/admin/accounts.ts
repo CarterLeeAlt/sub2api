@@ -846,6 +846,8 @@ export default {
         automatic: 'Automatic updates', manual: 'Manual maintenance', lastSuccess: 'Last successful sync',
         pending: 'Waiting for first sync; scheduling starts after it succeeds.',
         saveHint: 'Applied on save. Built-in models or manual edits stop automatic updates; aliases are preserved.',
+        bulkUpstreamHint: 'After saving, each account syncs and automatically updates its own upstream models, preserving its aliases. Only regular OpenAI OAuth parent accounts are supported.',
+        bulkUnsupported: 'Some selected accounts do not support automatic model catalogs. Select regular OpenAI OAuth parent accounts, excluding shadows, Agent identities, PATs and accounts with passthrough enabled.',
         pendingStatus: 'Model sync pending',
         failedStatus: 'Model sync failed; previous models retained',
       },

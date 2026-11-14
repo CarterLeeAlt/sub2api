@@ -103,4 +103,82 @@ func TestModelCatalogPostgresConsistency(t *testing.T) {
 	require.NoError(t, repo.FinishModelCatalogRound(ctx, time.Now().Add(-time.Hour), time.Now().Add(time.Hour)))
 	// A source edit starts a new round and cannot be delayed by the previous round's completion.
 	require.Empty(t, read().ModelCatalog().NextSyncAt)
+
+	t.Run("bulk upstream preserves per-account models and commits atomically", func(t *testing.T) {
+		second := &service.Account{Name: "second", Platform: "openai", Type: "oauth", Status: "active", Credentials: map[string]any{
+			"access_token": "second-token", "model_mapping": map[string]any{"second-model": "second-model", "second-alias": "second-target"},
+		}}
+		require.NoError(t, repo.Create(ctx, second))
+		beforeFirst := read()
+		beforeSecond, err := repo.GetByID(ctx, second.ID)
+		require.NoError(t, err)
+		updates := service.AccountBulkUpdate{ModelCatalog: &service.BulkModelCatalogEdit{Source: "upstream"}}
+
+		// A missing or unsupported target prevents all writes, including other fields.
+		newPriority := 42
+		invalid := &service.Account{Name: "api-key", Platform: "openai", Type: "apikey", Status: "active", Credentials: map[string]any{"api_key": "test"}}
+		require.NoError(t, repo.Create(ctx, invalid))
+		for _, id := range []int64{invalid.ID, invalid.ID + 1000} {
+			_, err = repo.BulkUpdate(ctx, []int64{a.ID, id}, service.AccountBulkUpdate{ModelCatalog: updates.ModelCatalog, Priority: &newPriority})
+			require.Error(t, err)
+			require.Equal(t, beforeFirst.Priority, read().Priority)
+			require.Equal(t, beforeFirst.ModelCatalog(), read().ModelCatalog())
+		}
+		// Supplied credentials/extra are included in eligibility checks under lock.
+		_, err = repo.BulkUpdate(ctx, []int64{a.ID, second.ID}, service.AccountBulkUpdate{ModelCatalog: updates.ModelCatalog, Extra: map[string]any{"openai_passthrough": true}})
+		require.Error(t, err)
+		require.Equal(t, beforeFirst.ModelCatalog(), read().ModelCatalog())
+
+		wakesBefore := wakes
+		tx, err := client.Tx(ctx)
+		require.NoError(t, err)
+		_, err = repo.BulkUpdate(dbent.NewTxContext(ctx, tx), []int64{a.ID, second.ID}, updates)
+		require.NoError(t, err)
+		require.Equal(t, wakesBefore, wakes)
+		require.NoError(t, tx.Rollback())
+		require.Equal(t, beforeFirst.ModelCatalog(), read().ModelCatalog())
+		require.Equal(t, wakesBefore, wakes)
+
+		rows, err := repo.BulkUpdate(ctx, []int64{second.ID, a.ID, second.ID}, updates)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, rows)
+		require.Equal(t, wakesBefore+1, wakes)
+		first := read()
+		second, err = repo.GetByID(ctx, second.ID)
+		require.NoError(t, err)
+		require.Equal(t, beforeFirst.Credentials, first.Credentials)
+		require.Equal(t, beforeSecond.Credentials, second.Credentials)
+		require.Equal(t, "upstream", second.ModelCatalog().Source)
+		require.True(t, second.ModelCatalog().Ready)
+		require.Empty(t, second.ModelCatalog().NextSyncAt)
+		require.NotEqual(t, beforeFirst.ModelCatalog().Revision, first.ModelCatalog().Revision)
+		require.NotEqual(t, first.ModelCatalog().Revision, second.ModelCatalog().Revision)
+		// An in-flight observation from before the bulk edit cannot undo it.
+		previousCredentials, err := json.Marshal(beforeFirst.Credentials)
+		require.NoError(t, err)
+		applied, err := repo.SaveModelCatalogObservation(ctx, beforeFirst, beforeFirst.ModelCatalog().Revision, string(previousCredentials), beforeFirst.ModelCatalog())
+		require.NoError(t, err)
+		require.False(t, applied)
+		// Each subsequent upstream result stays local to its account and keeps aliases.
+		for i, target := range []*service.Account{first, second} {
+			previousCredentials, err := json.Marshal(target.Credentials)
+			require.NoError(t, err)
+			state := target.ModelCatalog()
+			state.Ready = true
+			state.AttemptedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			state.SyncedAt = state.AttemptedAt
+			model := fmt.Sprintf("upstream-%d", i)
+			service.ReplaceAccountModelWhitelist(target, []string{model})
+			applied, err := repo.SaveModelCatalogObservation(ctx, target, state.Revision, string(previousCredentials), state)
+			require.NoError(t, err)
+			require.True(t, applied)
+			stored, err := repo.GetByID(ctx, target.ID)
+			require.NoError(t, err)
+			require.Equal(t, target.GetModelMapping(), stored.GetModelMapping())
+			require.Equal(t, model, stored.GetModelMapping()[model])
+			if i == 1 {
+				require.Equal(t, "second-target", stored.GetModelMapping()["second-alias"])
+			}
+		}
+	})
 }

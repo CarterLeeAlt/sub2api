@@ -464,6 +464,7 @@ type UpdateAccountInput struct {
 type BulkUpdateAccountsInput struct {
 	AccountIDs     []int64
 	Filters        *BulkUpdateAccountFilters
+	ModelCatalog   *BulkModelCatalogEdit
 	Name           string
 	ProxyID        *int64
 	Concurrency    *int

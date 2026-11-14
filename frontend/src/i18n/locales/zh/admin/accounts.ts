@@ -960,6 +960,8 @@ export default {
         automatic: '自动更新', manual: '手动维护', lastSuccess: '上次成功同步',
         pending: '等待首次同步；同步成功后参与调度。',
         saveHint: '保存后生效。使用内置模型或手动增删会停止自动更新；模型映射保留。',
+        bulkUpstreamHint: '保存后，各账号分别同步自己的上游模型并自动更新，保留各自的模型映射。仅支持普通 OpenAI OAuth 主账号。',
+        bulkUnsupported: '所选账号包含不支持自动模型目录的账号。请选择普通 OpenAI OAuth 主账号，排除影子账号、Agent、PAT 和已开启透传的账号。',
         pendingStatus: '模型同步待完成',
         failedStatus: '模型同步失败，保留上次结果',
       },

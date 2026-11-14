@@ -17,6 +17,36 @@ type ModelCatalogEdit struct {
 	Revision string `json:"revision"`
 }
 
+// BulkModelCatalogEdit switches each account to its own upstream catalog.
+// Configuration revisions and observations are read under the account row locks.
+type BulkModelCatalogEdit struct {
+	Source string `json:"source"`
+}
+
+func (edit *BulkModelCatalogEdit) Apply(current *Account, credentials, extra map[string]any) (AccountModelCatalog, error) {
+	if edit.Source != "upstream" {
+		return AccountModelCatalog{}, infraerrors.BadRequest("INVALID_MODEL_CATALOG_SOURCE", "bulk model source must be upstream")
+	}
+	if _, exists := credentials["model_mapping"]; exists {
+		return AccountModelCatalog{}, infraerrors.BadRequest("MODEL_CATALOG_MAPPING_CONFLICT", "bulk upstream catalog preserves each account's model mappings; do not supply model_mapping")
+	}
+	if current == nil {
+		return AccountModelCatalog{}, ErrAccountNotFound
+	}
+	incoming := *current
+	incoming.Credentials = make(map[string]any, len(current.Credentials)+len(credentials))
+	maps.Copy(incoming.Credentials, current.Credentials)
+	maps.Copy(incoming.Credentials, credentials)
+	incoming.Extra = make(map[string]any, len(current.Extra)+len(extra))
+	maps.Copy(incoming.Extra, current.Extra)
+	maps.Copy(incoming.Extra, extra)
+	incoming.ModelCatalogEdit = &ModelCatalogEdit{Source: edit.Source, Revision: current.ModelCatalog().Revision}
+	if err := MergeAccountModelCatalog(&incoming, current); err != nil {
+		return AccountModelCatalog{}, err
+	}
+	return incoming.ModelCatalog(), nil
+}
+
 type AccountModelCatalog struct {
 	Source      string `json:"source"`
 	Revision    string `json:"revision"`

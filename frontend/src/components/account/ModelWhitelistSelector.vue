@@ -92,7 +92,7 @@
       </div>
     </div>
 
-    <div v-if="automaticCatalog" class="mb-3 space-y-1 text-xs text-gray-500 dark:text-gray-400" data-testid="model-catalog-status">
+    <div v-if="automaticCatalog && showCatalogStatus" class="mb-3 space-y-1 text-xs text-gray-500 dark:text-gray-400" data-testid="model-catalog-status">
       <p>{{ t('admin.accounts.modelCatalog.source') }}：{{ t(`admin.accounts.modelCatalog.${catalogSource}`) }} · {{ t(catalogSource === 'upstream' ? 'admin.accounts.modelCatalog.automatic' : 'admin.accounts.modelCatalog.manual') }}</p>
       <p v-if="catalogState?.synced_at">{{ t('admin.accounts.modelCatalog.lastSuccess') }}：{{ new Date(catalogState.synced_at).toLocaleString() }}</p>
       <p v-if="catalogSource === 'upstream' && !catalogState?.ready">{{ t('admin.accounts.modelCatalog.pending') }}</p>
@@ -180,9 +180,10 @@ const props = withDefaults(defineProps<{
   }
   showSyncButton?: boolean
   automaticCatalog?: boolean
+  showCatalogStatus?: boolean
   catalogSource?: ModelCatalogSource
   catalogState?: ModelCatalogState
-}>(), { showSyncButton: true })
+}>(), { showSyncButton: true, showCatalogStatus: true })
 
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]

@@ -165,21 +165,22 @@ type UpdateAccountRequest struct {
 
 // BulkUpdateAccountsRequest represents the payload for bulk editing accounts
 type BulkUpdateAccountsRequest struct {
-	AccountIDs              []int64                   `json:"account_ids"`
-	Filters                 *BulkUpdateAccountFilters `json:"filters"`
-	Name                    string                    `json:"name"`
-	ProxyID                 *int64                    `json:"proxy_id"`
-	Concurrency             *int                      `json:"concurrency"`
-	Priority                *int                      `json:"priority"`
-	RateMultiplier          *float64                  `json:"rate_multiplier"`
-	LoadFactor              *int                      `json:"load_factor"`
-	Status                  string                    `json:"status" binding:"omitempty,oneof=active inactive error"`
-	Schedulable             *bool                     `json:"schedulable"`
-	GroupIDs                *[]int64                  `json:"group_ids"`
-	Credentials             map[string]any            `json:"credentials"`
-	Extra                   map[string]any            `json:"extra"`
-	ProbeEnabled            *bool                     `json:"upstream_billing_probe_enabled"`
-	ConfirmMixedChannelRisk *bool                     `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	ModelCatalog            *service.BulkModelCatalogEdit `json:"model_catalog"`
+	AccountIDs              []int64                       `json:"account_ids"`
+	Filters                 *BulkUpdateAccountFilters     `json:"filters"`
+	Name                    string                        `json:"name"`
+	ProxyID                 *int64                        `json:"proxy_id"`
+	Concurrency             *int                          `json:"concurrency"`
+	Priority                *int                          `json:"priority"`
+	RateMultiplier          *float64                      `json:"rate_multiplier"`
+	LoadFactor              *int                          `json:"load_factor"`
+	Status                  string                        `json:"status" binding:"omitempty,oneof=active inactive error"`
+	Schedulable             *bool                         `json:"schedulable"`
+	GroupIDs                *[]int64                      `json:"group_ids"`
+	Credentials             map[string]any                `json:"credentials"`
+	Extra                   map[string]any                `json:"extra"`
+	ProbeEnabled            *bool                         `json:"upstream_billing_probe_enabled"`
+	ConfirmMixedChannelRisk *bool                         `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 type BulkUpdateAccountFilters struct {
@@ -2353,7 +2354,7 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 		req.GroupIDs != nil ||
 		len(req.Credentials) > 0 ||
 		len(req.Extra) > 0 ||
-		req.ProbeEnabled != nil
+		req.ProbeEnabled != nil || req.ModelCatalog != nil
 
 	if !hasUpdates {
 		response.BadRequest(c, "No updates provided")
@@ -2363,6 +2364,7 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	result, err := h.adminService.BulkUpdateAccounts(c.Request.Context(), &service.BulkUpdateAccountsInput{
 		AccountIDs:            req.AccountIDs,
 		Filters:               toServiceBulkUpdateAccountFilters(req.Filters),
+		ModelCatalog:          req.ModelCatalog,
 		Name:                  req.Name,
 		ProxyID:               req.ProxyID,
 		Concurrency:           req.Concurrency,

@@ -374,7 +374,10 @@
                       d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
                     />
                   </svg>
-                  {{ t('admin.accounts.selectAllowedModels') }}
+                  <span v-if="useUpstreamModelCatalog" data-testid="bulk-upstream-catalog-hint">
+                    {{ t('admin.accounts.modelCatalog.bulkUpstreamHint') }}
+                  </span>
+                  <span v-else>{{ t('admin.accounts.selectAllowedModels') }}</span>
                 </p>
               </div>
 
@@ -382,9 +385,13 @@
                 v-model="allowedModels"
                 :model-mappings="modelMappings"
                 :platforms="targetSelectedPlatforms"
+                :automatic-catalog="allOpenAIOAuthOnly"
+                :show-catalog-status="false"
+                :catalog-source="modelCatalogSource"
+                @catalog-source="modelCatalogSource = $event"
               />
 
-              <p class="text-xs text-gray-500 dark:text-gray-400">
+              <p v-if="!useUpstreamModelCatalog" class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
                 <span v-if="allowedModels.length === 0">{{
                   t('admin.accounts.supportsAllModels')
@@ -1530,6 +1537,7 @@ import Select from '@/components/common/Select.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
+import type { ModelCatalogSource } from '@/components/account/modelCatalog'
 import Icon from '@/components/icons/Icon.vue'
 import {
   buildModelMappingObject as buildModelMappingPayload,
@@ -1724,6 +1732,13 @@ const mixedChannelWarningMessage = ref('')
 const pendingUpdatesForConfirm = ref<Record<string, unknown> | null>(null)
 const baseUrl = ref('')
 const modelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
+const modelCatalogSource = ref<ModelCatalogSource>('custom')
+const useUpstreamModelCatalog = computed(() =>
+  allOpenAIOAuthOnly.value && modelRestrictionMode.value === 'whitelist' && modelCatalogSource.value === 'upstream'
+)
+watch([modelRestrictionMode, allOpenAIOAuthOnly], () => {
+  modelCatalogSource.value = 'custom'
+})
 const allowedModels = ref<string[]>([])
 const modelMappings = ref<ModelMapping[]>([])
 const selectedErrorCodes = ref<number[]>([])
@@ -2067,8 +2082,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   }
 
   if (enableModelRestriction.value && !isOpenAIModelRestrictionDisabled.value) {
-    // 统一使用 model_mapping 字段
-    if (modelRestrictionMode.value === 'whitelist') {
+    // 上游来源按账号独立保存；手动配置统一使用 model_mapping 字段。
+    if (useUpstreamModelCatalog.value) {
+      updates.model_catalog = { source: 'upstream' }
+    } else if (modelRestrictionMode.value === 'whitelist') {
       // 白名单模式：将模型转换为 model_mapping 格式（key=value）
       // 空白名单表示“支持所有模型”，需显式发送空对象以覆盖已有限制。
       const mapping: Record<string, string> = {}
@@ -2377,6 +2394,8 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
       }))
     } else if (error.reason === 'OPENAI_LONG_CONTEXT_PARENT_REQUIRED') {
       appStore.showError(t('admin.accounts.bulkEdit.longContextParentRequired'))
+    } else if (error.reason === 'MODEL_CATALOG_UNSUPPORTED') {
+      appStore.showError(t('admin.accounts.modelCatalog.bulkUnsupported'))
     } else {
       appStore.showError(error.message || t('admin.accounts.bulkEdit.failed'))
       console.error('Error bulk updating accounts:', error)
@@ -2443,6 +2462,7 @@ watch(
       openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
       openAIResponsesMode.value = 'auto'
       modelRestrictionMode.value = 'whitelist'
+      modelCatalogSource.value = 'custom'
       allowedModels.value = []
       modelMappings.value = []
       selectedErrorCodes.value = []

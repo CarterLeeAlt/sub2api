@@ -263,3 +263,23 @@ func TestBulkUpdateAcceptsDedicatedUpstreamBillingProbeSetting(t *testing.T) {
 	require.NotNil(t, adminSvc.lastBulkUpdateAccountInput.ProbeEnabled)
 	require.False(t, *adminSvc.lastBulkUpdateAccountInput.ProbeEnabled)
 }
+
+func TestBulkUpdateAcceptsUpstreamModelCatalogOnly(t *testing.T) {
+	for _, target := range []map[string]any{
+		{"account_ids": []int64{1, 2}},
+		{"filters": map[string]any{"platform": "openai", "type": "oauth"}},
+	} {
+		adminSvc := newStubAdminService()
+		router := setupAccountMixedChannelRouter(adminSvc)
+		target["model_catalog"] = map[string]any{"source": "upstream"}
+		body, err := json.Marshal(target)
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/bulk-update", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, &service.BulkModelCatalogEdit{Source: "upstream"}, adminSvc.lastBulkUpdateAccountInput.ModelCatalog)
+		require.Empty(t, adminSvc.lastBulkUpdateAccountInput.Credentials)
+	}
+}
