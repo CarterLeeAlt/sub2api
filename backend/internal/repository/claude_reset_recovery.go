@@ -9,7 +9,7 @@ import (
 )
 
 func (r *accountRepository) RecoverClaudeReset(ctx context.Context, a *service.Account, recovery service.ClaudeResetRecovery) (bool, error) {
-	identity, err := json.Marshal(service.OAuthCredentialIdentity(a.Credentials))
+	identity, nulls, err := marshalOAuthCredentialIdentity(a.Credentials)
 	if err != nil {
 		return false, err
 	}
@@ -41,12 +41,12 @@ func (r *accountRepository) RecoverClaudeReset(ctx context.Context, a *service.A
 	 updated_at=NOW()
 	 WHERE id=$1 AND deleted_at IS NULL AND platform='anthropic' AND type='oauth'
 	 AND proxy_id IS NOT DISTINCT FROM $7
-	 AND NOT EXISTS(SELECT 1 FROM jsonb_each($2::jsonb)e WHERE COALESCE(credentials->e.key,'null'::jsonb) IS DISTINCT FROM e.value)
+	 AND ($13::jsonb || COALESCE(credentials,'{}'::jsonb)) @> $2::jsonb
 	 AND rate_limited_at IS NOT DISTINCT FROM $8 AND rate_limit_reset_at IS NOT DISTINCT FROM $9
 	 AND temp_unschedulable_until IS NOT DISTINCT FROM $10 AND COALESCE(temp_unschedulable_reason,'')=$11
 	 AND COALESCE(extra->'model_rate_limits','null'::jsonb)=$12::jsonb
 	 RETURNING id
-	) INSERT INTO scheduler_outbox(event_type,account_id,payload) SELECT 'account_changed',id,'{}'::jsonb FROM changed`, a.ID, string(identity), recovery.ClearGlobal, recovery.ClearThreshold, recovery.ClearFable, string(patch), a.ProxyID, a.RateLimitedAt, a.RateLimitResetAt, a.TempUnschedulableUntil, a.TempUnschedulableReason, string(models))
+	) INSERT INTO scheduler_outbox(event_type,account_id,payload) SELECT 'account_changed',id,'{}'::jsonb FROM changed`, a.ID, identity, recovery.ClearGlobal, recovery.ClearThreshold, recovery.ClearFable, string(patch), a.ProxyID, a.RateLimitedAt, a.RateLimitResetAt, a.TempUnschedulableUntil, a.TempUnschedulableReason, string(models), nulls)
 	if err != nil {
 		return false, err
 	}

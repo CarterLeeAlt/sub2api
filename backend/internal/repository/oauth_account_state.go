@@ -9,6 +9,21 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
+// Pad absent identity fields with JSON null before comparing the current row.
+// Keep the predicate on the UPDATE tuple itself: a correlated subquery can
+// retain the pre-lock snapshot during PostgreSQL EvalPlanQual rechecks.
+func marshalOAuthCredentialIdentity(credentials map[string]any) (identity, nulls string, err error) {
+	encoded, err := json.Marshal(service.OAuthCredentialIdentity(credentials))
+	if err != nil {
+		return "", "", err
+	}
+	defaults, err := json.Marshal(service.OAuthCredentialIdentity(nil))
+	if err != nil {
+		return "", "", err
+	}
+	return string(encoded), string(defaults), nil
+}
+
 // Only provider changes are merged. A concurrent model/config edit must neither
 // be rolled back nor cause a successfully rotated refresh token to be discarded.
 func (r *accountRepository) UpdateOAuthCredentialsIfUnchanged(ctx context.Context, expected *service.Account, credentials map[string]any) (bool, error) {
@@ -18,7 +33,7 @@ func (r *accountRepository) UpdateOAuthCredentialsIfUnchanged(ctx context.Contex
 			patch[key] = value
 		}
 	}
-	identity, err := json.Marshal(service.OAuthCredentialIdentity(expected.Credentials))
+	identity, nulls, err := marshalOAuthCredentialIdentity(expected.Credentials)
 	if err != nil {
 		return false, err
 	}
@@ -39,10 +54,10 @@ func (r *accountRepository) UpdateOAuthCredentialsIfUnchanged(ctx context.Contex
 	 extra=COALESCE(extra,'{}'::jsonb)-$7, updated_at=NOW()
 	 WHERE id=$1 AND deleted_at IS NULL AND platform=$4 AND type=$5 AND parent_account_id IS NULL
 	 AND proxy_id IS NOT DISTINCT FROM $6
-	 AND NOT EXISTS (SELECT 1 FROM jsonb_each($3::jsonb) e WHERE COALESCE(credentials->e.key,'null'::jsonb) IS DISTINCT FROM e.value)
+	 AND ($8::jsonb || COALESCE(credentials,'{}'::jsonb)) @> $3::jsonb
 	 RETURNING id
 	) INSERT INTO scheduler_outbox(event_type,account_id,payload) SELECT 'account_changed',id,'{}'::jsonb FROM changed`,
-		expected.ID, string(payload), string(identity), expected.Platform, expected.Type, expected.ProxyID, key)
+		expected.ID, string(payload), identity, expected.Platform, expected.Type, expected.ProxyID, key, nulls)
 	if err != nil {
 		return false, err
 	}
@@ -54,7 +69,7 @@ func (r *accountRepository) UpdateOAuthCredentialsIfUnchanged(ctx context.Contex
 }
 
 func (r *accountRepository) SaveOAuthAuthenticationState(ctx context.Context, expected *service.Account, state service.OpenAIUpstreamHealth, until time.Time) (bool, error) {
-	identity, err := json.Marshal(service.OAuthCredentialIdentity(expected.Credentials))
+	identity, nulls, err := marshalOAuthCredentialIdentity(expected.Credentials)
 	if err != nil {
 		return false, err
 	}
@@ -75,10 +90,10 @@ func (r *accountRepository) SaveOAuthAuthenticationState(ctx context.Context, ex
 	 updated_at=NOW()
 	 WHERE id=$1 AND deleted_at IS NULL AND platform=$4 AND type=$5 AND parent_account_id IS NULL
 	 AND proxy_id IS NOT DISTINCT FROM $6
-	 AND NOT EXISTS (SELECT 1 FROM jsonb_each($2::jsonb) e WHERE COALESCE(credentials->e.key,'null'::jsonb) IS DISTINCT FROM e.value)
+	 AND ($11::jsonb || COALESCE(credentials,'{}'::jsonb)) @> $2::jsonb
 	 AND ($8='auth_invalid' OR COALESCE(extra->$7->>'kind','')<>'auth_invalid')
 	 RETURNING id
-	) INSERT INTO scheduler_outbox(event_type,account_id,payload) SELECT 'account_changed',id,'{}'::jsonb FROM changed`, expected.ID, string(identity), string(payload), expected.Platform, expected.Type, expected.ProxyID, key, state.Kind, state.Message, until)
+	) INSERT INTO scheduler_outbox(event_type,account_id,payload) SELECT 'account_changed',id,'{}'::jsonb FROM changed`, expected.ID, identity, string(payload), expected.Platform, expected.Type, expected.ProxyID, key, state.Kind, state.Message, until, nulls)
 	if err != nil {
 		return false, err
 	}
