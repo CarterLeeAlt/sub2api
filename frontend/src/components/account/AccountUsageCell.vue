@@ -774,9 +774,10 @@ import {
 } from './credentialsBuilder'
 import OpenCodeGoUsageCell from './OpenCodeGoUsageCell.vue'
 
-// Module-level cache shared across all AccountUsageCell instances
+// Per-cell cache for automatic reads; manual queries replace the cached result.
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
 const USAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+const USAGE_ERROR_CACHE_TTL = 60 * 1000
 
 const props = withDefaults(
   defineProps<{
@@ -1574,7 +1575,8 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
   // Check cache
   if (!options?.bypassCache) {
     const cached = _usageCache.get(props.account.id)
-    if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL) {
+    const cacheTTL = cached?.data.error || cached?.data.error_code ? USAGE_ERROR_CACHE_TTL : USAGE_CACHE_TTL
+    if (cached && Date.now() - cached.ts < cacheTTL) {
       usageInfo.value = cached.data
       loading.value = false
       return
@@ -1655,11 +1657,16 @@ const attachVisibilityObserver = () => {
 }
 
 const loadActiveUsage = async () => {
+  const accountID = props.account.id
   activeQueryLoading.value = true
   error.value = null
   try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    const result = await adminAPI.accounts.getUsage(accountID, 'active', true)
+    if (unmounted.value || props.account.id !== accountID) return
+    usageInfo.value = result
+    _usageCache.set(accountID, { data: result, ts: Date.now() })
   } catch (e: any) {
+    if (unmounted.value || props.account.id !== accountID) return
     error.value = e?.message || t('common.error')
     console.error('Failed to load active usage:', e)
   } finally {

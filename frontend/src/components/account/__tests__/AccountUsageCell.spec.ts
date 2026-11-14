@@ -161,6 +161,32 @@ describe('AccountUsageCell', () => {
     wrapper.unmount()
   })
 
+  it('keeps the successful manual query during later automatic cache reads', async () => {
+    const account = makeAccount({ id: 98432, platform: 'openai', type: 'oauth' })
+    const failedUsage = { five_hour: { utilization: 10 }, error: 'connection reset', error_code: 'network_error' }
+    const freshUsage = { five_hour: { utilization: 25 } }
+    getUsage.mockResolvedValueOnce(failedUsage).mockResolvedValueOnce(freshUsage)
+    const options = {
+      props: { account },
+      global: { stubs: {
+        OpenAIQuotaResetCell: { template: '<div><slot name="pre-actions" /></div>' },
+        UsageProgressBar: { props: ['utilization'], template: '<div data-test="quota">{{ utilization }}</div>' }
+      } }
+    }
+    const wrapper = mount(AccountUsageCell, options)
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.accounts.openaiHealth.historical')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="quota"]').text()).toBe('25')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiHealth.historical')
+    await (wrapper.vm as unknown as { loadUsage: () => Promise<void> }).loadUsage()
+    expect(wrapper.get('[data-test="quota"]').text()).toBe('25')
+    expect(wrapper.text()).not.toContain('admin.accounts.openaiHealth.historical')
+    expect(getUsage).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
   it('renders eligible Ollama Cloud state and forwards query updates', async () => {
     const wrapper = mount(AccountUsageCell, {
       props: {

@@ -381,6 +381,7 @@ export async function getUsage(id: number, source?: 'passive' | 'active', force?
   if (source) params.source = source
   if (force) params.force = 'true'
   const { data } = await apiClient.get<AccountUsageInfo>(`/admin/accounts/${id}/usage`, {
+    timeout: 60_000,
     params: Object.keys(params).length > 0 ? params : undefined
   })
   return data
@@ -396,7 +397,7 @@ export async function getBatchUsage(accountIds: number[], force?: boolean): Prom
   const { data } = await apiClient.post<BatchAccountUsageResponse>('/admin/accounts/usage/batch', {
     account_ids: accountIds,
     force: force === true
-  })
+  }, { timeout: 60_000 })
   return data
 }
 
@@ -986,7 +987,7 @@ export interface OpenAIQuotaRefreshResult extends OpenAIQuotaUsage {
  */
 export async function refreshOpenAIQuota(id: number): Promise<OpenAIQuotaRefreshResult> {
   const { data } = await apiClient.post<OpenAIQuotaRefreshResult>(
-    `/admin/openai/accounts/${id}/quota/refresh`
+    `/admin/openai/accounts/${id}/quota/refresh`, undefined, { timeout: 100_000 }
   )
   return data
 }

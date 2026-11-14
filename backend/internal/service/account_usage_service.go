@@ -113,6 +113,7 @@ const (
 	apiQueryMaxJitter   = 800 * time.Millisecond // 用量查询最大随机延迟
 	windowStatsCacheTTL = 1 * time.Minute
 	openAIProbeCacheTTL = 10 * time.Minute
+	openAIProbeErrorTTL = time.Minute
 	grokProbeRetryTTL   = 1 * time.Minute
 	grokFreeQuotaWindow = 24 * time.Hour
 )
@@ -139,7 +140,7 @@ type UsageCache struct {
 	antigravityCache  sync.Map           // accountID -> *antigravityUsageCache
 	apiFlight         singleflight.Group // 防止同一账号的并发请求击穿缓存（Anthropic）
 	antigravityFlight singleflight.Group // 防止同一 Antigravity 账号的并发请求击穿缓存
-	openAIProbeCache  sync.Map           // accountID -> time.Time
+	openAIProbeCache  sync.Map           // accountID -> next allowed probe time.Time
 	grokProbeCache    sync.Map           // accountID -> last billing probe attempt
 }
 
@@ -640,7 +641,9 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 		id := accountID
 		account := accountsByID[id]
 		if account == nil {
+			mu.Lock()
 			errorsByAccount[id] = ErrAccountNotFound.Error()
+			mu.Unlock()
 			continue
 		}
 
@@ -839,14 +842,24 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 	if shouldRefreshSnapshot && s.shouldProbeOpenAICodexSnapshot(account.ID, now, force) {
 		var updates map[string]any
-		if s.openAIQuotaService != nil {
-			var quotaUsage *OpenAIQuotaUsage
-			var err error
-			if account.IsShadow() {
-				quotaUsage, err = s.openAIQuotaService.QueryUsage(ctx, account.ID)
-			} else {
-				quotaUsage, err = s.openAIQuotaService.QueryUsageWindows(ctx, account.ID)
+		probeSucceeded := false
+		probeLease := now.Add(openAIProbeCacheTTL)
+		defer func() {
+			if s.cache == nil {
+				return
 			}
+			if ctx.Err() != nil {
+				s.cache.openAIProbeCache.CompareAndDelete(account.ID, probeLease)
+				return
+			}
+			ttl := openAIProbeErrorTTL
+			if probeSucceeded {
+				ttl = openAIProbeCacheTTL
+			}
+			s.cache.openAIProbeCache.CompareAndSwap(account.ID, probeLease, time.Now().Add(ttl))
+		}()
+		if s.openAIQuotaService != nil {
+			quotaUsage, err := s.openAIQuotaService.QueryUsageWindows(ctx, account.ID)
 			if err == nil {
 				usage.Error = ""
 				usage.ErrorCode = ""
@@ -860,6 +873,9 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 					updates = buildCodexWhamWindowExtraUpdates(quotaUsage, time.Now(), false)
 				}
 			} else {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				allowThresholdRecovery = false
 				usage.Error = err.Error()
 				usage.ErrorCode = openAIHealthErrorKind(err)
@@ -883,10 +899,8 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			if err != nil {
 				allowThresholdRecovery = false
 				slog.Warn("openai_codex_snapshot_persist_failed", "account_id", account.ID, "error", err)
-				if s.cache != nil {
-					s.cache.openAIProbeCache.Delete(account.ID)
-				}
 			} else if persisted {
+				probeSucceeded = true
 				mergeAccountExtra(account, updates)
 				if usage.UpdatedAt == nil {
 					usage.UpdatedAt = &now
@@ -968,6 +982,9 @@ func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now ti
 	if usage == nil {
 		return true
 	}
+	if health := accountOpenAIUpstreamHealth(account); health.Source == "quota" && health.Kind != "" {
+		return true
+	}
 	if usage.FiveHour == nil || usage.SevenDay == nil {
 		return true
 	}
@@ -1003,15 +1020,19 @@ func (s *AccountUsageService) shouldProbeOpenAICodexSnapshot(accountID int64, no
 		return true
 	}
 	forceProbe := len(force) > 0 && force[0]
-	if !forceProbe {
-		if cached, ok := s.cache.openAIProbeCache.Load(accountID); ok {
-			if ts, ok := cached.(time.Time); ok && now.Sub(ts) < openAIProbeCacheTTL {
-				return false
-			}
+	for {
+		next := now.Add(openAIProbeCacheTTL)
+		cached, loaded := s.cache.openAIProbeCache.LoadOrStore(accountID, next)
+		if !loaded {
+			return true
+		}
+		if !forceProbe && now.Before(cached.(time.Time)) {
+			return false
+		}
+		if s.cache.openAIProbeCache.CompareAndSwap(accountID, cached, next) {
+			return true
 		}
 	}
-	s.cache.openAIProbeCache.Store(accountID, now)
-	return true
 }
 
 func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, account *Account) (map[string]any, error) {

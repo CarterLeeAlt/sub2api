@@ -5,8 +5,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 type accountUsageCodexProbeRepo struct {
@@ -121,6 +124,35 @@ func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
 	}, now) {
 		t.Fatal("expected unversioned wham snapshot to refresh immediately")
 	}
+}
+
+func TestOpenAIUsageTransientFailureUsesShortRetryCooldown(t *testing.T) {
+	a := &Account{ID: 98765, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "workspace"}}
+	repo := &sparkShadowUsageTestRepo{accounts: map[int64]*Account{a.ID: a}}
+	tokens := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(a): "token"}}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_after_seconds":3600}}}`))
+	}))
+	defer server.Close()
+	svc := &AccountUsageService{accountRepo: repo, cache: NewUsageCache(), openAIQuotaService: NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokens, nil), newQuotaRedirectingFactory(server), nil)}
+	usage, err := svc.getOpenAIUsage(context.Background(), a, false)
+	require.NoError(t, err)
+	require.NotEmpty(t, usage.Error)
+	require.EqualValues(t, 2, calls.Load(), "the upstream read retries before becoming a cached failure")
+	now := time.Now()
+	require.False(t, svc.shouldProbeOpenAICodexSnapshot(a.ID, now.Add(30*time.Second)))
+	require.True(t, svc.shouldProbeOpenAICodexSnapshot(a.ID, now.Add(90*time.Second)), "failure must not suppress refresh for ten minutes")
+	usage, err = svc.getOpenAIUsage(context.Background(), a, true)
+	require.NoError(t, err)
+	require.Empty(t, usage.Error)
+	require.Equal(t, 25.0, usage.FiveHour.Utilization)
+	require.EqualValues(t, 3, calls.Load())
 }
 
 // TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2 外审第9轮 P1:spark 影子用量走

@@ -746,10 +746,14 @@ const usageBatchLoadingByAccountId = ref<Record<string, boolean>>({})
 const usageBatchRequestTokenByAccountId = ref<Record<string, number>>({})
 const usageBatchCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
 const USAGE_BATCH_CACHE_TTL = 5 * 60 * 1000
+const USAGE_BATCH_ERROR_CACHE_TTL = 60 * 1000
+// Match the backend's six workers so queue time cannot exhaust the HTTP deadline.
+const USAGE_BATCH_SIZE = 6
 const pendingUsageBatchIds = new Set<number>()
 let usageBatchFlushTimer: ReturnType<typeof setTimeout> | null = null
 let queuedUsageBatchForce = false
 let usageBatchRequestToken = 0
+let usageBatchInFlight = false
 
 const buildDefaultTodayStats = (): WindowStats => ({
   requests: 0,
@@ -791,17 +795,22 @@ const setUsageBatchState = (accountID: number, usage: AccountUsageInfo | null, e
 
 const handleAccountUsageLoaded = (accountID: number, usage: AccountUsageInfo) => {
   if (usageBatchByAccountId.value[String(accountID)] === usage) return
+  usageBatchCache.set(accountID, { data: usage, ts: Date.now() })
+  usageBatchRequestTokenByAccountId.value[String(accountID)] = ++usageBatchRequestToken
   setUsageBatchState(accountID, usage, null)
+  setUsageBatchLoading(accountID, false)
 }
 
 const flushQueuedUsageBatch = async () => {
   usageBatchFlushTimer = null
-  const accountIDs = Array.from(pendingUsageBatchIds)
+  if (usageBatchInFlight) return
+  const accountIDs = Array.from(pendingUsageBatchIds).slice(0, USAGE_BATCH_SIZE)
   const force = queuedUsageBatchForce
-  pendingUsageBatchIds.clear()
-  queuedUsageBatchForce = false
+  for (const accountID of accountIDs) pendingUsageBatchIds.delete(accountID)
+  if (pendingUsageBatchIds.size === 0) queuedUsageBatchForce = false
 
   if (accountIDs.length === 0) return
+  usageBatchInFlight = true
 
   const requestTokensByAccount = accountIDs.reduce<Record<string, number>>((acc, accountID) => {
     acc[String(accountID)] = usageBatchRequestTokenByAccountId.value[String(accountID)] ?? 0
@@ -864,6 +873,11 @@ const flushQueuedUsageBatch = async () => {
     usageBatchErrorByAccountId.value = nextErrors
     usageBatchLoadingByAccountId.value = nextLoading
     console.error('Failed to load account usage batch:', error)
+  } finally {
+    usageBatchInFlight = false
+    if (pendingUsageBatchIds.size > 0 && usageBatchFlushTimer === null) {
+      usageBatchFlushTimer = setTimeout(() => { void flushQueuedUsageBatch() }, 0)
+    }
   }
 }
 
@@ -879,7 +893,8 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
     usageBatchCache.delete(cacheKey)
   } else {
     const cached = usageBatchCache.get(cacheKey)
-    if (cached && Date.now() - cached.ts < USAGE_BATCH_CACHE_TTL) {
+    const cacheTTL = cached?.data.error || cached?.data.error_code ? USAGE_BATCH_ERROR_CACHE_TTL : USAGE_BATCH_CACHE_TTL
+    if (cached && Date.now() - cached.ts < cacheTTL) {
       setUsageBatchState(cacheKey, cached.data, null)
       setUsageBatchLoading(cacheKey, false)
       return
@@ -898,7 +913,7 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
   pendingUsageBatchIds.add(cacheKey)
   queuedUsageBatchForce = queuedUsageBatchForce || force
 
-  if (usageBatchFlushTimer !== null) return
+  if (usageBatchFlushTimer !== null || usageBatchInFlight) return
   usageBatchFlushTimer = setTimeout(() => {
     void flushQueuedUsageBatch()
   }, 0)

@@ -621,9 +621,9 @@ func TestOpenAIQuotaSnapshotRefreshReconcileFailureDoesNotAbortCycle(t *testing.
 		"the snapshot must still be persisted when recovery fails")
 }
 
-// Every processed page must renew the leader lock so a serial sweep that
-// outlives the TTL cannot silently lose leadership mid-cycle.
-func TestOpenAIQuotaSnapshotRefreshRenewsLeaderLockPerPage(t *testing.T) {
+// Each account may use two read endpoints with retries. Renew before starting
+// the next account so even one slow page cannot outlive the leader lease.
+func TestOpenAIQuotaSnapshotRefreshRenewsLeaderLockPerAccount(t *testing.T) {
 	accounts := make([]Account, 0, 101)
 	for id := int64(1); id <= 101; id++ {
 		accounts = append(accounts, quotaSnapshotParent(id, StatusActive, true))
@@ -635,12 +635,12 @@ func TestOpenAIQuotaSnapshotRefreshRenewsLeaderLockPerPage(t *testing.T) {
 	svc.SetLeaderLock(lock, nil)
 
 	require.NoError(t, svc.RunOnce(context.Background()))
-	require.Equal(t, 2, lock.renews, "one renewal per processed page")
+	require.Equal(t, 101, lock.renews, "one renewal per processed account")
 	require.Len(t, quota.calls, 101)
 	require.Equal(t, 1, lock.releases)
 }
 
-// Losing the leader lock at a page boundary must abort the cycle immediately:
+// Losing the leader lock between accounts must abort the cycle immediately:
 // continuing would sweep concurrently with the new leader.
 func TestOpenAIQuotaSnapshotRefreshAbortsWhenLeaderLockRenewFails(t *testing.T) {
 	accounts := make([]Account, 0, 101)
@@ -655,8 +655,7 @@ func TestOpenAIQuotaSnapshotRefreshAbortsWhenLeaderLockRenewFails(t *testing.T) 
 
 	err := svc.RunOnce(context.Background())
 	require.Error(t, err, "a lost leader lock must fail the cycle")
-	require.Len(t, quota.calls, 100, "only the first page may be processed before aborting")
-	require.NotContains(t, quota.calls, int64(101), "the second page must not run after the lock is lost")
+	require.Equal(t, []int64{1}, quota.calls, "no subsequent account may run after the lock is lost")
 	require.Equal(t, 1, lock.renews)
 	require.Equal(t, 1, lock.releases, "the lock must still be released via the deferred release")
 }

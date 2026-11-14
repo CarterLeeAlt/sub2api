@@ -6,16 +6,21 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/google/uuid"
 )
 
 const (
-	openAIQuotaSnapshotRefreshPageSize       = 100
-	openAIQuotaSnapshotRefreshAccountTimeout = 20 * time.Second
+	openAIQuotaSnapshotRefreshPageSize = 100
+	// Two read endpoints, each with up to two 20-second attempts, plus token
+	// acquisition and snapshot persistence. Each attempt remains independently bounded.
+	openAIQuotaSnapshotRefreshAccountTimeout = 100 * time.Second
 	openAIQuotaSnapshotRefreshRetryDelay     = 10 * time.Second
 	openAIQuotaSnapshotRefreshInitialMax     = 2 * time.Minute
 	openAIQuotaSnapshotRefreshLeaderLockKey  = "openai:quota:snapshot:refresh:leader"
@@ -245,6 +250,9 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 		}
 
 		for i := range accounts {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			account := accounts[i]
 			if !account.IsOpenAIOAuth() || account.IsShadow() {
 				continue
@@ -254,14 +262,9 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 			if err := s.refreshAccountWithRetry(ctx, &account); err != nil {
 				slog.Warn("openai_quota_snapshot_refresh_account_failed", "account_id", account.ID, "error", err)
 			}
-		}
-
-		// A full serial sweep can outlive the leader lock TTL (each account may
-		// burn two upstream attempts plus a cooldown). Renew the lock after
-		// every page so leadership is not silently lost mid-cycle; abort
-		// immediately when a peer has taken over.
-		if !s.renewLeaderLock(ctx) {
-			return fmt.Errorf("OpenAI quota snapshot refresh leader lock lost after page %d; aborting cycle to avoid double leadership", page)
+			if !s.renewLeaderLock(ctx) {
+				return fmt.Errorf("OpenAI quota snapshot refresh leader lock lost after account %d", account.ID)
+			}
 		}
 
 		if len(accounts) < openAIQuotaSnapshotRefreshPageSize || result == nil || page >= result.Pages {
@@ -270,7 +273,7 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 	}
 }
 
-// renewLeaderLock extends the leader lock TTL once per page. It returns false
+// renewLeaderLock extends the leader lock TTL after each account. It returns false
 // when the lock was lost (expired or re-acquired by a peer) or when renewal
 // errored, in which case the caller must stop the cycle: continuing without a
 // verified lease risks two instances sweeping concurrently. Backends without a
@@ -321,10 +324,10 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccountWithRetry(ctx context.
 	if firstErr == nil {
 		return nil
 	}
-	if kind := openAIHealthErrorKind(firstErr); kind == "auth_invalid" || kind == "auth_refresh_required" || kind == "permission_denied" {
+	// Upstream read failures have already exhausted their bounded retries.
+	if strings.HasPrefix(infraerrors.Reason(firstErr), "OPENAI_UPSTREAM_") || ctx.Err() != nil {
 		return firstErr
 	}
-
 	slog.Warn("openai_quota_snapshot_refresh_account_retry_scheduled",
 		"account_id", account.ID, "retry_delay", openAIQuotaSnapshotRefreshRetryDelay, "error", firstErr)
 	if waitErr := s.retryWait(ctx, openAIQuotaSnapshotRefreshRetryDelay); waitErr != nil {
@@ -386,6 +389,9 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccount(ctx context.Context, 
 		if err := s.persistResetCreditSnapshot(ctx, shadow.ID, usage.RateLimitResetCredits, observedAt); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if firstErr == nil && usage.Warning != nil {
+		return infraerrors.New(http.StatusBadGateway, "OPENAI_UPSTREAM_"+strings.ToUpper(usage.Warning.Kind), usage.Warning.Message)
 	}
 	return firstErr
 }

@@ -312,4 +312,25 @@ describe('admin AccountsView usage windows hint', () => {
 
     expect(wrapper.get('[data-test="account-threshold"]').text()).toBe('100')
   })
+
+  it('queries one backend-sized batch at a time and continues after a failed batch', async () => {
+    const accounts = Array.from({ length: 13 }, (_, index) => ({
+      id: index + 1, name: `account-${index}`, platform: 'openai', type: 'oauth',
+      status: 'active', schedulable: true, credentials: {},
+      created_at: '2026-08-17T06:00:00Z', updated_at: '2026-08-17T06:00:00Z'
+    }))
+    listAccounts.mockResolvedValueOnce({ items: accounts, total: 13, page: 1, page_size: 20, pages: 1 })
+    let rejectFirst!: (reason: Error) => void
+    getBatchUsage.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectFirst = reject }))
+    const wrapper = mountView()
+    await flushPromises()
+    await Promise.all(wrapper.findAll('[data-test="request-usage"]').map(button => button.trigger('click')))
+    await vi.waitFor(() => expect(getBatchUsage).toHaveBeenCalledTimes(1))
+    expect(getBatchUsage).toHaveBeenNthCalledWith(1, [1, 2, 3, 4, 5, 6], false)
+    rejectFirst(new Error('upstream temporarily unavailable'))
+    await vi.waitFor(() => expect(getBatchUsage).toHaveBeenCalledTimes(3))
+    expect(getBatchUsage).toHaveBeenNthCalledWith(2, [7, 8, 9, 10, 11, 12], false)
+    expect(getBatchUsage).toHaveBeenNthCalledWith(3, [13], false)
+    wrapper.unmount()
+  })
 })

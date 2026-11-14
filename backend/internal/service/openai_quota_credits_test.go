@@ -51,7 +51,7 @@ func TestQueryUsageCodexCredits(t *testing.T) {
 			encoded, err := json.Marshal(usage.Credits)
 			require.NoError(t, err)
 			require.JSONEq(t, tc.want, string(encoded))
-			require.Equal(t, []string{"/backend-api/wham/usage", "/backend-api/wham/rate-limit-reset-credits"}, paths)
+			require.Equal(t, []string{"/backend-api/wham/usage", "/backend-api/wham/rate-limit-reset-credits", "/backend-api/wham/rate-limit-reset-credits"}, paths)
 			require.Zero(t, repo.extraUpdateCalls, "read-only query must not write account state")
 		})
 	}
