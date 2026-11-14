@@ -1931,6 +1931,9 @@ func newOpenAIWSHandlerTestServer(t *testing.T, h *OpenAIGatewayHandler, subject
 }
 
 type openAIResponsesWSUsageLogCase struct {
+	usageRecordWorkerPool  *service.UsageRecordWorkerPool
+	billingRepository      service.UsageBillingRepository
+	beforeCollectUsage     func()
 	simpleModeRejectAtRead int64
 	standardMode           bool
 	billingCache           service.BillingCache
@@ -3124,10 +3127,14 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	}
 	billingCacheSvc := service.NewBillingCacheService(tc.billingCache, nil, nil, keyRepo, tc.rpmCache, nil, cfg, nil)
 	t.Cleanup(billingCacheSvc.Stop)
+	billingRepo := tc.billingRepository
+	if billingRepo == nil {
+		billingRepo = &openAIWSUsageBillingRepo{}
+	}
 	gatewaySvc := service.NewOpenAIGatewayService(
 		accountRepo,
 		usageRepo,
-		&openAIWSUsageBillingRepo{},
+		billingRepo,
 		nil,
 		nil,
 		nil,
@@ -3158,12 +3165,13 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		},
 	}
 	h := &OpenAIGatewayHandler{
-		cfg:                 cfg,
-		compositeResolver:   tc.compositeResolver,
-		gatewayService:      gatewaySvc,
-		billingCacheService: billingCacheSvc,
-		apiKeyService:       &service.APIKeyService{},
-		concurrencyHelper:   NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
+		cfg:                   cfg,
+		compositeResolver:     tc.compositeResolver,
+		usageRecordWorkerPool: tc.usageRecordWorkerPool,
+		gatewayService:        gatewaySvc,
+		billingCacheService:   billingCacheSvc,
+		apiKeyService:         &service.APIKeyService{},
+		concurrencyHelper:     NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
 	}
 
 	apiKey := &service.APIKey{
@@ -3302,6 +3310,9 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	}
 	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
 
+	if tc.beforeCollectUsage != nil {
+		tc.beforeCollectUsage()
+	}
 	usageLogs := make([]*service.UsageLog, 0, turnCount)
 	for len(usageLogs) < turnCount {
 		select {

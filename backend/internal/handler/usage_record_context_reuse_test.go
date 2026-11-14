@@ -103,3 +103,41 @@ func TestGatewayUsageKeepsModelAfterGinContextReuse(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIWebSocketQueuedUsageKeepsEachTurnPayload(t *testing.T) {
+	for _, mode := range []string{service.OpenAIWSIngressModePassthrough, service.OpenAIWSIngressModeCtxPool} {
+		t.Run(mode, func(t *testing.T) {
+			pool := newUsageRecordTestPool(t)
+			blocked, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			pool.Submit(func(context.Context) { close(blocked); <-release })
+			<-blocked
+			first := `{"type":"response.create","model":"gpt-5.6-sol","input":"first request"}`
+			second := `{"type":"response.create","model":"gpt-5.6-sol","input":"second request"}`
+			billingRepo := &compatStreamUsageBillingRepo{}
+			cache := &wsTurnBillingCache{}
+			cache.balance.Store(100)
+			got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+				firstPayload: first, secondPayload: second, ingressMode: mode, standardMode: true,
+				billingCache: cache, billingRepository: billingRepo, usageRecordWorkerPool: pool,
+				beforeCollectUsage: func() {
+					require.Eventually(t, func() bool { return pool.Stats().WaitingTasks == 2 }, 2*time.Second, 10*time.Millisecond)
+					unblock()
+				},
+			})
+			require.Len(t, got.logs, 2)
+			billingRepo.mu.Lock()
+			defer billingRepo.mu.Unlock()
+			require.Len(t, billingRepo.commands, 2)
+			byID := map[string]*service.UsageBillingCommand{}
+			for _, cmd := range billingRepo.commands {
+				byID[cmd.RequestID] = cmd
+			}
+			require.Equal(t, service.HashUsageRequestPayload([]byte(first)), byID["resp_usage_e2e_1"].RequestPayloadHash)
+			require.Equal(t, service.HashUsageRequestPayload([]byte(second)), byID["resp_usage_e2e_2"].RequestPayloadHash)
+			require.NotEqual(t, byID["resp_usage_e2e_1"].RequestFingerprint, byID["resp_usage_e2e_2"].RequestFingerprint)
+		})
+	}
+}

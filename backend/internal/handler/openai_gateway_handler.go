@@ -3035,22 +3035,38 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		)
 
 		maxReasoningEffort, reasoningEffortMappings, maxReasoningEffortOverLimit, _ := openAIReasoningEffortPolicyForRequest(c, apiKey)
-		var requestPayloadHash string
-		var turnStartsMu sync.Mutex
+		var turnStateMu sync.Mutex
 		turnStarts := make(map[int]time.Time, 4)
+		turnPayloadHashes := make(map[int]string, 2)
+		setTurnPayloadHash := func(turn int, payload []byte) {
+			hash := service.HashUsageRequestPayload(payload)
+			turnStateMu.Lock()
+			defer turnStateMu.Unlock()
+			for previous := range turnPayloadHashes {
+				if previous < turn-1 {
+					delete(turnPayloadHashes, previous)
+				}
+			}
+			turnPayloadHashes[turn] = hash
+		}
+		getTurnPayloadHash := func(turn int) string {
+			turnStateMu.Lock()
+			defer turnStateMu.Unlock()
+			return turnPayloadHashes[turn]
+		}
 		recordTurnStart := func(turn int, startedAt time.Time) {
 			if turn <= 0 || startedAt.IsZero() {
 				return
 			}
-			turnStartsMu.Lock()
+			turnStateMu.Lock()
 			turnStarts[turn] = startedAt
-			turnStartsMu.Unlock()
+			turnStateMu.Unlock()
 		}
 		getTurnStart := func(turn int) time.Time {
-			turnStartsMu.Lock()
+			turnStateMu.Lock()
 			startedAt := turnStarts[turn]
 			delete(turnStarts, turn)
-			turnStartsMu.Unlock()
+			turnStateMu.Unlock()
 			return startedAt
 		}
 		// Passthrough rejects overlapping response.create frames, so one immutable
@@ -3081,9 +3097,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				c.Set(securityAuditWSTurnContextKey, turn)
 				service.BeginOpsStreamTurn(c, turn)
 				setCyberTurnBody(turn, payload)
-				// turn 2+ 每轮刷新用量审计哈希：闭包捕获的 requestPayloadHash
-				// 若只在首包算一次，后续 turn 的 RecordUsage 全部记成第 1 轮
-				// 哈希，按哈希做重复请求检测/审计时会漏。
+				// 按 turn 保存请求哈希；上一轮结算可以与下一轮准入交错执行。
 				// 连接级 cyber session gate 也在 BeforeRequest 先执行，使 native 与
 				// passthrough ingress 都能在 BeforeTurn 及上游写入前无副作用地拒绝。
 				// BeforeTurn 中保留同一检查作为防御式兜底。
@@ -3107,7 +3121,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					}
 				}
 				turnBillingAPIKeys.set(turn, turnKey)
-				requestPayloadHash = service.HashUsageRequestPayload(payload)
+				setTurnPayloadHash(turn, payload)
 				model := strings.TrimSpace(originalModel)
 				if model == "" {
 					model = strings.TrimSpace(gjson.GetBytes(payload, "model").String())
@@ -3234,6 +3248,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
 				turnStart := getTurnStart(turn)
+				// The queued billing closure owns this immutable turn-local value.
+				requestPayloadHash := getTurnPayloadHash(turn)
 				cyberBlockBody := takeCyberTurnBody(turn)
 				// 每次 attempt 都清 cyber mark；failover 链结束前保留 recorded guard，
 				// 避免同一逻辑 turn 换号后重复落风控。CyberBlocked 必须在 submit 前
@@ -3357,7 +3373,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 
 		// WebSocket 首包可能很大，hash 必须在 hooks 外算成字符串，避免 AfterTurn 闭包保活请求体。
-		requestPayloadHash = service.HashUsageRequestPayload(wsFirstMessage)
+		setTurnPayloadHash(1, wsFirstMessage)
 		if preemptCtx, cleanupPreempt, armed := h.gatewayService.BeginOpenAIWSIngressSessionPreemptionWithClient(ctx, c, account, wsFirstMessage, wsConn); armed {
 			ctx = preemptCtx
 			defer cleanupPreempt()
