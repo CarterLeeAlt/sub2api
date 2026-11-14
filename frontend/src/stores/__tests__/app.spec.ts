@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/stores/app'
 import { getPublicSettings } from '@/api/auth'
+import { checkUpdates } from '@/api/admin/system'
 import type { PublicSettings } from '@/types'
 
 function createDeferred<T>() {
@@ -81,6 +82,7 @@ describe('useAppStore', () => {
     vi.useFakeTimers()
     localStorage.clear()
     vi.mocked(getPublicSettings).mockReset()
+    vi.mocked(checkUpdates).mockReset()
     // 清除 window.__APP_CONFIG__
     delete (window as any).__APP_CONFIG__
   })
@@ -88,6 +90,22 @@ describe('useAppStore', () => {
   afterEach(() => {
     vi.useRealTimers()
     localStorage.clear()
+  })
+
+  it('keeps the no-release state in the version cache and clears it explicitly', async () => {
+    vi.mocked(checkUpdates).mockResolvedValue({
+      current_version: '0.2.21', latest_version: '0.2.21', has_update: false,
+      cached: false, build_type: 'release', warning_code: 'no_release', warning: 'No published fork release.',
+    })
+    const store = useAppStore()
+    await store.fetchVersion()
+    const cached = await store.fetchVersion()
+    expect(checkUpdates).toHaveBeenCalledTimes(1)
+    expect(cached?.warning_code).toBe('no_release')
+    expect(store.versionWarning).toBe('No published fork release.')
+    store.clearVersionCache()
+    expect(store.versionWarningCode).toBe('')
+    expect(store.versionWarning).toBe('')
   })
 
   // --- Toast 消息管理 ---

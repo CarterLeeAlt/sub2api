@@ -22,6 +22,8 @@ export default {
     currentVersion: '当前版本',
     latestVersion: '最新版本',
     upToDate: '已是最新版本',
+    noRelease: '此 Fork 尚未发布 Release，暂无可用的发布版本。',
+    viewRepository: '查看 Fork 仓库',
     updateAvailable: '有新版本可用！',
     releaseNotes: '更新日志',
     noReleaseNotes: '暂无更新日志',

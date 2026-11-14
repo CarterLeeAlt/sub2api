@@ -8,13 +8,13 @@
 
 **Please do not report security vulnerabilities through public GitHub issues, pull requests, or discussions.**
 
-Report them privately through GitHub's private vulnerability reporting:
+For this fork, consult the repository homepage for maintainer contact information:
 
-**[Report a vulnerability](https://github.com/Wei-Shaw/sub2api/security/advisories/new)**
+**[CarterLeeAlt/sub2api](https://github.com/CarterLeeAlt/sub2api)**
 
-(Repository → **Security** tab → **Report a vulnerability**.) Only the maintainers can see the report, and the advisory becomes the place to discuss, fix, and eventually publish the issue.
+Agree on a private reporting channel before sharing sensitive details. The repository homepage is a contact entry point, not a private vulnerability submission form.
 
-If you cannot use GitHub private vulnerability reporting, email **dev@sub2api.org** instead, with `[Security]` in the subject line.
+Issues independently reproduced in the upstream project can also be reported under the [upstream security policy](https://github.com/Wei-Shaw/sub2api/blob/main/.github/SECURITY.md).
 
 A useful report includes:
 
@@ -26,14 +26,14 @@ A useful report includes:
 
 ### Supported Versions
 
-Sub2API releases frequently, and fixes ship in a new release rather than being backported.
+This fork publishes its current builds from `main`; release-based installation requires a Release published in this repository.
 
 | Version | Supported |
 | ------- | --------- |
-| Latest release | ✅ |
-| Older releases | ❌ |
+| Current fork `main` | ✅ |
+| Older fork builds | ❌ |
 
-Please confirm that the issue reproduces on the latest release or on `main` before reporting.
+Please confirm that the issue reproduces on this fork's current `main` before reporting.
 
 ### Scope
 
@@ -49,10 +49,10 @@ Usually out of scope:
 ### Disclosure Process
 
 1. We acknowledge the report and assess its validity and severity.
-2. We develop a fix privately in the advisory and may ask you to verify it.
-3. We publish a release containing the fix, then publish the GitHub Security Advisory (with a CVE when applicable), crediting you unless you prefer to stay anonymous.
+2. We coordinate the fix through the agreed private channel and may ask you to verify it.
+3. We publish the fix and coordinate disclosure, crediting you unless you prefer to stay anonymous.
 
-Please keep details private until the advisory is published. This is a volunteer-maintained project, so response times are best effort.
+Please keep details private until disclosure is agreed. This is a volunteer-maintained project, so response times are best effort.
 
 ## 中文
 
@@ -60,13 +60,13 @@ Please keep details private until the advisory is published. This is a volunteer
 
 **请不要通过公开的 Issue、Pull Request 或 Discussion 报告安全漏洞。**
 
-请使用 GitHub 私密漏洞报告功能提交：
+本 Fork 的维护者联系信息以仓库主页为准：
 
-**[提交漏洞报告](https://github.com/Wei-Shaw/sub2api/security/advisories/new)**
+**[CarterLeeAlt/sub2api](https://github.com/CarterLeeAlt/sub2api)**
 
-（仓库 → **Security** 标签页 → **Report a vulnerability**。）报告仅维护者可见，后续的讨论、修复与公告发布都在该安全公告中进行。
+请先与维护者确认私密报告渠道，再提供敏感细节。仓库主页是联系入口，不是私密漏洞提交表单。
 
-如果无法使用 GitHub 私密漏洞报告，也可以发送邮件至 **dev@sub2api.org**，邮件标题请注明 `[Security]`。
+如果问题也能在上游项目独立复现，可以按[上游安全策略](https://github.com/Wei-Shaw/sub2api/blob/main/.github/SECURITY.md)向上游报告。
 
 报告中建议包含：
 
@@ -78,14 +78,14 @@ Please keep details private until the advisory is published. This is a volunteer
 
 ### 支持的版本
 
-Sub2API 发版频繁，安全修复随新版本发布，不向旧版本回移。
+本 Fork 从 `main` 发布当前构建；基于 Release 的安装需要本仓库发布相应 Release。
 
 | 版本 | 是否支持 |
 | ---- | -------- |
-| 最新 Release | ✅ |
-| 更早的版本 | ❌ |
+| Fork 当前 `main` | ✅ |
+| Fork 较早构建 | ❌ |
 
-报告前请先确认问题在最新 Release 或 `main` 上仍可复现。
+报告前请先确认问题在本 Fork 当前 `main` 上仍可复现。
 
 ### 范围
 
@@ -101,7 +101,7 @@ Sub2API 发版频繁，安全修复随新版本发布，不向旧版本回移。
 ### 披露流程
 
 1. 我们确认收到报告，并评估其有效性与严重程度。
-2. 我们在安全公告中私下开发修复，可能请你协助验证。
-3. 我们先发布包含修复的版本，再公开 GitHub 安全公告（适用时申请 CVE），并致谢报告者（如你希望匿名则不署名）。
+2. 我们通过约定的私密渠道协调修复，可能请你协助验证。
+3. 我们发布修复并协商披露安排，致谢报告者（如你希望匿名则不署名）。
 
-在公告发布前请勿公开漏洞细节。本项目由志愿者维护，响应时间尽力而为。
+请在约定披露前保持细节私密。本项目由志愿者维护，响应时间尽力而为。

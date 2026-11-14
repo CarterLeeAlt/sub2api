@@ -22,6 +22,8 @@ export default {
     currentVersion: 'Current Version',
     latestVersion: 'Latest Version',
     upToDate: "You're running the latest version.",
+    noRelease: 'This fork has no published releases yet.',
+    viewRepository: 'View fork repository',
     updateAvailable: 'A new version is available!',
     releaseNotes: 'Release Notes',
     noReleaseNotes: 'No release notes',

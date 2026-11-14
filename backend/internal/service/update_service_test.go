@@ -31,13 +31,18 @@ type updateServiceGitHubClientStub struct {
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
+	latestErr      error
+	latestRepo     string
+	recentRepo     string
 }
 
-func (s *updateServiceGitHubClientStub) FetchLatestRelease(context.Context, string) (*GitHubRelease, error) {
-	return s.release, nil
+func (s *updateServiceGitHubClientStub) FetchLatestRelease(_ context.Context, repo string) (*GitHubRelease, error) {
+	s.latestRepo = repo
+	return s.release, s.latestErr
 }
 
-func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchRecentReleases(_ context.Context, repo string, _ int) ([]*GitHubRelease, error) {
+	s.recentRepo = repo
 	return s.recentReleases, s.recentErr
 }
 
@@ -47,6 +52,28 @@ func (s *updateServiceGitHubClientStub) DownloadFile(context.Context, string, st
 
 func (s *updateServiceGitHubClientStub) FetchChecksumFile(context.Context, string) ([]byte, error) {
 	panic("FetchChecksumFile should not be called when no update is available")
+}
+
+func TestUpdateServiceForkWithoutReleaseIsExplicitAndCached(t *testing.T) {
+	client := &updateServiceGitHubClientStub{latestErr: ErrNoPublishedRelease}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.2.21", "release")
+	info, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, "CarterLeeAlt/sub2api", client.latestRepo)
+	require.Equal(t, "no_release", info.WarningCode)
+	require.Contains(t, info.Warning, "CarterLeeAlt/sub2api")
+	require.False(t, info.HasUpdate)
+	require.Nil(t, info.ReleaseInfo)
+	cached, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.True(t, cached.Cached)
+	require.Equal(t, info.WarningCode, cached.WarningCode)
+	require.Equal(t, info.Warning, cached.Warning)
+	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrNoPublishedRelease)
+	versions, err := svc.ListRollbackVersions(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, versions)
+	require.Equal(t, "CarterLeeAlt/sub2api", client.recentRepo)
 }
 
 func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {

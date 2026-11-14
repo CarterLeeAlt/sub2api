@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
@@ -424,6 +425,7 @@ func (s *GitHubReleaseServiceSuite) TestFetchLatestRelease_Non200() {
 
 	_, err := s.client.FetchLatestRelease(context.Background(), "test/repo")
 	require.Error(s.T(), err)
+	require.ErrorIs(s.T(), err, service.ErrNoPublishedRelease)
 	require.Contains(s.T(), err.Error(), "404")
 }
 

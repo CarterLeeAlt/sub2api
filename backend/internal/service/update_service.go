@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -25,12 +26,12 @@ import (
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
+	ErrNoPublishedRelease        = infraerrors.NotFound("NO_PUBLISHED_RELEASE", "no published release is available for "+GitHubRepository)
 )
 
 const (
-	updateCacheKey = "update_check_cache"
-	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	updateCacheTTL   = 1200 // 20 minutes
+	GitHubRepository = "CarterLeeAlt/sub2api"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -85,6 +86,7 @@ type UpdateInfo struct {
 	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
 	Cached         bool         `json:"cached"`
 	Warning        string       `json:"warning,omitempty"`
+	WarningCode    string       `json:"warning_code,omitempty"`
 	BuildType      string       `json:"build_type"` // "source" or "release"
 }
 
@@ -168,6 +170,9 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 		return err
 	}
 
+	if info.WarningCode == "no_release" {
+		return ErrNoPublishedRelease
+	}
 	if !info.HasUpdate {
 		return ErrNoUpdateAvailable
 	}
@@ -363,7 +368,7 @@ func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) e
 // fetchRollbackCandidates fetches recent releases and keeps the newest
 // maxRollbackVersions entries strictly older than the current version.
 func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubRelease, error) {
-	releases, err := s.githubClient.FetchRecentReleases(ctx, githubRepo, rollbackFetchPageSize)
+	releases, err := s.githubClient.FetchRecentReleases(ctx, GitHubRepository, rollbackFetchPageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +405,14 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 }
 
 func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {
-	release, err := s.githubClient.FetchLatestRelease(ctx, githubRepo)
+	release, err := s.githubClient.FetchLatestRelease(ctx, GitHubRepository)
+	if errors.Is(err, ErrNoPublishedRelease) {
+		return &UpdateInfo{
+			CurrentVersion: s.currentVersion, LatestVersion: s.currentVersion,
+			WarningCode: "no_release", Warning: "No release has been published for " + GitHubRepository + ".",
+			BuildType: s.buildType,
+		}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -603,6 +615,8 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
+		Warning     string       `json:"warning,omitempty"`
+		WarningCode string       `json:"warning_code,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
 		return nil, err
@@ -615,10 +629,12 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	return &UpdateInfo{
 		CurrentVersion: s.currentVersion,
 		LatestVersion:  cached.Latest,
-		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
+		HasUpdate:      cached.WarningCode != "no_release" && compareVersions(s.currentVersion, cached.Latest) < 0,
 		ReleaseInfo:    cached.ReleaseInfo,
 		Cached:         true,
 		BuildType:      s.buildType,
+		Warning:        cached.Warning,
+		WarningCode:    cached.WarningCode,
 	}, nil
 }
 
@@ -627,10 +643,14 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
+		Warning     string       `json:"warning,omitempty"`
+		WarningCode string       `json:"warning_code,omitempty"`
 	}{
 		Latest:      info.LatestVersion,
 		ReleaseInfo: info.ReleaseInfo,
 		Timestamp:   time.Now().Unix(),
+		Warning:     info.Warning,
+		WarningCode: info.WarningCode,
 	}
 
 	data, _ := json.Marshal(cacheData)

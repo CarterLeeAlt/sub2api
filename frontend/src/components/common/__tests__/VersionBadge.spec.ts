@@ -8,6 +8,8 @@ const appStore = {
   currentVersion: '0.1.175',
   latestVersion: '0.1.175',
   hasUpdate: false,
+  versionWarning: '',
+  versionWarningCode: '',
   releaseInfo: null,
   fetchVersion: vi.fn()
 }
@@ -34,6 +36,8 @@ const mountBadge = () => mount(VersionBadge, {
 describe('VersionBadge', () => {
   beforeEach(() => {
     authStore.isAdmin = true
+    appStore.versionWarning = ''
+    appStore.versionWarningCode = ''
     appStore.fetchVersion.mockClear()
   })
 
@@ -51,6 +55,18 @@ describe('VersionBadge', () => {
 
     expect(wrapper.text()).toContain('v0.1.175')
     expect(wrapper.text()).toContain('sha-075c6ea')
+  })
+
+  it('shows an unpublished fork without claiming it is up to date', async () => {
+    appStore.versionWarning = 'No release has been published for CarterLeeAlt/sub2api.'
+    appStore.versionWarningCode = 'no_release'
+    const wrapper = mountBadge()
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.text()).toContain('version.noRelease')
+    expect(wrapper.text()).not.toContain('version.upToDate')
+    expect(wrapper.get('a').attributes('href')).toBe('https://github.com/CarterLeeAlt/sub2api')
+    expect(wrapper.text()).not.toContain('version.viewChangelog')
+    wrapper.unmount()
   })
 
   it('also hides the build identity for non-admin users', () => {
