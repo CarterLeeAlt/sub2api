@@ -31,7 +31,7 @@ type openAIQuotaService interface {
 	CacheResetCreditsSnapshot(ctx context.Context, accountID int64, credits *service.OpenAIRateLimitResetCredits) error
 	CacheCreditsSnapshot(ctx context.Context, accountID int64, usage *service.OpenAIQuotaUsage) error
 	CachePostResetSnapshot(ctx context.Context, accountID int64, usage *service.OpenAIQuotaUsage) error
-	ResetCredit(ctx context.Context, accountID int64) (*service.OpenAIQuotaResetResult, error)
+	ResetCredit(ctx context.Context, accountID int64, key string) (*service.OpenAIQuotaResetResult, error)
 }
 
 type openAIAccountStateRecoverer interface {
@@ -617,7 +617,7 @@ func (h *OpenAIOAuthHandler) ResetQuota(c *gin.Context) {
 	if adminaccess.RestrictedFromContext(c.Request.Context()) != nil {
 		c.Request = c.Request.WithContext(service.WithScopedAdminAccountOperation(c.Request.Context(), "openai.quota.reset"))
 	}
-	result, err := h.quotaService.ResetCredit(c.Request.Context(), accountID)
+	result, err := h.quotaService.ResetCredit(c.Request.Context(), accountID, c.GetHeader("Idempotency-Key"))
 	if err != nil {
 		scopedOpenAIError(c, err)
 		return
@@ -628,6 +628,11 @@ func (h *OpenAIOAuthHandler) ResetQuota(c *gin.Context) {
 	}
 
 	resetResponse := openAIQuotaResetResponse{OpenAIQuotaResetResult: *result}
+	if result.Replayed {
+		// Replaying an old confirmation must not clear newer account limits.
+		response.Success(c, resetResponse)
+		return
+	}
 	postCtx, cancelPost := openAIQuotaResetPostProcessContext(c.Request.Context())
 	defer cancelPost()
 

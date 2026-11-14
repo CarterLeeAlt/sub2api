@@ -832,6 +832,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	// Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		return nil, err
 	}

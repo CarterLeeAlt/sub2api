@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -29,6 +30,20 @@ type rateLimitAccountRepoStub struct {
 	lastRateLimitedID      int64
 	lastRateLimitedAt      time.Time
 	tempErr                error
+}
+
+func (r *rateLimitAccountRepoStub) UpdateOAuthCredentialsIfUnchanged(context.Context, *Account, map[string]any) (bool, error) {
+	return false, errors.New("unexpected credential rotation")
+}
+
+func (r *rateLimitAccountRepoStub) SaveOAuthAuthenticationState(ctx context.Context, expected *Account, state OpenAIUpstreamHealth, until time.Time) (bool, error) {
+	if current := r.accountsByID[expected.ID]; current != nil && !reflect.DeepEqual(OAuthCredentialIdentity(current.Credentials), OAuthCredentialIdentity(expected.Credentials)) {
+		return false, nil
+	}
+	if state.Kind == "auth_invalid" {
+		return true, r.SetError(ctx, expected.ID, state.Message)
+	}
+	return true, r.SetTempUnschedulable(ctx, expected.ID, until, "OAuth 401: "+state.Message)
 }
 
 func (r *rateLimitAccountRepoStub) SetError(ctx context.Context, id int64, errorMsg string) error {
@@ -176,7 +191,7 @@ func TestRateLimitService_HandleUpstreamError_SparkShadow401RedirectsToParent(t 
 		ID:          parentID,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
-		Credentials: map[string]any{"refresh_token": "rt-mother"},
+		Credentials: map[string]any{"access_token": "mother-token", "refresh_token": "rt-mother"},
 	}
 	repo.accountsByID[parentID] = mother
 
@@ -190,7 +205,8 @@ func TestRateLimitService_HandleUpstreamError_SparkShadow401RedirectsToParent(t 
 		// 影子不持凭据:GetCredential("refresh_token") == ""
 	}
 
-	shouldDisable := service.HandleUpstreamError(context.Background(), shadow, 401, http.Header{}, []byte("unauthorized"))
+	ctx := withOAuthRequestIdentity(context.Background(), repo, shadow, "mother-token")
+	shouldDisable := service.HandleUpstreamError(ctx, shadow, 401, http.Header{}, []byte("unauthorized"))
 
 	require.True(t, shouldDisable)
 	require.Equal(t, 0, repo.setErrorCalls, "spark shadow must not be permanently disabled on a parent-token 401")
@@ -320,7 +336,7 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 		require.Equal(t, 1, repo.setErrorCalls, "AT-only OAuth 401 must SetError")
 		require.Equal(t, 0, repo.tempCalls, "AT-only OAuth 401 must NOT temp-unschedule")
 		require.Equal(t, 0, repo.updateCredentialsCalls, "no point forcing expires_at when refresh is impossible")
-		require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
+		require.Contains(t, repo.lastErrorMsg, "Unauthorized")
 		require.Len(t, invalidator.accounts, 1, "cache should still be invalidated")
 	})
 

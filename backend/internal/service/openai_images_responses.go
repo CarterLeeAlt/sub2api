@@ -1905,6 +1905,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	defer releaseUpstreamCtx()
 
 	token, _, err := s.GetAccessToken(upstreamCtx, account)
+	upstreamCtx = withOAuthRequestIdentity(upstreamCtx, s.accountRepo, account, token)
 	if err != nil {
 		return nil, err
 	}

@@ -333,6 +333,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		return nil, fmt.Errorf("get access token: %w", err)
 	}

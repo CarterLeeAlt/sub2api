@@ -258,7 +258,7 @@ func TestResetCreditShadowRejected(t *testing.T) {
 	// 配置检查处报错，但我们在此之前就应该拦截并返回 ErrSparkShadowResetNotSupported。
 	svc := &OpenAIQuotaService{accountRepo: repo}
 
-	_, err := svc.ResetCredit(context.Background(), 200)
+	_, err := svc.resetCredit(context.Background(), 200, "test-redemption", "")
 	require.ErrorIs(t, err, ErrSparkShadowResetNotSupported,
 		"shadow ResetCredit should return ErrSparkShadowResetNotSupported, got: %v", err)
 	// 外审 F6:必须是结构化 409(而非裸 error→500)。
@@ -313,7 +313,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	svc.agentIdentityWS = invalidator
 
-	result, err := svc.ResetCredit(context.Background(), account.ID)
+	result, err := svc.resetCredit(context.Background(), account.ID, "test-redemption", "")
 	require.NoError(t, err)
 	require.Equal(t, "ok", result.Code)
 	require.Equal(t, 2, result.WindowsReset)
@@ -373,7 +373,7 @@ func TestResetCreditAgentIdentityReusesConcurrentlyRecoveredTask(t *testing.T) {
 	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
 
 	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
-	result, err := svc.ResetCredit(context.Background(), account.ID)
+	result, err := svc.resetCredit(context.Background(), account.ID, "test-redemption", "")
 	require.NoError(t, err)
 	require.Equal(t, "ok", result.Code)
 	require.Equal(t, 2, resetCalls)
@@ -776,13 +776,13 @@ func TestResetCreditPATDisabledFailsClosed(t *testing.T) {
 	defer srv.Close()
 
 	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
-	_, err := svc.ResetCredit(ctx, 301)
+	_, err := svc.resetCredit(ctx, 301, "test-redemption", "")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrOpenAIPATResetCreditsDisabled))
 	require.Equal(t, 0, consumeCalls)
 
 	svc.SetCodexPATResetCreditsEnabled(func(context.Context) bool { return true })
-	_, err = svc.ResetCredit(ctx, 301)
+	_, err = svc.resetCredit(ctx, 301, "test-redemption", "")
 	require.Error(t, err)
 	require.False(t, errors.Is(err, ErrOpenAIPATResetCreditsDisabled))
 	require.Equal(t, 1, consumeCalls)
@@ -898,7 +898,7 @@ func TestResetCreditGetByIDError_FailsClosed(t *testing.T) {
 	// 若代码泄漏到 prepareUpstreamCall，会因配置检查而报 "not configured" 而非 "account not found"。
 	svc := &OpenAIQuotaService{accountRepo: repo}
 
-	_, err := svc.ResetCredit(context.Background(), 200)
+	_, err := svc.resetCredit(context.Background(), 200, "test-redemption", "")
 	require.Error(t, err, "GetByID error must propagate; got nil")
 	require.NotContains(t, err.Error(), "not configured",
 		"error reached prepareUpstreamCall config-check — guard did not fail-closed; got: %v", err)

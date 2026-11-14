@@ -986,8 +986,11 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		if isNonRetryableRefreshError(err) {
 			errorMsg := "Token refresh failed (non-retryable): " + logredact.RedactText(err.Error())
 			isGrokOAuth := account.IsGrokOAuth()
-			openAIHealthRepo, conditionalOpenAI := s.accountRepo.(OpenAIUpstreamHealthRepository)
-			conditionalOpenAI = conditionalOpenAI && account.IsOpenAIOAuth() && !account.IsOpenAIAgentIdentity()
+			oauthStateRepo, hasOAuthStateRepo := s.accountRepo.(OAuthCredentialRepository)
+			conditionalOpenAI := usesConditionalOAuthState(account)
+			if conditionalOpenAI && !hasOAuthStateRepo {
+				return &providerConfigurationRefreshError{err: errors.New("OAuth conditional state repository is not configured")}
+			}
 			if !isGrokOAuth && !conditionalOpenAI {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
 			}
@@ -1014,7 +1017,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 					}
 				}
 			} else if conditionalOpenAI {
-				persistentlyBlocked, setErr = openAIHealthRepo.SaveOpenAIUpstreamHealth(ctx, account, OpenAIUpstreamHealth{Kind: "auth_invalid", Source: "token_refresh", Message: errorMsg, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+				persistentlyBlocked, setErr = oauthStateRepo.SaveOAuthAuthenticationState(ctx, account, OpenAIUpstreamHealth{Kind: "auth_invalid", Source: "token_refresh", Message: errorMsg, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}, time.Time{})
 				if setErr == nil && !persistentlyBlocked {
 					return errRefreshSkipped
 				}
@@ -1032,7 +1035,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 						err: fmt.Errorf("failed to conditionally persist Grok OAuth refresh failure: %w", setErr),
 					}
 				}
-			} else if (isGrokOAuth || conditionalOpenAI) && persistentlyBlocked {
+			} else if isGrokOAuth && persistentlyBlocked {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
 			}
 			cacheInvalidationFailed := false

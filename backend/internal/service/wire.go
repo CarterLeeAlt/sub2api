@@ -198,8 +198,11 @@ func ProvideOpenAIQuotaService(
 	referralClient OpenAIReferralClient,
 	openAIGatewayService *OpenAIGatewayService,
 	settingService *SettingService,
+	idem *IdempotencyCoordinator,
+	locks LeaderLockCache,
 ) *OpenAIQuotaService {
 	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory, referralClient)
+	service.ConfigureRedemption(idem, locks)
 	service.agentIdentityWS = openAIGatewayService
 	if settingService != nil {
 		service.SetCodexPATResetCreditsEnabled(settingService.IsOpenAICodexPATResetCreditsEnabled)
@@ -1122,8 +1125,9 @@ func ProvideChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.
 
 // ProvideClaudeResetCreditService wires the Claude reset query and, with the
 // idempotency store and Redis leases, manual redemption.
-func ProvideClaudeResetCreditService(accounts AccountRepository, tokens *ClaudeTokenProvider, proxies ProxyRepository, settings *SettingService, idem *IdempotencyCoordinator, locks LeaderLockCache) *ClaudeResetCreditService {
+func ProvideClaudeResetCreditService(accounts AccountRepository, tokens *ClaudeTokenProvider, proxies ProxyRepository, settings *SettingService, idem *IdempotencyCoordinator, locks LeaderLockCache, rateLimitService *RateLimitService) *ClaudeResetCreditService {
 	s := NewClaudeResetCreditService(accounts, tokens, proxies, settings)
 	s.ConfigureRedemption(idem, locks)
+	s.rateLimitService = rateLimitService
 	return s
 }

@@ -249,6 +249,7 @@ function openRedeemConfirm() {
 }
 
 function outcomeFeedback(result: ClaudeResetOutcome): { kind: 'success' | 'warning' | 'error'; text: string } {
+  if (result.recovery_warning) return { kind: 'warning', text: t('admin.accounts.openaiQuotaReset.resetAccountRecoveryFailed') }
   const key = 'admin.accounts.claudeResetCredits.outcome'
   switch (result.outcome) {
     case 'reset':

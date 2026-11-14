@@ -799,6 +799,9 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 // HandleUpstreamError 处理上游错误响应，标记账号状态
 // 返回是否应该停止该账号的调度
 func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) (shouldDisable bool) {
+	if handled, applied := s.handleOAuthAuthenticationFailure(ctx, account, statusCode, responseBody); handled {
+		return applied
+	}
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	// Team 联动熔断必须先于池模式/自定义错误码/临时不可调度的各类早退；
 	// 同请求内与 fastpath 调用点的重复触发由方法内去重吸收。
@@ -1441,6 +1444,10 @@ func (s *RateLimitService) GeminiCooldown(ctx context.Context, account *Account)
 
 // handleAuthError 处理认证类错误(401/403)，停止账号调度
 func (s *RateLimitService) handleAuthError(ctx context.Context, account *Account, errorMsg string) {
+	if usesConditionalOAuthState(account) {
+		s.saveOAuthAuthenticationFailure(ctx, oauthRequestIdentity(ctx, account), OpenAIUpstreamHealth{Kind: "auth_invalid", Source: "gateway", Message: errorMsg, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+		return
+	}
 	s.notifyAccountSchedulingBlocked(account, time.Time{}, "auth_error")
 	if err := s.accountRepo.SetError(ctx, account.ID, errorMsg); err != nil {
 		slog.Warn("account_set_error_failed", "account_id", account.ID, "error", err)

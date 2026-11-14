@@ -34,7 +34,7 @@ type openAIQuotaWorkflowStub struct {
 	cacheCtxErr error
 }
 
-func (s *openAIQuotaWorkflowStub) ResetCredit(context.Context, int64) (*service.OpenAIQuotaResetResult, error) {
+func (s *openAIQuotaWorkflowStub) ResetCredit(context.Context, int64, string) (*service.OpenAIQuotaResetResult, error) {
 	s.resetCalls++
 	return s.resetResult, s.resetErr
 }

@@ -144,6 +144,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 
 	// 获取凭证
 	token, tokenType, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to get access token")
 		return err
@@ -273,6 +274,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 // 仅用于上游错误处理按模型隔离。
 func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx context.Context, c *gin.Context, account *Account, body []byte, upstreamModel string) error {
 	token, tokenType, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to get access token")
 		return err

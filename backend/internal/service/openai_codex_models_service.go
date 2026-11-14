@@ -1710,6 +1710,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_CREDENTIALS_FAILED", "resolve credential account: %v", err)
 	}
+	credAccount = snapshotOAuthRefreshAccount(credAccount)
 
 	clientVersion = strings.TrimSpace(clientVersion)
 	if clientVersion == "" {
@@ -1866,6 +1867,7 @@ func (s *OpenAIGatewayService) handleCodexModelsManifestAccountAuthError(ctx con
 	if headers == nil {
 		headers = http.Header{}
 	}
+	ctx = context.WithValue(ctx, oauthRequestIdentityKey{}, credAccount)
 	s.handleOpenAIAccountUpstreamError(ctx, account, upstreamErr.statusCode, headers, upstreamErr.body)
 }
 

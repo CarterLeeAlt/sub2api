@@ -80,7 +80,6 @@ type OpenAITokenProvider struct {
 	accountRepo        AccountRepository
 	tokenCache         OpenAITokenCache
 	openAIOAuthService *OpenAIOAuthService
-	runtimeBlocker     AccountRuntimeBlocker
 	metrics            *openAITokenRuntimeMetricsStore
 	refreshAPI         *OAuthRefreshAPI
 	executor           OAuthRefreshExecutor
@@ -110,10 +109,6 @@ func (p *OpenAITokenProvider) SetRefreshAPI(api *OAuthRefreshAPI, executor OAuth
 // SetRefreshPolicy injects caller-side refresh policy.
 func (p *OpenAITokenProvider) SetRefreshPolicy(policy ProviderRefreshPolicy) {
 	p.refreshPolicy = policy
-}
-
-func (p *OpenAITokenProvider) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocker) {
-	p.runtimeBlocker = blocker
 }
 
 func (p *OpenAITokenProvider) SnapshotRuntimeMetrics() OpenAITokenRuntimeMetrics {
@@ -276,20 +271,30 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 // 这是一种永久性故障：仅靠后续请求或 TokenRefreshService 不会自愈
 // （NeedsRefresh 也会因 refresh_token 为空直接跳过），
 // 必须主动剔除以避免账号被持续选中导致用户端反复 502。
-// 使用 background context 是因为请求 context 可能很快结束。
+// 仅在凭据身份仍匹配时持久停调；请求结束不应丢失已观察到的认证故障。
 func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(account *Account, reason string) {
 	if p == nil || p.accountRepo == nil || account == nil {
 		return
 	}
-	if p.runtimeBlocker != nil {
-		p.runtimeBlocker.BlockAccountScheduling(account, time.Time{}, "missing_refresh_token")
+	store, ok := p.accountRepo.(OAuthCredentialRepository)
+	if !ok {
+		slog.Warn("openai_token_provider.conditional_state_repository_missing", "account_id", account.ID)
+		return
 	}
-	bgCtx := context.Background()
-	if err := p.accountRepo.SetError(bgCtx, account.ID, reason); err != nil {
+	bgCtx, cancel := openAIAccountStateContext(context.Background())
+	defer cancel()
+	applied, err := store.SaveOAuthAuthenticationState(bgCtx, account, OpenAIUpstreamHealth{
+		Kind: "auth_invalid", Source: "token_provider", Message: reason,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}, time.Time{})
+	if err != nil {
 		slog.Warn("openai_token_provider.set_error_failed",
 			"account_id", account.ID,
 			"error", err,
 		)
+		return
+	}
+	if !applied {
 		return
 	}
 	if p.tokenCache != nil {

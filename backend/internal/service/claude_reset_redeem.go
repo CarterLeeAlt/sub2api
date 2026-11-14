@@ -57,12 +57,13 @@ var (
 // ClaudeResetOutcome is the sanitized redemption result. It never carries grant,
 // organization, or upstream request IDs.
 type ClaudeResetOutcome struct {
-	Outcome       string              `json:"outcome"`
-	Reason        string              `json:"reason,omitempty"`
-	Cleared       []string            `json:"cleared,omitempty"`
-	CooldownUntil *time.Time          `json:"cooldown_until,omitempty"`
-	Credits       *ClaudeResetCredits `json:"credits,omitempty"`
-	Replayed      bool                `json:"replayed"`
+	Outcome         string              `json:"outcome"`
+	Reason          string              `json:"reason,omitempty"`
+	Cleared         []string            `json:"cleared,omitempty"`
+	CooldownUntil   *time.Time          `json:"cooldown_until,omitempty"`
+	Credits         *ClaudeResetCredits `json:"credits,omitempty"`
+	Replayed        bool                `json:"replayed"`
+	RecoveryWarning string              `json:"recovery_warning,omitempty"`
 }
 
 // claudeResetFence is stored in the idempotency table, one row per provider
@@ -142,7 +143,7 @@ func (s *ClaudeResetCreditService) redeemOnce(ctx context.Context, id int64, ope
 		return nil, err
 	}
 	defer release()
-	_, token, proxy, err := s.account(ctx, id)
+	account, token, proxy, err := s.account(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +206,15 @@ func (s *ClaudeResetCreditService) redeemOnce(ctx context.Context, id int64, ope
 		return nil, err
 	}
 	outcome := s.claim(ctx, token, proxy, org, grant.ID, operation)
+	if outcome.Outcome == ClaudeResetOutcomeReset {
+		account = snapshotOAuthRefreshAccount(account)
+		account.Credentials["access_token"] = token
+		recoverCtx, cancel := claudeResetRecoveryContext(ctx)
+		if err := s.recoverReset(recoverCtx, account, outcome); err != nil {
+			outcome.RecoveryWarning = "account_state_recovery_failed"
+		}
+		cancel()
+	}
 	marker.Outcome, marker.Reason = outcome.Outcome, outcome.Reason
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	persistErr := s.persistFence(persistCtx, fence.ID, marker)

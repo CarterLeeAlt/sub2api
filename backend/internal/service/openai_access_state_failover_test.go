@@ -24,6 +24,14 @@ func (r *openAIStream403AccountRepo) SetError(context.Context, int64, string) er
 	return nil
 }
 
+func (*openAIStream403AccountRepo) UpdateOAuthCredentialsIfUnchanged(context.Context, *Account, map[string]any) (bool, error) {
+	return false, nil
+}
+
+func (r *openAIStream403AccountRepo) SaveOAuthAuthenticationState(ctx context.Context, account *Account, state OpenAIUpstreamHealth, _ time.Time) (bool, error) {
+	return true, r.SetError(ctx, account.ID, state.Message)
+}
+
 type openAIAuthPolicyAccountRepo struct {
 	AccountRepository
 	tempCalls     int
@@ -38,6 +46,17 @@ func (r *openAIAuthPolicyAccountRepo) SetTempUnschedulable(context.Context, int6
 func (r *openAIAuthPolicyAccountRepo) SetError(context.Context, int64, string) error {
 	r.setErrorCalls++
 	return nil
+}
+
+func (*openAIAuthPolicyAccountRepo) UpdateOAuthCredentialsIfUnchanged(context.Context, *Account, map[string]any) (bool, error) {
+	return false, nil
+}
+
+func (r *openAIAuthPolicyAccountRepo) SaveOAuthAuthenticationState(ctx context.Context, account *Account, state OpenAIUpstreamHealth, until time.Time) (bool, error) {
+	if state.Kind == "auth_invalid" {
+		return true, r.SetError(ctx, account.ID, state.Message)
+	}
+	return true, r.SetTempUnschedulable(ctx, account.ID, until, state.Message)
 }
 
 type openAIAuthPolicy403Counter struct {
@@ -151,7 +170,7 @@ func TestOpenAIHTTPAccessStateTrustsStructuredCode(t *testing.T) {
 	require.True(t, svc.shouldFailoverOpenAIUpstreamResponse(newOpenAIUpstreamErrorTestAccount(), http.StatusBadRequest, "", body))
 	require.True(t, svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusBadRequest, nil, body))
 	require.Equal(t, 1, repo.setErrorCalls)
-	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account), "conditional persistence publishes the scheduling state")
 }
 
 func TestOpenAIHTTPAuthMessagesUseExistingStatusPolicies(t *testing.T) {

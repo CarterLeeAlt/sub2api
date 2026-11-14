@@ -60,6 +60,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	input anthropicPassthroughForwardInput,
 ) (*ForwardResult, error) {
 	token, tokenType, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		return nil, err
 	}

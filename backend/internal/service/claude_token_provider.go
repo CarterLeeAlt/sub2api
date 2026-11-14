@@ -64,9 +64,10 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	}
 
 	cacheKey := ClaudeTokenCacheKey(account)
+	forceRefresh := claudeOAuthRefreshRequired(account)
 
 	// 1) Try cache first.
-	if p.tokenCache != nil {
+	if p.tokenCache != nil && !forceRefresh {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("claude_token_cache_hit", "account_id", account.ID)
 			return token, nil
@@ -79,18 +80,21 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 	// 2) Refresh if needed (pre-expiry skew).
 	expiresAt := account.GetCredentialAsTime("expires_at")
-	needsRefresh := expiresAt == nil || time.Until(*expiresAt) <= claudeTokenRefreshSkew
+	needsRefresh := forceRefresh || expiresAt == nil || time.Until(*expiresAt) <= claudeTokenRefreshSkew
 	refreshFailed := false
 
 	if needsRefresh && p.refreshAPI != nil && p.executor != nil {
 		result, err := p.refreshAPI.RefreshIfNeeded(ctx, account, p.executor, claudeTokenRefreshSkew)
 		if err != nil {
-			if p.refreshPolicy.OnRefreshError == ProviderRefreshErrorReturn {
+			if forceRefresh || p.refreshPolicy.OnRefreshError == ProviderRefreshErrorReturn {
 				return "", err
 			}
 			slog.Warn("claude_token_refresh_failed", "account_id", account.ID, "error", err)
 			refreshFailed = true
 		} else if result.LockHeld {
+			if forceRefresh {
+				return "", errors.New("Claude authentication refresh is in progress")
+			}
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
 				time.Sleep(claudeLockWaitTime)
 				if token, cacheErr := p.tokenCache.GetAccessToken(ctx, cacheKey); cacheErr == nil && strings.TrimSpace(token) != "" {

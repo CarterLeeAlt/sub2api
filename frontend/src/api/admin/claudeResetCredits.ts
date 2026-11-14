@@ -35,6 +35,7 @@ export interface ClaudeResetOutcome {
   cooldown_until?: string
   credits?: ClaudeResetCredits
   replayed: boolean
+  recovery_warning?: string
 }
 
 // Consumes one reset credit (irreversible). The server picks the grant; the key

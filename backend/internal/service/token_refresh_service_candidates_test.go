@@ -83,6 +83,17 @@ func (r *tokenRefreshCandidateRepo) SetError(context.Context, int64, string) err
 	return nil
 }
 
+func (r *tokenRefreshCandidateRepo) UpdateOAuthCredentialsIfUnchanged(ctx context.Context, expected *Account, credentials map[string]any) (bool, error) {
+	return true, r.UpdateCredentials(ctx, expected.ID, credentials)
+}
+
+func (r *tokenRefreshCandidateRepo) SaveOAuthAuthenticationState(ctx context.Context, expected *Account, state OpenAIUpstreamHealth, until time.Time) (bool, error) {
+	if state.Kind == "auth_invalid" {
+		return true, r.SetError(ctx, expected.ID, state.Message)
+	}
+	return true, r.SetTempUnschedulable(ctx, expected.ID, until, state.Message)
+}
+
 func (r *tokenRefreshCandidateRepo) SetTempUnschedulable(_ context.Context, _ int64, _ time.Time, reason string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

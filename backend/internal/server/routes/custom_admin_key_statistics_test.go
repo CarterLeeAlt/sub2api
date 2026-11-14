@@ -116,7 +116,9 @@ func TestScopedAdminRegisteredStatisticsAndOpenAIRoutes(t *testing.T) {
 		{"accounts.usage.read", "POST", "/accounts/usage/batch", `{"account_ids":[1,1]}`, 200},
 		{"openai.quota.read", "GET", "/openai/accounts/1/quota", "", 200},
 		{"openai.quota.read", "POST", "/openai/accounts/1/quota/refresh", "", 200},
-		{"openai.quota.reset", "POST", "/openai/accounts/1/reset-quota", "", 200},
+		// This route fixture has no redemption coordinator: an authorized request
+		// must reach the mandatory idempotency-store gate without consuming a credit.
+		{"openai.quota.reset", "POST", "/openai/accounts/1/reset-quota", "", 503},
 		{"openai.referrals.read", "POST", "/openai/accounts/1/referrals/refresh", "", 200},
 		{"openai.referrals.invite", "POST", "/openai/accounts/1/referrals/invite", `{"email":"friend@example.com","program_id":"codex_referral_consumer","confirmed":true}`, 200},
 		{"groups.list.read", "GET", "/groups", "", 200},
@@ -177,6 +179,7 @@ func TestScopedAdminRegisteredStatisticsAndOpenAIRoutes(t *testing.T) {
 				request := httptest.NewRequest(tc.method, "/api/v1/admin"+tc.path, strings.NewReader(tc.body))
 				request.Header.Set("x-api-key", key)
 				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Idempotency-Key", "scoped-route-reset")
 				recorder := httptest.NewRecorder()
 				router.ServeHTTP(recorder, request)
 				want := 403

@@ -106,6 +106,23 @@ func (r *tokenRefreshAccountRepo) SetError(ctx context.Context, id int64, errorM
 	return r.setErrorErr
 }
 
+func (r *tokenRefreshAccountRepo) UpdateOAuthCredentialsIfUnchanged(ctx context.Context, expected *Account, credentials map[string]any) (bool, error) {
+	if current := r.accountsByID[expected.ID]; current != nil && !reflect.DeepEqual(OAuthCredentialIdentity(current.Credentials), OAuthCredentialIdentity(expected.Credentials)) {
+		return false, nil
+	}
+	return true, r.UpdateCredentials(ctx, expected.ID, credentials)
+}
+
+func (r *tokenRefreshAccountRepo) SaveOAuthAuthenticationState(ctx context.Context, expected *Account, state OpenAIUpstreamHealth, until time.Time) (bool, error) {
+	if current := r.accountsByID[expected.ID]; current != nil && !reflect.DeepEqual(OAuthCredentialIdentity(current.Credentials), OAuthCredentialIdentity(expected.Credentials)) {
+		return false, nil
+	}
+	if state.Kind == "auth_invalid" {
+		return true, r.SetError(ctx, expected.ID, state.Message)
+	}
+	return true, r.SetTempUnschedulable(ctx, expected.ID, until, state.Message)
+}
+
 func (r *tokenRefreshAccountRepo) ClearTempUnschedulable(ctx context.Context, id int64) error {
 	r.clearTempCalls++
 	return nil

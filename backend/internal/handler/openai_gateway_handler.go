@@ -2209,34 +2209,12 @@ type openAIWSTurnAPIKeyLookup interface {
 
 // openAIWSTurnBillingAPIKeys 按 turn 号保存每个 turn 计费用的 API Key 快照。
 //
-// API Key 认证快照只在建连时取一次。若连接内所有 turn 共用它，分组定价（倍率、
-// 高峰、图片定价、利润门参数）会停留在建连时刻：管理员调价后，已打开的长连接
-// 在客户端重连前一直按旧价计费、按旧售价过利润门，而 HTTP 请求每次都经认证缓存
-// 取快照，缓存失效后即生效。
-//
-// 因此后续 turn 在 BeforeTurn（与 HTTP 请求进入认证中间件同位）经同一认证缓存
-// 重取快照，只采用其中的分组，作为该 turn 利润门准入与用量计费共同的分组；用户、
-// Key 限额、订阅仍沿用建连快照。只在同一把 Key、同一分组且平台与订阅类型未变时
-// 采用：Key 换组或分组改平台/订阅类型不是调价，该连接按建连分组调度，继续按建连
-// 快照计费；重取失败同样保留建连快照，不断连。
-//
-// 首轮沿用刚经认证中间件取得的建连快照；没有经过 BeforeTurn 的 turn 回退建连
-// 快照。只保留当前与上一个 turn：下一 turn 的 BeforeTurn 先于上一 turn 的
-// AfterTurn 执行时，上一 turn 仍取到自己的快照。
+// 后续 turn 在 BeforeRequest 重新认证，再用同一快照检查白名单、计费资格和
+// 利润门。连接绑定的用户、分组或平台变化时要求重连。只保留当前和上一轮，
+// 使异步结算始终使用该轮准入时的价格与额度配置。
 type openAIWSTurnBillingAPIKeys struct {
 	mu   sync.Mutex
 	keys map[int]*service.APIKey
-}
-
-// begin 在 BeforeTurn 重装利润门前调用：后续 turn 重取计费分组并按 turn 记下，
-// 返回换入该分组的上下文供本 turn 的利润门使用。
-func (k *openAIWSTurnBillingAPIKeys) begin(ctx context.Context, apiKeyService *service.APIKeyService, turn int, conn *service.APIKey) context.Context {
-	turnKey := conn
-	if turn > 1 && apiKeyService != nil {
-		turnKey = refreshOpenAIWSTurnBillingAPIKey(ctx, apiKeyService, conn)
-	}
-	k.set(turn, turnKey)
-	return withOpenAIWSTurnBillingGroup(ctx, turnKey)
 }
 
 func (k *openAIWSTurnBillingAPIKeys) set(turn int, key *service.APIKey) {
@@ -2262,25 +2240,37 @@ func (k *openAIWSTurnBillingAPIKeys) forTurn(turn int, conn *service.APIKey) *se
 	return conn
 }
 
-// refreshOpenAIWSTurnBillingAPIKey 返回本 turn 计费用的 API Key：分组取当前认证
-// 快照，其余字段与建连快照共享。不满足采用条件时原样返回建连快照。
-func refreshOpenAIWSTurnBillingAPIKey(ctx context.Context, lookup openAIWSTurnAPIKeyLookup, conn *service.APIKey) *service.APIKey {
-	if lookup == nil || conn == nil || conn.Key == "" || conn.GroupID == nil || conn.Group == nil {
-		return conn
+// refreshOpenAIWSTurnBillingAPIKey fails closed when the current authorization
+// cannot be established. Billing-only expired/exhausted states are checked by
+// the caller according to the configured run mode, as on HTTP ingress.
+func refreshOpenAIWSTurnBillingAPIKey(ctx context.Context, lookup openAIWSTurnAPIKeyLookup, conn *service.APIKey) (*service.APIKey, error) {
+	denied := func(cause error) (*service.APIKey, error) {
+		return nil, service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "authorization is no longer valid; please reconnect", cause)
+	}
+	if lookup == nil || conn == nil || conn.Key == "" || conn.User == nil {
+		return denied(nil)
 	}
 	latest, err := lookup.GetByKey(ctx, conn.Key)
-	if err != nil || latest == nil || latest.ID != conn.ID || latest.GroupID == nil || *latest.GroupID != *conn.GroupID {
-		return conn
+	if err != nil || latest == nil || latest.ID != conn.ID || latest.User == nil || latest.User.ID != conn.User.ID {
+		return denied(err)
 	}
-	group := latest.Group
-	if group == nil || group.ID != conn.Group.ID ||
-		group.Platform != conn.Group.Platform ||
-		group.SubscriptionType != conn.Group.SubscriptionType {
-		return conn
+	if !latest.User.IsActive() || (!latest.IsActive() && latest.Status != service.StatusAPIKeyExpired && latest.Status != service.StatusAPIKeyQuotaExhausted) {
+		return denied(nil)
 	}
-	turnKey := *conn
-	turnKey.Group = group
-	return &turnKey
+	if (latest.GroupID == nil) != (conn.GroupID == nil) {
+		return denied(nil)
+	}
+	if conn.GroupID != nil {
+		group := latest.Group
+		if *latest.GroupID != *conn.GroupID || group == nil || conn.Group == nil || !group.IsActive() ||
+			group.ID != conn.Group.ID || group.Platform != conn.Group.Platform || group.SubscriptionType != conn.Group.SubscriptionType {
+			return denied(nil)
+		}
+		if !group.IsSubscriptionType() && !latest.User.CanBindGroup(group.ID, group.IsExclusive) {
+			return denied(nil)
+		}
+	}
+	return latest, nil
 }
 
 // withOpenAIWSTurnBillingGroup 把本 turn 的计费分组换进认证分组上下文，使利润门
@@ -2783,15 +2773,19 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	defer inflightDone()
 	ctx = inflightCtx
 
-	// A WebSocket may outlive a key's remaining spending window. Recheck
-	// after acquiring turn slots, including the first account-selection wait.
-	// Restrict this extra check to the opt-in mode so standard-mode RPM checks
-	// are not charged a second time for the same request.
-	checkSimpleModeTurnBilling := func() error {
-		if h.cfg == nil || h.cfg.RunMode != config.RunModeSimple || !h.cfg.SimpleModeKeyRateLimitEnabled {
-			return nil
+	// Every turn is a billable request. Only the first turn already consumed RPM
+	// admission above; its post-selection recheck must not count it again.
+	checkTurnBilling := func(turn int, key *service.APIKey) error {
+		if h.cfg == nil || h.cfg.RunMode != config.RunModeSimple {
+			if key.IsExpired() || key.IsQuotaExhausted() || key.Status == service.StatusAPIKeyExpired || key.Status == service.StatusAPIKeyQuotaExhausted {
+				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "billing check failed", nil)
+			}
 		}
-		if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(ctx, apiKey)); err != nil {
+		check := h.billingCacheService.CheckBillingEligibility
+		if turn == 1 {
+			check = h.billingCacheService.CheckBillingEligibilityWithoutRPM
+		}
+		if err := check(ctx, key.User, key, key.Group, subscription, service.QuotaPlatform(ctx, key)); err != nil {
 			return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "billing check failed", err)
 		}
 		return nil
@@ -3066,11 +3060,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// turn 级定价：首轮回退到 TurnStarted 的所属 turn 时刻；后续 turn 由
 		// BeforeTurn 重新冻结 pricingAt 并按最新门复核当前账号。
 		var turnPricing openAIWSTurnPricing
-		// 后续 turn 的计费分组同样在 BeforeTurn 经认证缓存重取，使分组调价对
+		// 后续 turn 的计费分组同样在 BeforeRequest 经认证缓存重取，使分组调价对
 		// 已打开的连接生效。
 		var turnBillingAPIKeys openAIWSTurnBillingAPIKeys
+		turnBillingAPIKeys.set(1, apiKey)
 		// Passthrough ingress does not invoke BeforeTurn for the first frame.
-		if err := checkSimpleModeTurnBilling(); err != nil {
+		if err := checkTurnBilling(1, apiKey); err != nil {
 			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
 			return
 		}
@@ -3101,6 +3096,17 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if !gjson.ValidBytes(payload) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 				}
+				turnKey, err := refreshOpenAIWSTurnBillingAPIKey(ctx, h.apiKeyService, apiKey)
+				if err != nil {
+					return err
+				}
+				if len(turnKey.IPWhitelist) > 0 || len(turnKey.IPBlacklist) > 0 {
+					securityIP := ip.GetSecurityClientIP(c, h.cfg.TrustForwardedIPForAPIKeyACL())
+					if allowed, _ := ip.CheckIPRestrictionWithCompiledRules(securityIP, turnKey.CompiledIPWhitelist, turnKey.CompiledIPBlacklist); !allowed {
+						return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "authorization is no longer valid; please reconnect", nil)
+					}
+				}
+				turnBillingAPIKeys.set(turn, turnKey)
 				requestPayloadHash = service.HashUsageRequestPayload(payload)
 				model := strings.TrimSpace(originalModel)
 				if model == "" {
@@ -3115,12 +3121,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				// 帧内重复 model 键/大小写变体/嵌套 session.model 额外逐一校验，
 				// 防止候选集非空时掩盖被轮换掉的禁用模型。
 				candidates := append([]string{model}, requestmodel.FromBodyCandidates("", "application/json", payload)...)
-				if blocked := blockedModelAllowlistCandidate(apiKey.Group, candidates); blocked != "" {
+				if blocked := blockedModelAllowlistCandidate(turnKey.Group, candidates); blocked != "" {
 					service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 					middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked), nil)
 				}
-				if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload, "subsequent_turn"); decision != nil && !decision.AllowNextStage {
+				if decision := h.checkSecurityAuditStage(c, reqLog, turnKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload, "subsequent_turn"); decision != nil && !decision.AllowNextStage {
 					writeSecurityAuditWSError(ctx, wsConn, decision)
 					return service.NewOpenAIWSClientCloseError(securityAuditWSCloseStatus(decision), securityAuditWSCloseReason(decision), nil)
 				}
@@ -3185,7 +3191,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				// 长连接跨峰谷/倍率刷新防护：每个 turn 按当前时刻重装门并复核
 				// 当前账号，越线即要求客户端重连重选（连接绑定单一上游账号，
 				// 无法中途换号）。本 turn 的准入与计费共用同一 pricingAt。
-				turnBillingCtx := turnBillingAPIKeys.begin(ctx, h.apiKeyService, turn, apiKey)
+				turnKey := turnBillingAPIKeys.forTurn(turn, apiKey)
+				turnBillingCtx := withOpenAIWSTurnBillingGroup(ctx, turnKey)
 				turnCtx, turnAt := h.gatewayService.WithOpenAITurnPricingContext(turnBillingCtx, apiKey.GroupID)
 				if _, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(turnCtx, account); vetoed {
 					reqLog.Info("openai.websocket_turn_profit_vetoed",
@@ -3201,7 +3208,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				// 防御式清理：避免异常路径下旧槽位覆盖导致泄漏。
 				releaseTurnSlots()
 				// 非首轮 turn 需要重新抢占并发槽位，避免长连接空闲占槽。
-				userReleaseFunc, userAcquired, err := h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, subject.Concurrency, apiKey.ID)
+				userReleaseFunc, userAcquired, err := h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, turnKey.User.ID, turnKey.User.Concurrency, turnKey.ID)
 				if err != nil {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire user concurrency slot", err)
 				}
@@ -3223,7 +3230,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
 				currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
-				return checkSimpleModeTurnBilling()
+				return checkTurnBilling(turn, turnKey)
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
 				turnStart := getTurnStart(turn)
@@ -3311,7 +3318,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 						Result:             result,
 						APIKey:             turnBillingAPIKey,
-						User:               apiKey.User,
+						User:               turnBillingAPIKey.User,
 						Account:            account,
 						Subscription:       subscription,
 						InboundEndpoint:    inboundEndpoint,

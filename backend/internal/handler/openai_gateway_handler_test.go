@@ -1932,6 +1932,9 @@ func newOpenAIWSHandlerTestServer(t *testing.T, h *OpenAIGatewayHandler, subject
 
 type openAIResponsesWSUsageLogCase struct {
 	simpleModeRejectAtRead int64
+	standardMode           bool
+	billingCache           service.BillingCache
+	rpmCache               service.UserRPMCache
 	compositeResolver      *service.CompositeRouteResolver
 	accountPlatform        string
 	closeReason            string
@@ -1972,6 +1975,21 @@ type openAIResponsesWSUsageLogResult struct {
 type openAIWSUsageHandlerAccountRepoStub struct {
 	service.AccountRepository
 	account service.Account
+}
+
+type openAIWSUsageHandlerAPIKeyRepo struct {
+	service.APIKeyRepository
+	key *service.APIKey
+}
+
+func (r *openAIWSUsageHandlerAPIKeyRepo) GetByKeyForAuth(context.Context, string) (*service.APIKey, error) {
+	return r.key, nil
+}
+
+type openAIWSUsageBillingRepo struct{ service.UsageBillingRepository }
+
+func (*openAIWSUsageBillingRepo) Apply(context.Context, *service.UsageBillingCommand) (*service.UsageBillingApplyResult, error) {
+	return &service.UsageBillingApplyResult{Applied: true}, nil
 }
 
 func (s *openAIWSUsageHandlerAccountRepoStub) ListSchedulableByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
@@ -2673,10 +2691,13 @@ func runOpenAIResponsesWebSocketUsageLimitCase(t *testing.T, mode string, follow
 
 	apiKey := &service.APIKey{
 		ID:      1802,
+		Key:     "sk-ws-failover",
+		Status:  service.StatusActive,
 		GroupID: &groupID,
-		User:    &service.User{ID: 1702, Status: service.StatusActive},
+		User:    &service.User{ID: 1702, Status: service.StatusActive, Concurrency: 1},
 		Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive},
 	}
+	h.apiKeyService = service.NewAPIKeyService(&openAIWSUsageHandlerAPIKeyRepo{key: apiKey}, nil, nil, nil, nil, nil, cfg)
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
@@ -3065,6 +3086,9 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 
 	cfg := &config.Config{}
 	cfg.RunMode = config.RunModeSimple
+	if tc.standardMode {
+		cfg.RunMode = config.RunModeStandard
+	}
 	cfg.Default.RateMultiplier = 1
 	cfg.Security.URLAllowlist.Enabled = false
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
@@ -3098,12 +3122,12 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		cfg.SimpleModeKeyRateLimitEnabled = true
 		keyRepo = &simpleModeWSRateLimitRepo{rejectAt: tc.simpleModeRejectAtRead}
 	}
-	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, keyRepo, nil, nil, cfg, nil)
+	billingCacheSvc := service.NewBillingCacheService(tc.billingCache, nil, nil, keyRepo, tc.rpmCache, nil, cfg, nil)
 	t.Cleanup(billingCacheSvc.Stop)
 	gatewaySvc := service.NewOpenAIGatewayService(
 		accountRepo,
 		usageRepo,
-		nil,
+		&openAIWSUsageBillingRepo{},
 		nil,
 		nil,
 		nil,
@@ -3144,8 +3168,11 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 
 	apiKey := &service.APIKey{
 		ID:      1801,
+		Key:     "sk-ws-usage",
+		Status:  service.StatusActive,
 		GroupID: &groupID,
-		User:    &service.User{ID: 1701, Status: service.StatusActive},
+		User:    &service.User{ID: 1701, Status: service.StatusActive, Concurrency: 1},
+		Group:   &service.Group{ID: groupID, Status: service.StatusActive, Platform: service.PlatformOpenAI, RateMultiplier: 1},
 	}
 	if tc.apiKeyService != nil {
 		h.apiKeyService = tc.apiKeyService
@@ -3157,7 +3184,14 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		apiKey.RateLimit5h = 1
 	}
 	if tc.group != nil {
-		apiKey.Group = tc.group
+		group := *tc.group
+		if group.Status == "" {
+			group.Status = service.StatusActive
+		}
+		apiKey.Group = &group
+	}
+	if tc.apiKeyService == nil {
+		h.apiKeyService = service.NewAPIKeyService(&openAIWSUsageHandlerAPIKeyRepo{key: apiKey}, nil, nil, nil, nil, nil, cfg)
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {

@@ -183,6 +183,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	}
 	account.Extra = maps.Clone(account.Extra)
 	delete(account.Extra, service.OpenAIUpstreamHealthExtraKey)
+	delete(account.Extra, service.ClaudeOAuthStateKey)
 	if err := service.InitializeAccountModelCatalog(account); err != nil {
 		return err
 	}
@@ -740,7 +741,7 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'opencode_go_usage_snapshot',
 			extra -> 'grok_observed_models',
 			extra -> 'upstream_model_metadata',
-			credentials, extra -> 'model_catalog', extra -> 'openai_upstream_health'
+			credentials, extra -> 'model_catalog', CASE WHEN platform='anthropic' THEN extra -> 'claude_oauth_state' ELSE extra -> 'openai_upstream_health' END
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -934,6 +935,11 @@ func lockAndMergeAccountProbeExtra(
 	}
 	account.Extra = extra
 	delete(account.Extra, service.OpenAIUpstreamHealthExtraKey)
+	delete(account.Extra, service.ClaudeOAuthStateKey)
+	healthKey := service.OpenAIUpstreamHealthExtraKey
+	if account.Platform == service.PlatformAnthropic {
+		healthKey = service.ClaudeOAuthStateKey
+	}
 	if len(currentOpenAIHealth) > 0 && string(currentOpenAIHealth) != "null" && current.GetCredential("access_token") == account.GetCredential("access_token") && current.GetCredential("refresh_token") == account.GetCredential("refresh_token") {
 		var health service.OpenAIUpstreamHealth
 		if err := json.Unmarshal(currentOpenAIHealth, &health); err != nil {
@@ -943,7 +949,7 @@ func lockAndMergeAccountProbeExtra(
 		if err := json.Unmarshal(currentOpenAIHealth, &value); err != nil {
 			return nil, err
 		}
-		account.Extra[service.OpenAIUpstreamHealthExtraKey] = value
+		account.Extra[healthKey] = value
 		if health.Kind == "auth_invalid" {
 			account.Status = service.StatusError
 			account.ErrorMessage = health.Message
@@ -3382,6 +3388,7 @@ func (r *accountRepository) updateExtraGuarded(ctx context.Context, id int64, up
 	updates = maps.Clone(stripCodexFingerprintSeedFromExtraUpdate(updates))
 	delete(updates, service.AccountModelCatalogExtraKey)
 	delete(updates, service.OpenAIUpstreamHealthExtraKey)
+	delete(updates, service.ClaudeOAuthStateKey)
 	if len(updates) == 0 {
 		return true, false, nil
 	}
@@ -3717,6 +3724,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	updates.Extra = maps.Clone(stripCodexFingerprintSeedFromExtraUpdate(updates.Extra))
 	delete(updates.Extra, service.AccountModelCatalogExtraKey)
 	delete(updates.Extra, service.OpenAIUpstreamHealthExtraKey)
+	delete(updates.Extra, service.ClaudeOAuthStateKey)
 
 	setClauses := make([]string, 0, 8)
 	args := make([]any, 0, 8)

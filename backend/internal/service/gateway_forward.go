@@ -330,6 +330,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 获取凭证
 	token, tokenType, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		return nil, err
 	}

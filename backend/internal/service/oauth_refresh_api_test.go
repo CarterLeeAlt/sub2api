@@ -104,6 +104,18 @@ func (r *refreshAPIAccountRepo) UpdateGrokOAuthCredentialsIfUnchanged(
 }
 
 // refreshAPIExecutorStub implements OAuthRefreshExecutor for tests.
+func (r *refreshAPIAccountRepo) UpdateOAuthCredentialsIfUnchanged(ctx context.Context, expected *Account, credentials map[string]any) (bool, error) {
+	r.successCASCalls++
+	if !reflect.DeepEqual(OAuthCredentialIdentity(r.account.Credentials), OAuthCredentialIdentity(expected.Credentials)) {
+		return false, nil
+	}
+	err := r.UpdateCredentials(ctx, expected.ID, credentials)
+	return err == nil, err
+}
+func (r *refreshAPIAccountRepo) SaveOAuthAuthenticationState(context.Context, *Account, OpenAIUpstreamHealth, time.Time) (bool, error) {
+	return true, nil
+}
+
 type refreshAPIExecutorStub struct {
 	needsRefresh  bool
 	cannotRefresh bool

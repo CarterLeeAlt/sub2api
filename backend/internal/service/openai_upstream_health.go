@@ -67,7 +67,7 @@ func classifyOpenAIUpstreamHealth(account *Account, source string, status int, b
 			return state
 		}
 		state.Kind = "auth_refresh_required"
-		if account.GetOpenAIRefreshToken() == "" || account.IsOpenAIPersonalAccessToken() {
+		if strings.TrimSpace(account.GetOpenAIRefreshToken()) == "" || account.IsOpenAIPersonalAccessToken() {
 			state.Kind = "auth_invalid"
 		}
 	}

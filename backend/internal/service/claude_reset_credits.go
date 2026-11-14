@@ -78,8 +78,9 @@ type ClaudeResetCreditService struct {
 	now      func() time.Time
 
 	// Redemption only; both are mandatory and never fail open.
-	idempotency *IdempotencyCoordinator
-	locks       LeaderLockCache
+	idempotency      *IdempotencyCoordinator
+	locks            LeaderLockCache
+	rateLimitService *RateLimitService
 }
 
 func NewClaudeResetCreditService(accounts AccountRepository, tokens *ClaudeTokenProvider, proxies ProxyRepository, settings *SettingService) *ClaudeResetCreditService {

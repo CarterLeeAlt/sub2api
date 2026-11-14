@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -161,6 +159,7 @@ type OpenAIQuotaResetCredit struct {
 // The inner Credit also carries `redeemed_at` (RFC3339 string); we deliberately do
 // NOT add a top-level redeemed_at to avoid ambiguity with the nested field.
 type OpenAIQuotaResetResult struct {
+	Replayed     bool                    `json:"replayed,omitempty"`
 	Code         string                  `json:"code"`
 	Credit       *OpenAIQuotaResetCredit `json:"credit,omitempty"`
 	WindowsReset int                     `json:"windows_reset"`
@@ -179,6 +178,8 @@ type OpenAIQuotaService struct {
 	agentIdentityWS      agentIdentityWSConnectionInvalidator
 	// codexPATResetCreditsEnabled 读取全局 PAT 重置额度开关；nil 视为关闭。
 	codexPATResetCreditsEnabled func(context.Context) bool
+	resetIdempotency            *IdempotencyCoordinator
+	resetLocks                  LeaderLockCache
 }
 
 // NewOpenAIQuotaService constructs a quota service. token provider is required —
@@ -421,18 +422,7 @@ func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client
 	return &details, nil
 }
 
-// ResetCredit consumes one rate_limit_reset_credit for the given OpenAI account.
-// The redeem_request_id is auto-generated (uuid-like) — upstream uses it for
-// idempotency. Returns the consumed credit metadata so the UI can refresh.
-func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, accountID int64) (*OpenAIQuotaResetResult, error) {
-	redeemRequestID, err := generateRedeemRequestID()
-	if err != nil {
-		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_QUOTA_REDEEM_ID_FAILED", "failed to generate redeem id: %v", err)
-	}
-	return s.resetCredit(ctx, accountID, redeemRequestID)
-}
-
-func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, redeemRequestID string) (*OpenAIQuotaResetResult, error) {
+func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, redeemRequestID, expectedUpstreamID string) (*OpenAIQuotaResetResult, error) {
 	ctx = WithScopedAdminAccountOperation(ctx, "openai.quota.reset")
 	if err := scopedAccountIDAccess(ctx, s.accountRepo, accountID, "openai.quota.reset", false); err != nil {
 		return nil, err
@@ -461,6 +451,9 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
 	if err != nil {
 		return nil, err
+	}
+	if expectedUpstreamID != "" && chatGPTAccountID != expectedUpstreamID {
+		return nil, infraerrors.Conflict("OPENAI_CREDENTIALS_CHANGED", "Account identity changed during reset")
 	}
 	identity, err := captureOpenAIQuotaIdentity(ctx, s.accountRepo, accountID, accessToken, chatGPTAccountID, proxyURL, fedRAMP)
 	if err != nil {
@@ -750,20 +743,6 @@ func buildCodexCommonHeaders(accessToken, chatGPTAccountID string, fedRAMP bool)
 		headers["x-openai-fedramp"] = "true"
 	}
 	return headers
-}
-
-// generateRedeemRequestID produces a UUID-v4-shaped string without pulling in a
-// new dependency. ChatGPT uses this as an idempotency key for the consume call.
-func generateRedeemRequestID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	// Set version (4) and variant (RFC 4122) bits.
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	hexStr := hex.EncodeToString(b)
-	return fmt.Sprintf("%s-%s-%s-%s-%s", hexStr[0:8], hexStr[8:12], hexStr[12:16], hexStr[16:20], hexStr[20:]), nil
 }
 
 // buildCodexSparkWindowExtraUpdates extracts Codex Spark usage windows from the

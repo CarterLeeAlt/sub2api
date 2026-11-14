@@ -950,6 +950,7 @@ export interface OpenAIQuotaResetCredit {
 }
 
 export interface OpenAIQuotaResetResult {
+  replayed?: boolean
   code: string
   credit?: OpenAIQuotaResetCredit | null
   windows_reset: number
@@ -1005,16 +1006,13 @@ export async function sendOpenAIReferralInvite(
 /**
  * Consume one rate-limit-reset credit for an OpenAI/Codex OAuth account.
  *
- * The credit is non-refundable and the endpoint chains an upstream reset with an
- * upstream re-query, so it needs a larger budget than the default client
- * timeout: aborting locally would report a successful consumption as a failure
- * and invite a retry that spends a second credit.
+ * A confirmation keeps its idempotency key across timeouts and page reloads.
  */
-export async function resetOpenAIQuota(id: number): Promise<OpenAIQuotaResetResult> {
+export async function resetOpenAIQuota(id: number, idempotencyKey: string): Promise<OpenAIQuotaResetResult> {
   const { data } = await apiClient.post<OpenAIQuotaResetResult>(
     `/admin/openai/accounts/${id}/reset-quota`,
     undefined,
-    { timeout: 90_000 }
+    { timeout: 90_000, headers: { 'Idempotency-Key': idempotencyKey } }
   )
   return data
 }

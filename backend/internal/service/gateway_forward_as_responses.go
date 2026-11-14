@@ -122,6 +122,7 @@ func (s *GatewayService) ForwardAsResponses(
 
 	// 8. Get access token
 	token, tokenType, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		return nil, fmt.Errorf("get access token: %w", err)
 	}

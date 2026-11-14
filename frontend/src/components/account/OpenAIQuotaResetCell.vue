@@ -199,6 +199,9 @@ const patResetCreditsBlocked = computed(() =>
 
 const loading = ref(false)
 const resetting = ref(false)
+const resetStorageKey = (id: number) => `sub2api.openai-reset.${id}`
+const pendingResetKey = ref('')
+watch(() => props.account.id, id => { pendingResetKey.value = localStorage.getItem(resetStorageKey(id)) ?? '' }, { immediate: true })
 const error = ref<string | null>(null)
 const errorKind = ref('request_failed')
 const healthFailure = computed(() => openAIHealth(props.account))
@@ -312,7 +315,7 @@ const resetCreditExpirations = computed(() =>
 )
 const primaryResetCreditExpiry = computed(() => resetCreditExpirations.value[0] ?? '')
 const hiddenResetCreditCount = computed(() => Math.max(resetCreditExpirations.value.length - 1, 0))
-const canReset = computed(() => hasResetCreditCount.value && availableResetCount.value > 0 && !isShadow.value)
+const canReset = computed(() => (Boolean(pendingResetKey.value) || (hasResetCreditCount.value && availableResetCount.value > 0)) && !isShadow.value)
 
 const resetCreditDetailsTitle = computed(() =>
   resetCreditExpirations.value
@@ -328,6 +331,7 @@ const resetCreditDetailsToggleLabel = computed(() => {
 })
 
 const resetButtonTitle = computed(() => {
+  if (pendingResetKey.value) return t('admin.accounts.openaiQuotaReset.retryPending')
   if (healthFailure.value) return t(openAIHealthLabel(healthFailure.value.kind))
   if (patResetCreditsBlocked.value) return t('admin.accounts.openaiQuotaReset.patDisabledTooltip')
   if (isShadow.value) return t('admin.accounts.openaiQuotaReset.resetTooltipShadow')
@@ -470,8 +474,14 @@ const confirmReset = async () => {
   resetMessage.value = null
   resetWarning.value = null
   try {
-    const result: OpenAIQuotaResetResult = await resetOpenAIQuota(accountID)
+    const storageKey = resetStorageKey(accountID)
+    const operationKey = localStorage.getItem(storageKey) || crypto.randomUUID()
+    localStorage.setItem(storageKey, operationKey)
+    pendingResetKey.value = operationKey
+    const result: OpenAIQuotaResetResult = await resetOpenAIQuota(accountID, operationKey)
+    if (localStorage.getItem(storageKey) === operationKey) localStorage.removeItem(storageKey)
     if (props.account.id !== accountID) return
+    pendingResetKey.value = ''
     showResetCreditDetails.value = false
     if (
       result.cache_refreshed &&
@@ -489,7 +499,9 @@ const confirmReset = async () => {
     }
     if (result.account) emit('account-updated', result.account)
 
-    if (result.warning_code === 'reset_credit_cache_refresh_failed') {
+    if (result.replayed) {
+      resetMessage.value = t('admin.accounts.openaiQuotaReset.replayed')
+    } else if (result.warning_code === 'reset_credit_cache_refresh_failed') {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.resetCacheRefreshFailed')
     } else if (result.warning_code === 'account_state_recovery_failed') {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.resetAccountRecoveryFailed')

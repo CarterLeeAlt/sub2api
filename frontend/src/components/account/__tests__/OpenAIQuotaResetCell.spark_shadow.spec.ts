@@ -473,7 +473,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
     wrapper.findComponent(ConfirmDialog).vm.$emit('confirm')
     await flushPromises()
 
-    expect(resetOpenAIQuota).toHaveBeenCalledWith(1)
+    expect(resetOpenAIQuota).toHaveBeenCalledWith(1, expect.any(String))
     expect(refreshOpenAIQuota).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
     expect(wrapper.text()).toContain('admin.accounts.openaiQuotaReset.resetSuccess')

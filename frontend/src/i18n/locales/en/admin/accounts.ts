@@ -1812,6 +1812,8 @@ export default {
         resetSuccess: 'Reset {windows} window(s); credits and account state updated',
         resetCacheRefreshFailed: 'The window was reset and account state recovered, but the reset-credit count could not be read back. Query it again.',
         resetAccountRecoveryFailed: 'The window was reset, but account state recovery failed. Recover the account state manually.',
+        retryPending: 'Resume the previous reset using the same confirmation',
+        replayed: 'Previous reset confirmed; no new credit was consumed. Refresh usage for the current state.',
         resetAccountRefreshFailed: 'The window, account state, and reset-credit cache were updated, but the latest account display could not be loaded.',
         refreshCachePersistFailed: 'Showing the live count, but the cache update failed, so the previous cached value was kept.',
         refreshCountUnavailable: 'The current reset-credit count could not be loaded. Try again later.',

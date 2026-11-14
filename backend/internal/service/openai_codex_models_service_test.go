@@ -3251,6 +3251,17 @@ type codexModelsAccountStateRepo struct {
 	lastTempReason      string
 }
 
+func (*codexModelsAccountStateRepo) UpdateOAuthCredentialsIfUnchanged(context.Context, *Account, map[string]any) (bool, error) {
+	return false, nil
+}
+
+func (r *codexModelsAccountStateRepo) SaveOAuthAuthenticationState(ctx context.Context, account *Account, state OpenAIUpstreamHealth, until time.Time) (bool, error) {
+	if state.Kind == "auth_invalid" {
+		return true, r.SetError(ctx, account.ID, state.Message)
+	}
+	return true, r.SetTempUnschedulable(ctx, account.ID, until, state.Message)
+}
+
 func (r *codexModelsAccountStateRepo) SetError(_ context.Context, _ int64, errorMsg string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -3295,7 +3306,7 @@ func TestFetchCodexModelsManifestOAuth401MarksAccountUnschedulable(t *testing.T)
 	require.True(t, IsRetryableCodexModelsManifestError(err), "manifest 401 should allow account failover")
 	require.Equal(t, 1, repo.setTempUnschedCalls, "OAuth 401 should temp-unschedule the account")
 	require.Equal(t, 0, repo.setErrorCalls)
-	require.True(t, s.isOpenAIAccountRuntimeBlocked(account), "account should be runtime-blocked after manifest 401")
+	require.False(t, s.isOpenAIAccountRuntimeBlocked(account), "conditional persistence publishes the scheduling state")
 }
 
 func TestFetchCodexModelsManifestOAuth401TokenRevokedDisablesAccount(t *testing.T) {
@@ -3318,7 +3329,7 @@ func TestFetchCodexModelsManifestOAuth401TokenRevokedDisablesAccount(t *testing.
 	require.Error(t, err)
 	require.True(t, IsRetryableCodexModelsManifestError(err))
 	require.Equal(t, 1, repo.setErrorCalls, "revoked token should permanently disable the account")
-	require.Contains(t, repo.lastErrorMsg, "Token revoked")
+	require.Contains(t, repo.lastErrorMsg, "token has been revoked")
 	require.Equal(t, 0, repo.setTempUnschedCalls)
 }
 

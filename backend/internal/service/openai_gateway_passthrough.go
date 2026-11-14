@@ -341,6 +341,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 	// Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
+	ctx = withOAuthRequestIdentity(ctx, s.accountRepo, account, token)
 	if err != nil {
 		return nil, err
 	}

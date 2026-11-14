@@ -350,6 +350,23 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 			// while the provider call was in flight. Return the durable row so
 			// post-refresh cache publication cannot restore that stale snapshot.
 			freshAccount = durableAccount
+		} else if usesConditionalOAuthState(attemptedAccount) {
+			store, ok := api.accountRepo.(OAuthCredentialRepository)
+			if !ok {
+				return nil, &providerConfigurationRefreshError{err: fmt.Errorf("OAuth conditional credential repository is not configured")}
+			}
+			applied, err := store.UpdateOAuthCredentialsIfUnchanged(ctx, attemptedAccount, newCredentials)
+			if err != nil {
+				return nil, &providerCycleContainmentRefreshError{err: fmt.Errorf("OAuth rotation persistence failed: %w", err)}
+			}
+			current, err := api.loadGrokDurableAccountAfterPersist(ctx, cacheKey, attemptedAccount.ID)
+			if err != nil || current == nil {
+				return nil, &providerCycleContainmentRefreshError{err: fmt.Errorf("OAuth post-rotation state unavailable: %v", err)}
+			}
+			if !applied {
+				return &OAuthRefreshResult{Account: current}, nil
+			}
+			freshAccount = current
 		} else if updateErr := persistAccountCredentials(ctx, api.accountRepo, freshAccount, newCredentials); updateErr != nil {
 			slog.Error("oauth_refresh_update_failed",
 				"account_id", freshAccount.ID,

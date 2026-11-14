@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -96,6 +98,87 @@ func newWSGroupPricingAPIKeyService(repo *wsGroupPricingAPIKeyRepoStub) *service
 	return service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, &config.Config{})
 }
 
+func TestOpenAIResponsesWebSocket_RevokedKeyCannotStartNextTurn(t *testing.T) {
+	for _, mode := range []string{service.OpenAIWSIngressModePassthrough, service.OpenAIWSIngressModeCtxPool} {
+		for _, scenario := range []string{"disabled-key", "deleted-key", "disabled-user", "disabled-group", "exclusive-group", "model-allowlist", "ip-denied", "expired-key", "exhausted-quota", "exhausted-balance", "rpm"} {
+			t.Run(mode+"/"+scenario, func(t *testing.T) {
+				repo := newWSGroupPricingAPIKeyRepoStub(1)
+				cache := &wsTurnBillingCache{}
+				cache.balance.Store(100)
+				rpm := &wsTurnRPMCache{}
+				if scenario == "rpm" {
+					repo.apiKey.User.RPMLimit = 1
+				}
+				apiKeyService := newWSGroupPricingAPIKeyService(repo)
+				reason := "authorization is no longer valid"
+				if scenario == "model-allowlist" {
+					reason = "not available for this group"
+				}
+				if scenario == "expired-key" || scenario == "exhausted-quota" || scenario == "exhausted-balance" || scenario == "rpm" {
+					reason = "billing check failed"
+				}
+				runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+					firstPayload: wsGroupPricingFirst, secondPayload: wsGroupPricingSecond,
+					ingressMode: mode, apiKeyService: apiKeyService, apiKeyCredential: wsGroupPricingKey,
+					standardMode: true, billingCache: cache, rpmCache: rpm,
+					afterFirstUpstreamRequest: func(*service.ChannelService) error {
+						return repo.adminUpdate(apiKeyService, func(key *service.APIKey, group *service.Group) {
+							switch scenario {
+							case "disabled-key":
+								key.Status = service.StatusAPIKeyDisabled
+							case "deleted-key":
+								repo.err = service.ErrAPIKeyNotFound
+							case "disabled-user":
+								key.User.Status = service.StatusDisabled
+							case "disabled-group":
+								group.Status = service.StatusDisabled
+							case "exclusive-group":
+								group.IsExclusive = true
+							case "model-allowlist":
+								group.ModelAllowlist = service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-other"}}
+							case "ip-denied":
+								key.IPWhitelist = []string{"192.0.2.1"}
+							case "expired-key":
+								expired := time.Now().Add(-time.Minute)
+								key.ExpiresAt = &expired
+							case "exhausted-quota":
+								key.Quota = 1
+								key.QuotaUsed = 1
+							case "exhausted-balance":
+								cache.balance.Store(0)
+							}
+						})
+					},
+					secondTurnCloseExpected: true, closeReason: reason,
+				})
+				if scenario == "rpm" {
+					require.Equal(t, int64(2), rpm.calls.Load(), "count each turn once, including the rejected second turn")
+				}
+			})
+		}
+	}
+}
+
+type wsTurnBillingCache struct {
+	service.BillingCache
+	balance atomic.Int64
+}
+
+func (c *wsTurnBillingCache) GetUserBalance(context.Context, int64) (float64, error) {
+	return float64(c.balance.Load()), nil
+}
+
+func (*wsTurnBillingCache) DeductUserBalance(context.Context, int64, float64) error { return nil }
+
+type wsTurnRPMCache struct {
+	service.UserRPMCache
+	calls atomic.Int64
+}
+
+func (c *wsTurnRPMCache) IncrementUserRPM(context.Context, int64) (int, error) {
+	return int(c.calls.Add(1)), nil
+}
+
 func TestOpenAIResponsesWebSocket_GroupRateChangeAppliesToNextTurn(t *testing.T) {
 	for _, mode := range []string{service.OpenAIWSIngressModePassthrough, service.OpenAIWSIngressModeCtxPool} {
 		t.Run(mode, func(t *testing.T) {
@@ -143,10 +226,10 @@ func TestOpenAIResponsesWebSocket_GroupRateChangeReachesProfitGateOnNextTurn(t *
 	})
 }
 
-func TestOpenAIResponsesWebSocket_KeyMovedToAnotherGroupKeepsConnectionGroup(t *testing.T) {
+func TestOpenAIResponsesWebSocket_KeyMovedToAnotherGroupClosesConnection(t *testing.T) {
 	repo := newWSGroupPricingAPIKeyRepoStub(3.0)
 	apiKeyService := newWSGroupPricingAPIKeyService(repo)
-	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+	runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
 		firstPayload:     wsGroupPricingFirst,
 		secondPayload:    wsGroupPricingSecond,
 		apiKeyService:    apiKeyService,
@@ -159,17 +242,15 @@ func TestOpenAIResponsesWebSocket_KeyMovedToAnotherGroupKeepsConnectionGroup(t *
 				group.RateMultiplier = 0.3
 			})
 		},
+		secondTurnCloseExpected: true,
+		closeReason:             "authorization is no longer valid",
 	})
-
-	require.Len(t, got.logs, 2)
-	require.InDelta(t, 3.0, got.logs[1].RateMultiplier, 1e-12,
-		"a key moved to another group keeps the connection's group: the connection was scheduled from it")
 }
 
-func TestOpenAIResponsesWebSocket_FailedKeyRefreshKeepsConnectionGroup(t *testing.T) {
+func TestOpenAIResponsesWebSocket_FailedKeyRefreshClosesConnection(t *testing.T) {
 	repo := newWSGroupPricingAPIKeyRepoStub(3.0)
 	apiKeyService := newWSGroupPricingAPIKeyService(repo)
-	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+	runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
 		firstPayload:     wsGroupPricingFirst,
 		secondPayload:    wsGroupPricingSecond,
 		apiKeyService:    apiKeyService,
@@ -180,10 +261,9 @@ func TestOpenAIResponsesWebSocket_FailedKeyRefreshKeepsConnectionGroup(t *testin
 				repo.err = errors.New("auth store unavailable")
 			})
 		},
+		secondTurnCloseExpected: true,
+		closeReason:             "authorization is no longer valid",
 	})
-
-	require.Len(t, got.logs, 2)
-	require.InDelta(t, 3.0, got.logs[1].RateMultiplier, 1e-12, "a failed refresh keeps the connection snapshot")
 	require.GreaterOrEqual(t, repo.lookupCount(), 2, "the second turn must have attempted a refresh")
 }
 
@@ -198,18 +278,20 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 	conn := &service.APIKey{
 		ID:      5,
 		Key:     "sk-conn",
+		Status:  service.StatusActive,
 		GroupID: &groupID,
-		User:    &service.User{ID: 9},
-		Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 3},
+		User:    &service.User{ID: 9, Status: service.StatusActive},
+		Group:   &service.Group{ID: groupID, Status: service.StatusActive, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 3},
 	}
 	latestWith := func(mutate func(k *service.APIKey)) *service.APIKey {
 		gid := groupID
 		k := &service.APIKey{
 			ID:      5,
 			Key:     "sk-conn",
+			Status:  service.StatusActive,
 			GroupID: &gid,
-			User:    &service.User{ID: 9, Balance: 123},
-			Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 0.3},
+			User:    &service.User{ID: 9, Status: service.StatusActive, Balance: 123},
+			Group:   &service.Group{ID: groupID, Status: service.StatusActive, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 0.3},
 		}
 		if mutate != nil {
 			mutate(k)
@@ -217,19 +299,20 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 		return k
 	}
 
-	t.Run("same group adopts the latest group and nothing else", func(t *testing.T) {
-		got := refreshOpenAIWSTurnBillingAPIKey(context.Background(), wsTurnAPIKeyLookupFunc(func(ctx context.Context, key string) (*service.APIKey, error) {
+	t.Run("same group adopts the latest authorization snapshot", func(t *testing.T) {
+		got, err := refreshOpenAIWSTurnBillingAPIKey(context.Background(), wsTurnAPIKeyLookupFunc(func(ctx context.Context, key string) (*service.APIKey, error) {
 			require.Equal(t, "sk-conn", key)
 			return latestWith(nil), nil
 		}), conn)
+		require.NoError(t, err)
 		require.NotSame(t, conn, got)
 		require.InDelta(t, 0.3, got.Group.RateMultiplier, 1e-12)
-		require.Same(t, conn.User, got.User, "only the group snapshot is refreshed")
+		require.Equal(t, float64(123), got.User.Balance)
 		require.Equal(t, conn.ID, got.ID)
 		require.InDelta(t, 3.0, conn.Group.RateMultiplier, 1e-12, "the connection snapshot is never mutated")
 	})
 
-	keep := map[string]wsTurnAPIKeyLookupFunc{
+	reject := map[string]wsTurnAPIKeyLookupFunc{
 		"lookup error": func(ctx context.Context, key string) (*service.APIKey, error) {
 			return nil, errors.New("boom")
 		},
@@ -253,13 +336,15 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 			return latestWith(func(k *service.APIKey) { k.Group.SubscriptionType = service.SubscriptionTypeSubscription }), nil
 		},
 	}
-	for name, lookup := range keep {
-		t.Run(name+" keeps the connection snapshot", func(t *testing.T) {
-			require.Same(t, conn, refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, conn))
+	for name, lookup := range reject {
+		t.Run(name+" rejects the next turn", func(t *testing.T) {
+			got, err := refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, conn)
+			require.Error(t, err)
+			require.Nil(t, got)
 		})
 	}
 
-	t.Run("no credential or no group skips the lookup", func(t *testing.T) {
+	t.Run("missing credential or lookup fails closed", func(t *testing.T) {
 		called := false
 		lookup := wsTurnAPIKeyLookupFunc(func(ctx context.Context, key string) (*service.APIKey, error) {
 			called = true
@@ -267,12 +352,12 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 		})
 		noKey := *conn
 		noKey.Key = ""
-		require.Same(t, &noKey, refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, &noKey))
-		noGroup := *conn
-		noGroup.Group = nil
-		require.Same(t, &noGroup, refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, &noGroup))
-		require.Nil(t, refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, nil))
-		require.Same(t, conn, refreshOpenAIWSTurnBillingAPIKey(context.Background(), nil, conn))
+		_, err := refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, &noKey)
+		require.Error(t, err)
+		_, err = refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, nil)
+		require.Error(t, err)
+		_, err = refreshOpenAIWSTurnBillingAPIKey(context.Background(), nil, conn)
+		require.Error(t, err)
 		require.False(t, called)
 	})
 }

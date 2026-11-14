@@ -5,8 +5,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -49,6 +52,37 @@ func (r *teamLinkedAccountRepoStub) SetError(ctx context.Context, id int64, erro
 	}
 	r.setErrorMsgs[id] = errorMsg
 	return nil
+}
+
+func (*teamLinkedAccountRepoStub) UpdateOAuthCredentialsIfUnchanged(context.Context, *Account, map[string]any) (bool, error) {
+	return false, nil
+}
+
+func (r *teamLinkedAccountRepoStub) SaveOAuthAuthenticationState(ctx context.Context, account *Account, state OpenAIUpstreamHealth, _ time.Time) (bool, error) {
+	if current := r.accountsByID[account.ID]; current != nil && !reflect.DeepEqual(OAuthCredentialIdentity(current.Credentials), OAuthCredentialIdentity(account.Credentials)) {
+		return false, nil
+	}
+	return true, r.SetError(ctx, account.ID, state.Message)
+}
+
+func TestTeamLinkedErrorPreservesReauthorizedAccounts(t *testing.T) {
+	for _, changedID := range []int64{1, 2} {
+		t.Run(fmt.Sprint(changedID), func(t *testing.T) {
+			repo := &teamLinkedAccountRepoStub{teamAccounts: newTeamLinkedFixture()}
+			changed := newTeamLinkedAccount(changedID, "team-B")
+			repo.accountsByID = map[int64]*Account{changedID: &changed}
+			rl, blocker := newTeamLinkedTestService(repo)
+			trigger := newTeamLinkedAccount(1, "team-A")
+			rl.HandleUpstreamError(context.Background(), &trigger, http.StatusPaymentRequired, nil, []byte(teamLinkedDeactivatedBody))
+			if changedID == 1 {
+				require.Empty(t, repo.setErrorIDs, "late error from replaced trigger must not fan out")
+				require.Zero(t, repo.listCalls)
+			} else {
+				require.Equal(t, []int64{1, 6}, repo.setErrorIDs, "sibling moved after enumeration must be preserved")
+			}
+			require.Empty(t, blocker.accounts)
+		})
+	}
 }
 
 func newTeamLinkedAccount(id int64, teamID string) Account {
@@ -101,17 +135,13 @@ func TestTeamLinkedError_FanoutMarksSameTeamAccounts(t *testing.T) {
 	shouldDisable := rl.HandleUpstreamError(context.Background(), &trigger, http.StatusPaymentRequired, http.Header{}, []byte(teamLinkedDeactivatedBody))
 
 	require.True(t, shouldDisable)
-	// fan-out 先标记同队兄弟（#2、#6），触发账户 #1 随后由常规 case 402 标记
-	require.Equal(t, []int64{2, 6, 1}, repo.setErrorIDs)
+	// 触发账户条件写入成功后才联动同队兄弟。
+	require.Equal(t, []int64{1, 2, 6}, repo.setErrorIDs)
 	require.Contains(t, repo.setErrorMsgs[2], "team-linked error triggered by account #1")
 	require.Contains(t, repo.setErrorMsgs[6], "team-linked error triggered by account #1")
-	require.Contains(t, repo.setErrorMsgs[1], "Workspace deactivated (402)")
+	require.Contains(t, repo.setErrorMsgs[1], "workspace has been deactivated")
 	require.NotContains(t, repo.setErrorMsgs[1], "team-linked")
-	// 熔断顺序：兄弟账户先于落库全部进程内熔断，触发账户走 auth_error
-	require.Equal(t, []string{openAITeamLinkedErrorBlockReason, openAITeamLinkedErrorBlockReason, "auth_error"}, blocker.reasons)
-	require.Equal(t, int64(2), blocker.accounts[0].ID)
-	require.Equal(t, int64(6), blocker.accounts[1].ID)
-	require.Equal(t, int64(1), blocker.accounts[2].ID)
+	require.Empty(t, blocker.accounts, "conditional writes publish scheduling changes")
 }
 
 func TestTeamLinkedError_GenericPaymentErrorDoesNotFanout(t *testing.T) {
@@ -136,7 +166,7 @@ func TestTeamLinkedError_DedupWithinTTL(t *testing.T) {
 	rl.HandleUpstreamError(context.Background(), &second, http.StatusPaymentRequired, http.Header{}, []byte(teamLinkedDeactivatedBody))
 
 	// 第二次触发被去重：只有 #2 自身经 case 402 标记，未再次 fan-out
-	require.Equal(t, []int64{2, 6, 1, 2}, repo.setErrorIDs)
+	require.Equal(t, []int64{1, 2, 6, 2}, repo.setErrorIDs)
 	require.Equal(t, 1, repo.listCalls)
 }
 
@@ -161,7 +191,7 @@ func TestTeamLinkedError_DirectCallSkipsTriggerAccount(t *testing.T) {
 	rl.maybeHandleOpenAITeamLinkedError(context.Background(), &trigger, http.StatusPaymentRequired, []byte(teamLinkedDeactivatedBody))
 
 	require.Equal(t, []int64{2, 6}, repo.setErrorIDs)
-	require.Equal(t, []string{openAITeamLinkedErrorBlockReason, openAITeamLinkedErrorBlockReason}, blocker.reasons)
+	require.Empty(t, blocker.accounts)
 }
 
 func TestTeamLinkedError_MissingTeamIDDoesNothing(t *testing.T) {
@@ -187,6 +217,5 @@ func TestTeamLinkedError_SetErrorFailureDoesNotAbortRemaining(t *testing.T) {
 	rl.maybeHandleOpenAITeamLinkedError(context.Background(), &trigger, http.StatusPaymentRequired, []byte(teamLinkedDeactivatedBody))
 
 	require.Equal(t, []int64{6}, repo.setErrorIDs)
-	// 进程内熔断先于落库执行，两个账户都已被熔断
-	require.Len(t, blocker.reasons, 2)
+	require.Empty(t, blocker.reasons, "failed writes must not leave an unconditional runtime block")
 }

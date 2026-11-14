@@ -30,6 +30,17 @@ func (r *tempUnschedScopeRepoStub) SetError(context.Context, int64, string) erro
 	return nil
 }
 
+func (*tempUnschedScopeRepoStub) UpdateOAuthCredentialsIfUnchanged(context.Context, *Account, map[string]any) (bool, error) {
+	return false, nil
+}
+
+func (r *tempUnschedScopeRepoStub) SaveOAuthAuthenticationState(ctx context.Context, account *Account, state OpenAIUpstreamHealth, until time.Time) (bool, error) {
+	if state.Kind == "auth_invalid" {
+		return true, r.SetError(ctx, account.ID, state.Message)
+	}
+	return true, r.SetTempUnschedulable(ctx, account.ID, until, state.Message)
+}
+
 func (r *tempUnschedScopeRepoStub) SetTempUnschedulable(_ context.Context, _ int64, _ time.Time, reason string) error {
 	r.tempCalls++
 	r.tempReasons = append(r.tempReasons, reason)
@@ -219,7 +230,7 @@ func TestOpenAIFailoverSideEffects_401FollowsTempUnschedScope(t *testing.T) {
 		{name: "显式模型级 token_revoked 走认证错误处理", scopes: []string{TempUnschedScopeModel}, body: tempUnschedScopeRevoked401Body, wantSetError: true, wantBlocked: true},
 		{name: "显式模型级 detail Unauthorized 走认证错误处理", scopes: []string{TempUnschedScopeModel}, body: tempUnschedScopeDetail401Body, wantSetError: true, wantBlocked: true},
 		{name: "显式模型级 token_revoked 池模式 保持跳过", scopes: []string{TempUnschedScopeModel}, body: tempUnschedScopeRevoked401Body, poolMode: true},
-		{name: "显式模型级 OAuth 走刷新窗口", scopes: []string{TempUnschedScopeModel}, oauth: true, wantTemp: true, wantBlocked: true},
+		{name: "显式模型级 OAuth 走刷新窗口", scopes: []string{TempUnschedScopeModel}, oauth: true, wantTemp: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
