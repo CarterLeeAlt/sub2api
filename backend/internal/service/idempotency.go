@@ -90,6 +90,10 @@ type IdempotencyExecuteOptions struct {
 	// ExecutionTimeout opts into bounded execution independent of client cancellation,
 	// with lease renewal and a separate short window to persist the final result.
 	ExecutionTimeout time.Duration
+	// RecoverExpiredProcessing permits recovery after a crashed executor's lease
+	// expires. Only callbacks with their own durable side-effect fence may opt in;
+	// ordinary writes must not be rerun merely because a lease elapsed.
+	RecoverExpiredProcessing bool
 }
 
 type IdempotencyExecuteResult struct {
@@ -296,7 +300,9 @@ func (c *IdempotencyCoordinator) Execute(
 			return nil, ErrIdempotencyKeyConflict
 		}
 		reclaimedByExpired := false
-		if !existing.ExpiresAt.After(now) {
+		expiredProcessing := opts.RecoverExpiredProcessing && existing.Status == IdempotencyStatusProcessing &&
+			existing.LockedUntil != nil && !existing.LockedUntil.After(now)
+		if !existing.ExpiresAt.After(now) || expiredProcessing {
 			taken, reclaimErr := c.repo.TryReclaim(ctx, existing.ID, existing.Status, now, lockedUntil, expiresAt)
 			if reclaimErr != nil {
 				RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "try_reclaim_expired_error")

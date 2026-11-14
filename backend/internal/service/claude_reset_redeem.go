@@ -105,6 +105,7 @@ func (s *ClaudeResetCreditService) Redeem(ctx context.Context, id int64, key str
 		Scope: claudeResetOperationScope, ActorScope: fmt.Sprintf("account:%d", id), Method: http.MethodPost,
 		Route: "/admin/accounts/:id/claude/reset-credits/redeem", IdempotencyKey: operation,
 		Payload: map[string]any{"account_id": id}, TTL: claudeResetRecordTTL, RequireKey: true, ExecutionTimeout: 60 * time.Second,
+		RecoverExpiredProcessing: true,
 	}, func(exec context.Context) (any, error) { return s.redeemOnce(exec, id, operation) })
 	if err != nil {
 		return nil, err

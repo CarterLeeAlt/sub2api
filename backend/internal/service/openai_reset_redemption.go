@@ -63,6 +63,7 @@ func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, id int64, key stri
 	result, err := s.resetIdempotency.Execute(ctx, IdempotencyExecuteOptions{
 		Scope: "openai_reset_redeem", ActorScope: fmt.Sprintf("account:%d", id), Method: http.MethodPost, Route: "/admin/openai/accounts/:id/reset-quota",
 		IdempotencyKey: operation, Payload: map[string]any{"account_id": id, "identity": identity}, TTL: openAIResetRetention, RequireKey: true, ExecutionTimeout: 60 * time.Second,
+		RecoverExpiredProcessing: true,
 	}, func(exec context.Context) (any, error) {
 		return s.redeemResetOnce(exec, id, operation, identity, upstreamID)
 	})

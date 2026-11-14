@@ -300,6 +300,21 @@ func TestClaudeResetRedeemCrashAfterMarkerNeverResends(t *testing.T) {
 	require.Zero(t, f.postCount())
 }
 
+func TestClaudeResetRecoversLostOperationCompletion(t *testing.T) {
+	f := &redeemFake{claim: `{"result":"reset","cleared":["five_hour"]}`}
+	s, memory, locks := newRedeemService(t, f)
+	repo := &resetCompletionFailureRepo{inMemoryIdempotencyRepo: memory, failScope: claudeResetOperationScope}
+	s.ConfigureRedemption(NewIdempotencyCoordinator(repo, DefaultIdempotencyConfig()), locks)
+	_, err := s.Redeem(context.Background(), 1, "lost-completion")
+	require.ErrorIs(t, err, ErrIdempotencyStoreUnavail)
+	expireResetOperationLease(memory, claudeResetOperationScope)
+	out, err := s.Redeem(context.Background(), 1, "lost-completion")
+	require.NoError(t, err)
+	require.True(t, out.Replayed)
+	require.Equal(t, ClaudeResetOutcomeReset, out.Outcome)
+	require.Equal(t, 1, f.postCount())
+}
+
 func TestClaudeResetRedeemMapsUpstreamResults(t *testing.T) {
 	cases := []struct {
 		claim, outcome string

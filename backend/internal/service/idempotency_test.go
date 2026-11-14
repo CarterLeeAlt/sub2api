@@ -228,6 +228,24 @@ func TestIdempotencyCoordinator_ReplaySucceededResult(t *testing.T) {
 	require.Equal(t, uint64(1), metrics.ReplayTotal)
 }
 
+func TestIdempotencyCoordinator_ProcessingRecoveryRequiresOptIn(t *testing.T) {
+	repo := &resetCompletionFailureRepo{inMemoryIdempotencyRepo: newInMemoryIdempotencyRepo(), failScope: "test.recovery"}
+	coordinator := NewIdempotencyCoordinator(repo, DefaultIdempotencyConfig())
+	opts := IdempotencyExecuteOptions{Scope: "test.recovery", Method: "POST", Route: "/test", IdempotencyKey: "recovery"}
+	calls := 0
+	exec := func(context.Context) (any, error) { calls++; return "saved", nil }
+	_, err := coordinator.Execute(context.Background(), opts, exec)
+	require.ErrorIs(t, err, ErrIdempotencyStoreUnavail)
+	expireResetOperationLease(repo.inMemoryIdempotencyRepo, opts.Scope)
+	_, err = coordinator.Execute(context.Background(), opts, exec)
+	require.ErrorIs(t, err, ErrIdempotencyInProgress)
+	require.Equal(t, 1, calls, "ordinary writes cannot restart after only their processing lease expires")
+	opts.RecoverExpiredProcessing = true
+	_, err = coordinator.Execute(context.Background(), opts, exec)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+}
+
 func TestIdempotencyCoordinator_ReclaimExpiredSucceededRecord(t *testing.T) {
 	resetIdempotencyMetricsForTest()
 	repo := newInMemoryIdempotencyRepo()
