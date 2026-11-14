@@ -3,11 +3,12 @@ import { flushPromises, mount } from '@vue/test-utils'
 import OpenAIQuotaResetCell from '../OpenAIQuotaResetCell.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import type { Account } from '@/types'
-import { refreshOpenAIQuota, resetOpenAIQuota } from '@/api/admin/accounts'
+import { refreshOpenAIQuota, resetOpenAIQuota, accountsAPI } from '@/api/admin/accounts'
 
 vi.mock('@/api/admin/accounts', () => ({
   refreshOpenAIQuota: vi.fn(),
   resetOpenAIQuota: vi.fn(),
+  accountsAPI: { getById: vi.fn() },
 }))
 
 // 组件读取全局 PAT 重置额度开关；spec 的账号均非 PAT，保持关闭即可还原默认交互。
@@ -71,9 +72,37 @@ const resetButton = (wrapper: ReturnType<typeof mount>) =>
 beforeEach(() => {
   vi.mocked(refreshOpenAIQuota).mockReset()
   vi.mocked(resetOpenAIQuota).mockReset()
+  vi.mocked(accountsAPI.getById).mockReset().mockRejectedValue(new Error('unavailable'))
 })
 
 describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
+  it('persists the invalid-account message across remounts and hides the stale-only badge', async () => {
+    const account = makeAccount({ status: 'error', error_message: 'Encountered invalidated oauth token', extra: {
+      openai_upstream_health: { kind: 'auth_invalid', message: 'Encountered invalidated oauth token' },
+      codex_reset_credit_snapshot: { available_count: 3, fetched_at: STALE_FETCHED_AT },
+    } })
+    for (let i = 0; i < 2; i++) {
+      const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+      expect(wrapper.get('summary').text()).toBe('admin.accounts.openaiHealth.auth_invalid')
+      expect(wrapper.get('details').text()).toContain('Encountered invalidated oauth token')
+      expect(wrapper.find('[data-testid="reset-credit-cache-stale"]').exists()).toBe(false)
+      expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
+      wrapper.unmount()
+    }
+  })
+
+  it('reloads canonical account state after an upstream authentication failure', async () => {
+    const account = makeAccount({})
+    const updated = { ...account, status: 'error' as const, error_message: 'revoked' }
+    vi.mocked(refreshOpenAIQuota).mockRejectedValue({ code: 'OPENAI_UPSTREAM_AUTH_INVALID', message: 'revoked' })
+    vi.mocked(accountsAPI.getById).mockResolvedValue(updated)
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
+    await wrapper.findAll('button')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('summary').text()).toBe('admin.accounts.openaiHealth.auth_invalid')
+    expect(wrapper.emitted('account-updated')?.[0]).toEqual([updated])
+    wrapper.unmount()
+  })
   it('影子账号(parent_account_id 非空)的 reset 按钮被禁用且提示在母账号重置', () => {
     const account = makeAccount({ parent_account_id: 100 })
     const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
@@ -219,7 +248,7 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
 
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.count1')
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
-    expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="reset-credit-cache-stale"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.updatedAt:')
     expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
     wrapper.unmount()
@@ -382,7 +411,8 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
 
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.count1')
     expect(wrapper.text()).not.toContain('admin.accounts.openaiQuotaReset.expiresAt:')
-    expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="reset-credit-cache-stale"]').exists()).toBe(false)
+    expect(wrapper.get('summary').text()).toBe('admin.accounts.openaiHealth.request_failed')
     expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('query failed')
     wrapper.unmount()

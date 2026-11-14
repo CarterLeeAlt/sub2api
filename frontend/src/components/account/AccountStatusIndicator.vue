@@ -1,7 +1,13 @@
 <template>
-  <div class="flex items-start gap-2">
+  <div class="flex flex-wrap items-start gap-2">
+    <div v-if="(modelCatalogPending || modelCatalogFailed) && !hasError && health?.kind !== 'auth_refresh_required'" class="flex flex-col items-start gap-1" :title="modelCatalog.error || t('admin.accounts.modelCatalog.pending')">
+      <span class="badge text-xs badge-warning">{{ t(modelCatalogPending ? 'admin.accounts.modelCatalog.pendingStatus' : 'admin.accounts.modelCatalog.failedStatus') }}</span>
+      <span v-if="modelCatalog.synced_at" class="text-[11px] text-gray-400">{{ t('admin.accounts.modelCatalog.lastSuccess') }}: {{ formatDateTimeToMinute(modelCatalog.synced_at) }}</span>
+    </div>
     <!-- Rate Limit Display (429) - Two-line layout -->
-    <div v-if="isRateLimited" class="flex flex-col items-start gap-1">
+    <span v-if="hasError" class="badge text-xs badge-danger">{{ health?.kind === 'auth_invalid' ? t('admin.accounts.openaiHealth.auth_invalid') : statusText }}</span>
+    <span v-else-if="health?.kind === 'auth_refresh_required'" class="badge text-xs badge-warning">{{ t('admin.accounts.openaiHealth.auth_refresh_required') }}</span>
+    <div v-else-if="isRateLimited" class="flex flex-col items-start gap-1">
       <span class="badge text-xs badge-warning">{{ t('admin.accounts.status.rateLimited') }}</span>
       <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ rateLimitResumeText }}</span>
     </div>
@@ -49,20 +55,20 @@
       </svg>
       <!-- Tooltip - 向下显示 -->
       <div
-        class="invisible absolute left-0 top-full z-[100] mt-1.5 min-w-[200px] max-w-[300px] rounded-lg bg-gray-800 px-3 py-2 text-xs text-white opacity-0 shadow-xl transition-all duration-200 group-hover/error:visible group-hover/error:opacity-100 dark:bg-gray-900"
+        class="invisible absolute right-0 top-full z-[100] mt-1.5 w-64 max-w-[calc(100vw-3rem)] rounded-lg bg-gray-800 px-3 py-2 text-xs text-white opacity-0 shadow-xl transition-all duration-200 group-hover/error:visible group-hover/error:opacity-100 dark:bg-gray-900"
       >
         <div class="whitespace-pre-wrap break-words leading-relaxed text-gray-300">
           {{ account.error_message }}
         </div>
         <!-- 上方小三角 -->
         <div
-          class="absolute bottom-full left-3 border-[6px] border-transparent border-b-gray-800 dark:border-b-gray-900"
+            class="absolute bottom-full right-1 border-[6px] border-transparent border-b-gray-800 dark:border-b-gray-900"
         ></div>
       </div>
     </div>
 
     <!-- Rate Limit Indicator (429) -->
-    <div v-if="isRateLimited" class="group relative">
+    <div v-if="isRateLimited && !hasError" class="group relative">
       <span
         class="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
       >
@@ -138,7 +144,7 @@
     </div>
 
     <!-- Overload Indicator (529) -->
-    <div v-if="isOverloaded" class="group relative">
+    <div v-if="isOverloaded && !hasError" class="group relative">
       <span
         class="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400"
       >
@@ -163,6 +169,8 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { Account } from '@/types'
+import { accountModelCatalog, supportsAutomaticModelCatalog } from './modelCatalog'
+import { openAIHealth } from './openaiHealth'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
 
 const { t } = useI18n()
@@ -170,6 +178,11 @@ const { t } = useI18n()
 const props = defineProps<{
   account: Account
 }>()
+
+const modelCatalog = computed(() => accountModelCatalog(props.account))
+const health = computed(() => openAIHealth(props.account))
+const modelCatalogPending = computed(() => supportsAutomaticModelCatalog(props.account) && modelCatalog.value.source === 'upstream' && !modelCatalog.value.ready)
+const modelCatalogFailed = computed(() => supportsAutomaticModelCatalog(props.account) && modelCatalog.value.source === 'upstream' && !!modelCatalog.value.error)
 
 const emit = defineEmits<{
   (e: 'show-temp-unsched', account: Account): void
@@ -283,7 +296,7 @@ const isTempUnschedulable = computed(() => {
 
 // Computed: has error status
 const hasError = computed(() => {
-  return props.account.status === 'error'
+  return props.account.status === 'error' || health.value?.kind === 'auth_invalid'
 })
 
 const isQuotaExceeded = computed(() => {

@@ -504,31 +504,52 @@ func TestAccountTestService_OpenAI429WithoutResetSignalDoesNotMutateRuntimeState
 	require.Nil(t, account.RateLimitResetAt)
 }
 
-func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	ctx, _ := newTestContext()
+type openAIHealthAccountTestRepo struct {
+	openAIAccountTestRepo
+	health          OpenAIUpstreamHealth
+	healthAccountID int64
+}
 
-	resp := newJSONResponse(http.StatusUnauthorized, `{"error":"bad token"}`)
+func (r *openAIHealthAccountTestRepo) SaveOpenAIUpstreamHealth(_ context.Context, a *Account, state OpenAIUpstreamHealth) (bool, error) {
+	r.health = state
+	r.healthAccountID = a.ID
+	return true, nil
+}
 
-	repo := &openAIAccountTestRepo{}
-	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
-	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
-	account := &Account{
-		ID:          80,
-		Platform:    PlatformOpenAI,
-		Type:        AccountTypeOAuth,
-		Status:      StatusActive,
-		Concurrency: 1,
-		Credentials: map[string]any{"access_token": "test-token"},
+func TestAccountTestService_OpenAI401ClassifiesAuthentication(t *testing.T) {
+	for _, refreshToken := range []string{"", "refresh-token"} {
+		t.Run(refreshToken, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			ctx, _ := newTestContext()
+
+			resp := newJSONResponse(http.StatusUnauthorized, `{"error":"bad token"}`)
+
+			repo := &openAIHealthAccountTestRepo{}
+			upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
+			svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
+			account := &Account{
+				ID:          80,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Status:      StatusActive,
+				Concurrency: 1,
+				Credentials: map[string]any{"access_token": "test-token", "refresh_token": refreshToken},
+			}
+
+			err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
+			require.Error(t, err)
+			require.Zero(t, repo.setErrorID, "must use credential-guarded health writer")
+			require.Equal(t, account.ID, repo.healthAccountID)
+			if refreshToken == "" {
+				require.Equal(t, "auth_invalid", repo.health.Kind)
+			} else {
+				require.Equal(t, "auth_refresh_required", repo.health.Kind)
+			}
+			require.Zero(t, repo.rateLimitedID)
+			require.Zero(t, repo.clearedErrorID)
+			require.Nil(t, account.RateLimitResetAt)
+		})
 	}
-
-	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
-	require.Error(t, err)
-	require.Equal(t, account.ID, repo.setErrorID)
-	require.Contains(t, repo.setErrorMsg, "Authentication failed (401)")
-	require.Zero(t, repo.rateLimitedID)
-	require.Zero(t, repo.clearedErrorID)
-	require.Nil(t, account.RateLimitResetAt)
 }
 
 func TestAccountTestService_OpenAIAPIKeyResponsesUsesCodexProbeHeaders(t *testing.T) {

@@ -321,6 +321,9 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccountWithRetry(ctx context.
 	if firstErr == nil {
 		return nil
 	}
+	if kind := openAIHealthErrorKind(firstErr); kind == "auth_invalid" || kind == "auth_refresh_required" || kind == "permission_denied" {
+		return firstErr
+	}
 
 	slog.Warn("openai_quota_snapshot_refresh_account_retry_scheduled",
 		"account_id", account.ID, "retry_delay", openAIQuotaSnapshotRefreshRetryDelay, "error", firstErr)

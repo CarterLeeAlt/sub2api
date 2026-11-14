@@ -26,6 +26,16 @@
 
 ## 当前定制
 
+### OpenAI 账号认证与操作诊断（`active`）
+
+额度查询、重置、重置次数详情、模型同步、Responses／Compact／图像测试及后台令牌刷新区分认证作废、待刷新认证、接口权限不足、额度耗尽、限流和网络失败。明确的 `token_invalidated`／`token_revoked` 或 invalidated OAuth token 提示停止凭据主账号调度；普通可刷新 401 触发令牌刷新，基础额度查询成功而次数详情单独返回普通 401 时仅提示接口权限问题。Agent Identity 保留任务级恢复。
+
+诊断保存在 `extra.openai_upstream_health`，写入用请求凭据、代理及观测时间做原子比较，避免迟到请求覆盖重新授权；失败状态与 scheduler outbox 同事务写入。成功刷新凭据清除对应诊断和本次认证暂停，手动调度开关保持原值；其他接口成功不清除明确认证失效。旧表单保留数据库诊断，影子账号显示凭据主账号诊断而保持自己的状态。
+
+管理接口将上游认证错误作为明确业务码返回，避免混同管理员登录 401。页面优先展示认证失效和可展开原因，保留额度时标为上次成功数据，重新加载页面仍显示诊断。账号错误优先于残留限流／过载提示。
+
+主要文件：`backend/internal/service/openai_upstream_health.go`、`backend/internal/repository/openai_upstream_health.go`、`frontend/src/components/account/openaiHealth.ts`、`OpenAIQuotaResetCell.vue`、`AccountUsageCell.vue` 和 `AccountStatusIndicator.vue`。
+
 ### CUSTOM-001：OpenAI OAuth 模型清单同步（`active`）
 
 OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不是依赖 API Key 账户使用的 `/v1/models`。同步时：
@@ -36,11 +46,20 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - 账户满足套餐和图像能力条件时，补充虚拟模型 `gpt-image-2`，供现有生图入口使用；
 - 前端账户模型白名单选择器允许展示和保存同步结果。
 
+普通 OpenAI OAuth 主账号新建后默认使用上游来源，由服务端立即安排首次同步，首次成功前独立阻止调度；用户关闭的调度开关保持关闭。排除透传、Spark 影子、Agent Identity、PAT、Setup Token、API Key 和其他平台。已有账号保持配置，可在编辑页选用上游后保存加入自动维护。
+
+后台逐账号串行刷新，用跨实例锁避免重复拉取，每轮结束后随机等待 30～45 分钟；失败或空清单保留旧结果。来源和配置 revision、凭据、代理及上一观测时间共同保护写入，令牌刷新及旧表单保留数据库最新白名单。来源通过请求顶层 `model_catalog: {source, revision}` 显式保存，观测状态由服务端维护在 `extra.model_catalog`；受限管理接口沿用 `accounts.models.write` 授权。批量修改模型转为自定义。
+
+按钮顺序为“同步上游模型 → 使用内置模型 → 清空白名单”。内置模型替换白名单，手动增删或清空转为自定义；人工别名映射始终保留且优先。映射与白名单都为空时沿用平台默认规则。界面显示来源、维护方式、最近成功时间及同步失败／等待状态。
+
 主要文件：
 
 - `backend/internal/service/upstream_models.go`
 - `backend/internal/service/upstream_models_openai_oauth.go`
 - `backend/internal/service/upstream_models_openai_oauth_test.go`
+- `backend/internal/service/account_model_catalog.go`
+- `backend/internal/service/openai_model_catalog_refresh.go`
+- `backend/internal/repository/account_model_catalog.go`
 - `frontend/src/components/account/ModelWhitelistSelector.vue`
 
 相关提交：[`e7773796`](https://github.com/CarterLeeAlt/sub2api/commit/e77737963b3f66a961dcb9ebd2dc428023fe5143)、[`ec4e3bc9`](https://github.com/CarterLeeAlt/sub2api/commit/ec4e3bc9cb4075b40b4c21a5b5b48538cc03a22f)、[`12d73937`](https://github.com/CarterLeeAlt/sub2api/commit/12d7393714d5750f13114e5b150173400abdf7bf)、[`bf11d250`](https://github.com/CarterLeeAlt/sub2api/commit/bf11d250908d1308bea8a10c8f323927c7b02da1)。

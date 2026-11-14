@@ -1665,6 +1665,9 @@
                 :platform="form.platform"
                 :sync-credentials="syncPreviewCredentials"
                 @upstream-synced="upstreamModelsPreviewed = true"
+                :automatic-catalog="automaticModelCatalogEligible"
+                :catalog-source="modelCatalogSource"
+                @catalog-source="modelCatalogSource = $event"
               />
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
@@ -2537,10 +2540,13 @@
               :platform="form.platform"
               :sync-credentials="syncPreviewCredentials"
               @upstream-synced="upstreamModelsPreviewed = true"
+              :automatic-catalog="automaticModelCatalogEligible"
+              :catalog-source="modelCatalogSource"
+              @catalog-source="modelCatalogSource = $event"
             />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0">{{
+                <span v-if="allowedModels.length === 0 && !(automaticModelCatalogEligible && modelCatalogSource === 'upstream')">{{
                 t('admin.accounts.supportsAllModels')
               }}</span>
             </p>
@@ -4166,6 +4172,7 @@ import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
 import OpenAIImageSizeTiersField from '@/components/account/OpenAIImageSizeTiersField.vue'
+import { supportsAutomaticModelCatalog, type ModelCatalogSource } from '@/components/account/modelCatalog'
 import {
   OPENAI_IMAGE_SIZE_TIERS,
   applyOpenAIImageSizeTiersToExtra,
@@ -4654,6 +4661,15 @@ const modelMappings = ref<ModelMapping[]>([])
 const openAICompactModelMappings = ref<ModelMapping[]>([])
 const modelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const allowedModels = ref<string[]>([])
+const modelCatalogSource = ref<ModelCatalogSource>('upstream')
+const automaticModelCatalogEligible = computed(() => form.platform === 'openai' && form.type === 'oauth' && !openaiPassthroughEnabled.value && !['agent_identity', 'codex_pat'].includes(oauthFlowRef.value?.inputMethod ?? ''))
+const modelCatalogForCreate = (credentials: Record<string, unknown>, extra?: Record<string, unknown>) => {
+  if (!supportsAutomaticModelCatalog({ platform: form.platform, type: form.type, credentials, extra, parent_account_id: undefined })) return undefined
+  const mapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
+  if (mapping) credentials.model_mapping = mapping
+  else delete credentials.model_mapping
+  return { source: modelCatalogSource.value, revision: '' }
+}
 const upstreamModelsPreviewed = ref(false)
 const DEFAULT_POOL_MODE_RETRY_COUNT = 3
 const MAX_POOL_MODE_RETRY_COUNT = 10
@@ -5110,8 +5126,8 @@ watch(
       adminAPI.tlsFingerprintProfiles.list()
         .then(profiles => { tlsFingerprintProfiles.value = profiles.map(p => ({ id: p.id, name: p.name })) })
         .catch(() => { tlsFingerprintProfiles.value = [] })
-      // Modal opened - fill related models
-      allowedModels.value = [...getModelsByPlatform(form.platform)]
+      // Automatic OAuth catalogs stay empty until the server's first observation.
+      allowedModels.value = automaticModelCatalogEligible.value ? [] : [...getModelsByPlatform(form.platform)]
       // Antigravity: 默认使用映射模式并填充默认映射
       if (form.platform === 'antigravity') {
         antigravityModelRestrictionMode.value = 'mapping'
@@ -5177,6 +5193,7 @@ watch(
     }
     // Clear model-related settings
     allowedModels.value = []
+    modelCatalogSource.value = 'upstream'
     upstreamModelsPreviewed.value = false
     modelMappings.value = []
     if (newPlatform === 'typesafe') {
@@ -5316,11 +5333,19 @@ const handleSelectGeminiOAuthType = (oauthType: 'code_assist' | 'google_one' | '
 watch(
   [modelRestrictionMode, () => form.platform],
   ([newMode]) => {
+    if (automaticModelCatalogEligible.value) return
     if (newMode === 'whitelist') {
       allowedModels.value = [...getModelsByPlatform(form.platform)]
     }
   }
 )
+
+watch([() => form.platform, () => form.type], () => {
+  if (automaticModelCatalogEligible.value) {
+    modelCatalogSource.value = 'upstream'
+    allowedModels.value = []
+  }
+})
 
 watch(
   [antigravityModelRestrictionMode, () => form.platform],
@@ -5589,6 +5614,7 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
 const submitCreateAccount = async (payload: CreateAccountRequest) => {
   submitting.value = true
   try {
+    payload.model_catalog = modelCatalogForCreate(payload.credentials, payload.extra)
     const account = await adminAPI.accounts.create(withAntigravityConfirmFlag(payload))
     const modelMapping = payload.credentials.model_mapping
     const hasConcreteMappedTarget = payload.type === 'apikey' &&
@@ -5597,7 +5623,7 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
       Object.values(modelMapping).some((target) =>
         typeof target === 'string' && target.trim() !== '' && !target.includes('*')
       )
-    if (upstreamModelsPreviewed.value || hasConcreteMappedTarget) {
+    if (payload.model_catalog?.source !== 'upstream' && (upstreamModelsPreviewed.value || hasConcreteMappedTarget)) {
       try {
         const result = await adminAPI.accounts.syncUpstreamModels(account.id)
         const warnings = result.warnings ?? []
@@ -5678,6 +5704,7 @@ const resetForm = () => {
   modelMappings.value = []
   openAICompactModelMappings.value = []
   modelRestrictionMode.value = 'whitelist'
+  modelCatalogSource.value = 'upstream'
   allowedModels.value = [...claudeModels] // Default fill related models
 
   antigravityModelRestrictionMode.value = 'mapping'
@@ -6716,6 +6743,7 @@ const handleOpenAIExchange = async (authCode: string) => {
 
     if (shouldCreateOpenAI) {
       await adminAPI.accounts.create({
+        model_catalog: modelCatalogForCreate(credentials, extra),
         name: form.name,
         notes: form.notes,
         platform: 'openai',
@@ -6824,6 +6852,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
   try {
     const extra = buildOpenAICodexImportExtra()
     const result = await adminAPI.accounts.importCodexSession({
+      model_catalog: isAgentIdentityImportContent(trimmed) ? undefined : modelCatalogForCreate(credentialExtras, extra),
       content: trimmed,
       name: form.name,
       notes: form.notes || null,
@@ -6997,6 +7026,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
 
         if (shouldCreateOpenAI) {
           await adminAPI.accounts.create({
+            model_catalog: modelCatalogForCreate(credentials, extra),
             name: accountName,
             notes: form.notes,
             platform: 'openai',

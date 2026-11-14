@@ -141,9 +141,10 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	}
 
 	cacheKey := OpenAITokenCacheKey(account)
+	forceRefresh := accountOpenAIUpstreamHealth(account).Kind == "auth_refresh_required"
 
 	// 1) Try cache first.
-	if p.tokenCache != nil {
+	if p.tokenCache != nil && !forceRefresh {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("openai_token_cache_hit", "account_id", account.ID)
 			return token, nil
@@ -156,7 +157,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 	// 2) Refresh if needed (pre-expiry skew).
 	expiresAt := account.GetCredentialAsTime("expires_at")
-	needsRefresh := !account.IsOpenAIPersonalAccessToken() && (expiresAt == nil || time.Until(*expiresAt) <= openAITokenRefreshSkew)
+	needsRefresh := !account.IsOpenAIPersonalAccessToken() && (forceRefresh || expiresAt == nil || time.Until(*expiresAt) <= openAITokenRefreshSkew)
 	if needsRefresh && strings.TrimSpace(account.GetOpenAIRefreshToken()) == "" {
 		if expiresAt != nil && !time.Now().Before(*expiresAt) {
 			const reason = "openai access_token expired and refresh_token is missing"

@@ -51,6 +51,16 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('prioritizes invalid authentication over residual rate-limit and overload timers', () => {
+    const wrapper = mount(AccountStatusIndicator, { props: { account: makeAccount({
+      platform: 'openai', status: 'error', error_message: 'revoked',
+      rate_limit_reset_at: '2099-01-01T00:00:00Z', overload_until: '2099-01-01T00:00:00Z',
+      extra: { openai_upstream_health: { kind: 'auth_invalid', message: 'revoked' } },
+    }) }, global: { stubs: { Icon: true } } })
+    expect(wrapper.find('.badge').text()).toBe('admin.accounts.openaiHealth.auth_invalid')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.rateLimitedAutoResume')
+    wrapper.unmount()
+  })
   it('Claude 5 系列模型限流时显示 Opus 和 Sonnet 的短别名', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {

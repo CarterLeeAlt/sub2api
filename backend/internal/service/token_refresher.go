@@ -107,6 +107,9 @@ func (r *OpenAITokenRefresher) NeedsRefresh(account *Account, refreshWindow time
 	if strings.TrimSpace(account.GetOpenAIRefreshToken()) == "" {
 		return false
 	}
+	if accountOpenAIUpstreamHealth(account).Kind == "auth_refresh_required" {
+		return true
+	}
 	expiresAt := account.GetCredentialAsTime("expires_at")
 	if expiresAt == nil {
 		return account.IsRateLimited()

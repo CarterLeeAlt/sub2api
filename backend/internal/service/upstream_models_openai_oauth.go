@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,14 +31,8 @@ type openAICodexManifestModel struct {
 // handling parity with the other platforms); otherwise the gateway's manifest
 // client remains the transport of record.
 //
-// Known limitation of the fallback transport: the half-initialized gateway
-// instance below only carries accountRepo. Account-auth failures (e.g. 401)
-// that reach handleCodexModelsManifestAccountAuthError →
-// handleOpenAIAccountUpstreamError deliberately skip every account-state side
-// effect because those are gated on rateLimitService != nil. This admin sync
-// path therefore never trips account circuit breakers; that responsibility
-// stays with the main request path, which runs on a fully initialized gateway
-// (httpUpstream configured, rateLimitService wired).
+// Both transports persist credential-scoped diagnostics through the same CAS
+// writer. The request snapshot prevents late failures from disabling new credentials.
 func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, []byte, error) {
 	credentialAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
@@ -62,6 +57,11 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			errorBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			if readErr != nil {
+				return nil, nil, newUpstreamModelSyncUpstreamError("Failed to read upstream error", readErr)
+			}
+			_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "models", resp.StatusCode, errorBody)
 			return nil, nil, &UpstreamModelSyncError{
 				Kind:       UpstreamModelSyncErrorUpstream,
 				Message:    fmt.Sprintf("Upstream model list request failed with HTTP %d", resp.StatusCode),
@@ -77,6 +77,7 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		if int64(len(body)) > bodyLimit {
 			return nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response is too large", fmt.Errorf("response exceeds %d bytes", bodyLimit))
 		}
+		_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "models", http.StatusOK, nil)
 	} else {
 		// FetchCodexModelsManifest already owns the ChatGPT Codex endpoint, request
 		// headers, account-id/FedRAMP handling, proxy behavior, Agent Identity auth,
@@ -88,22 +89,21 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		// Codex backend gates manifest entries by client_version (e.g. gpt-6 models
 		// only ship to >= 0.153.0), so pinning the compiled constant would freeze the
 		// synced catalog at whatever models shipped with that historical version.
-		// Half-initialized fallback transport: only accountRepo is injected.
-		// handleCodexModelsManifestAccountAuthError may still fire on a 401,
-		// but every account-state side effect inside
-		// handleOpenAIAccountUpstreamError is gated on rateLimitService != nil,
-		// so this path intentionally performs no account circuit breaking. The
-		// main gateway path (httpUpstream configured) owns that duty; injecting
-		// a full dependency graph here is deliberately avoided.
+		// Transport errors are classified here with the request's credential owner.
 		gateway := &OpenAIGatewayService{accountRepo: s.accountRepo}
 		manifest, err := gateway.FetchCodexModelsManifest(ctx, account, "", "")
 		if err != nil {
+			var upstreamErr *codexModelsManifestUpstreamError
+			if errors.As(err, &upstreamErr) {
+				_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "models", upstreamErr.statusCode, upstreamErr.body)
+			}
 			return nil, nil, newUpstreamModelSyncUpstreamError("Failed to fetch OpenAI Codex model list", err)
 		}
 		if manifest == nil || len(manifest.Body) == 0 {
 			return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 		}
 		body = manifest.Body
+		_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "models", http.StatusOK, nil)
 	}
 
 	if len(body) == 0 {

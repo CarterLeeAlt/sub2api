@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -43,8 +44,9 @@ import (
 //   - sql: 原生 SQL 执行器，用于复杂查询和批量操作
 //   - schedulerCache: 调度器缓存，用于在账号状态变更时同步快照
 type accountRepository struct {
-	client *dbent.Client // Ent ORM 客户端
-	sql    sqlExecutor   // 原生 SQL 执行接口
+	modelCatalogWake func()
+	client           *dbent.Client // Ent ORM 客户端
+	sql              sqlExecutor   // 原生 SQL 执行接口
 	// schedulerCache 用于在账号状态变更时主动同步快照到缓存，
 	// 确保粘性会话能及时感知账号不可用状态。
 	// Used to proactively sync account snapshot to cache when status changes,
@@ -169,12 +171,20 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &account.ID, nil, buildSchedulerGroupPayload(account.GroupIDs)); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account create failed: account=%d err=%v", account.ID, err)
 	}
+	if account.ModelCatalog().Source == "upstream" {
+		r.wakeModelCatalogAfterCommit(ctx)
+	}
 	return nil
 }
 
 func createAccountRecord(ctx context.Context, client *dbent.Client, account *service.Account) error {
 	if account == nil {
 		return service.ErrAccountNilInput
+	}
+	account.Extra = maps.Clone(account.Extra)
+	delete(account.Extra, service.OpenAIUpstreamHealthExtraKey)
+	if err := service.InitializeAccountModelCatalog(account); err != nil {
+		return err
 	}
 
 	builder := client.Account.Create().
@@ -239,6 +249,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	account.ID = created.ID
 	account.CreatedAt = created.CreatedAt
 	account.UpdatedAt = created.UpdatedAt
+	account.ModelCatalogEdit = nil
 	return nil
 }
 
@@ -296,6 +307,9 @@ func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+	}
+	if account.ModelCatalog().Source == "upstream" {
+		r.wakeModelCatalogAfterCommit(ctx)
 	}
 	return nil
 }
@@ -364,6 +378,10 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 	if err != nil {
 		return nil, err
 	}
+	parentHealth, err := r.loadOpenAIParentHealth(ctx, entAccounts)
+	if err != nil {
+		return nil, err
+	}
 
 	outByID := make(map[int64]*service.Account, len(entAccounts))
 	for _, entAcc := range entAccounts {
@@ -371,6 +389,7 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 		if out == nil {
 			continue
 		}
+		projectOpenAIParentHealth(out, parentHealth)
 
 		// Prefer the preloaded proxy edge when available.
 		if entAcc.Edges.Proxy != nil {
@@ -550,6 +569,10 @@ func (r *accountRepository) updateAccount(
 	}
 
 	account.UpdatedAt = updated.UpdatedAt
+	account.ModelCatalogEdit = nil
+	if state := account.ModelCatalog(); state.Source == "upstream" && state.NextSyncAt == "" {
+		r.wakeModelCatalogAfterCommit(baseCtx)
+	}
 	// 普通账号编辑（如 model_mapping / credentials）也需要立即刷新单账号快照，
 	// 否则网关在 outbox worker 延迟或异常时仍可能读到旧配置。
 	if contextTx == nil {
@@ -716,7 +739,8 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'opencode_go_usage_auto_refresh',
 			extra -> 'opencode_go_usage_snapshot',
 			extra -> 'grok_observed_models',
-			extra -> 'upstream_model_metadata'
+			extra -> 'upstream_model_metadata',
+			credentials, extra -> 'model_catalog', extra -> 'openai_upstream_health'
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -747,6 +771,9 @@ func lockAndMergeAccountProbeExtra(
 		currentOpenCodeSnapshot        []byte
 		currentGrokObservedModels      []byte
 		currentUpstreamModelMetadata   []byte
+		currentCredentials             []byte
+		currentModelCatalog            []byte
+		currentOpenAIHealth            []byte
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -763,6 +790,9 @@ func lockAndMergeAccountProbeExtra(
 		&currentOpenCodeSnapshot,
 		&currentGrokObservedModels,
 		&currentUpstreamModelMetadata,
+		&currentCredentials,
+		&currentModelCatalog,
+		&currentOpenAIHealth,
 	); err != nil {
 		return nil, err
 	}
@@ -891,7 +921,38 @@ func lockAndMergeAccountProbeExtra(
 			extra[key] = value
 		}
 	}
-	return extra, nil
+	current := &service.Account{Extra: map[string]any{}}
+	if len(currentCredentials) > 0 {
+		if err := json.Unmarshal(currentCredentials, &current.Credentials); err != nil {
+			return nil, err
+		}
+	}
+	if value, ok, err := decodeAccountExtraJSON(currentModelCatalog); err != nil {
+		return nil, err
+	} else if ok {
+		current.Extra[service.AccountModelCatalogExtraKey] = value
+	}
+	account.Extra = extra
+	delete(account.Extra, service.OpenAIUpstreamHealthExtraKey)
+	if len(currentOpenAIHealth) > 0 && string(currentOpenAIHealth) != "null" && current.GetCredential("access_token") == account.GetCredential("access_token") && current.GetCredential("refresh_token") == account.GetCredential("refresh_token") {
+		var health service.OpenAIUpstreamHealth
+		if err := json.Unmarshal(currentOpenAIHealth, &health); err != nil {
+			return nil, err
+		}
+		var value map[string]any
+		if err := json.Unmarshal(currentOpenAIHealth, &value); err != nil {
+			return nil, err
+		}
+		account.Extra[service.OpenAIUpstreamHealthExtraKey] = value
+		if health.Kind == "auth_invalid" {
+			account.Status = service.StatusError
+			account.ErrorMessage = health.Message
+		}
+	}
+	if err := service.MergeAccountModelCatalog(account, current); err != nil {
+		return nil, err
+	}
+	return account.Extra, nil
 }
 
 func decodeAccountExtraJSON(raw []byte) (any, bool, error) {
@@ -931,8 +992,19 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
 		SET
-			credentials = $1::jsonb,
+			credentials = CASE WHEN extra ? 'model_catalog'
+				THEN ($1::jsonb - 'model_mapping') || CASE WHEN credentials ? 'model_mapping'
+					THEN jsonb_build_object('model_mapping', credentials->'model_mapping') ELSE '{}'::jsonb END
+				ELSE $1::jsonb END,
+			temp_unschedulable_until=CASE WHEN platform='openai' AND extra->'openai_upstream_health'->>'kind'='auth_refresh_required'
+				AND temp_unschedulable_reason='OAuth 401: ' || (extra->'openai_upstream_health'->>'message')
+				AND credentials->'access_token' IS DISTINCT FROM $1::jsonb->'access_token' THEN NULL ELSE temp_unschedulable_until END,
+			temp_unschedulable_reason=CASE WHEN platform='openai' AND extra->'openai_upstream_health'->>'kind'='auth_refresh_required'
+				AND temp_unschedulable_reason='OAuth 401: ' || (extra->'openai_upstream_health'->>'message')
+				AND credentials->'access_token' IS DISTINCT FROM $1::jsonb->'access_token' THEN NULL ELSE temp_unschedulable_reason END,
 			extra = CASE
+				WHEN platform='openai' AND type='oauth' AND (credentials->'access_token' IS DISTINCT FROM $1::jsonb->'access_token' OR credentials->'refresh_token' IS DISTINCT FROM $1::jsonb->'refresh_token')
+				THEN COALESCE(extra,'{}'::jsonb)-'openai_upstream_health'
 				-- 正确性依赖（非防御）：OpenCode 分支必须先于 Ollama 分支求值。两分支
 				-- 的 WHEN 并不互斥：Ollama 分支的守卫是宽谓词——NOT(ollamaMatch(old)
 				-- AND ollamaMatch(new)) 在旧行不匹配 ollama.com 基址时恒真，且两侧
@@ -3307,7 +3379,9 @@ func (r *accountRepository) updateExtraGuarded(ctx context.Context, id int64, up
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
 		return scoped.updateExtraGuarded(ctx, id, updates, notNewerThan)
 	}
-	updates = stripCodexFingerprintSeedFromExtraUpdate(updates)
+	updates = maps.Clone(stripCodexFingerprintSeedFromExtraUpdate(updates))
+	delete(updates, service.AccountModelCatalogExtraKey)
+	delete(updates, service.OpenAIUpstreamHealthExtraKey)
 	if len(updates) == 0 {
 		return true, false, nil
 	}
@@ -3640,7 +3714,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	updates.Extra = stripCodexFingerprintSeedFromExtraUpdate(updates.Extra)
+	updates.Extra = maps.Clone(stripCodexFingerprintSeedFromExtraUpdate(updates.Extra))
+	delete(updates.Extra, service.AccountModelCatalogExtraKey)
+	delete(updates.Extra, service.OpenAIUpstreamHealthExtraKey)
 
 	setClauses := make([]string, 0, 8)
 	args := make([]any, 0, 8)
@@ -3760,7 +3836,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 				" AND COALESCE(btrim("+credentialPlaceholder+"::jsonb ->> 'account_mode') <> 'zen', true) IS NOT TRUE")
 	}
 
-	if len(updates.Extra) > 0 || len(ollamaGroupIdentityChanges) > 0 || len(opencodeGroupIdentityChanges) > 0 || ollamaProxyIdentityChanged != "" || updates.EnsureCodexFingerprintSeed {
+	_, modelMappingEdited := updates.Credentials["model_mapping"]
+	_, accessTokenEdited := updates.Credentials["access_token"]
+	if len(updates.Extra) > 0 || len(ollamaGroupIdentityChanges) > 0 || len(opencodeGroupIdentityChanges) > 0 || ollamaProxyIdentityChanged != "" || updates.EnsureCodexFingerprintSeed || modelMappingEdited || accessTokenEdited {
 		extraExpression := "COALESCE(extra, '{}'::jsonb)"
 		if len(updates.Extra) > 0 {
 			payload, err := json.Marshal(updates.Extra)
@@ -3842,6 +3920,12 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 		if updates.EnsureCodexFingerprintSeed {
 			extraExpression = ensureCodexFingerprintSeedSQL(extraExpression)
+		}
+		if _, changed := updates.Credentials["access_token"]; changed {
+			extraExpression = "CASE WHEN platform='openai' AND credentials->'access_token' IS DISTINCT FROM " + credentialPlaceholder + "::jsonb->'access_token' THEN (" + extraExpression + ")-'openai_upstream_health' ELSE (" + extraExpression + ") END"
+		}
+		if modelMappingEdited {
+			extraExpression = "CASE WHEN extra ? 'model_catalog' THEN jsonb_set((" + extraExpression + "), '{model_catalog}', jsonb_build_object('source','custom','revision',gen_random_uuid()::text,'ready',true)) ELSE (" + extraExpression + ") END"
 		}
 		setClauses = append(setClauses, "extra = "+extraExpression)
 	}
@@ -4025,6 +4109,10 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 		return nil, err
 	}
 
+	parentHealth, err := r.loadOpenAIParentHealth(ctx, accounts)
+	if err != nil {
+		return nil, err
+	}
 	outAccounts := make([]service.Account, 0, len(accounts))
 	for _, acc := range accounts {
 		out := accountEntityToService(acc)
@@ -4036,6 +4124,7 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 				out.Proxy = proxy
 			}
 		}
+		projectOpenAIParentHealth(out, parentHealth)
 		out.ProxyFallbackOriginID = acc.ProxyFallbackOriginID
 		if acc.ProxyFallbackOriginID != nil {
 			if op, ok := proxyMap[*acc.ProxyFallbackOriginID]; ok && op != nil {

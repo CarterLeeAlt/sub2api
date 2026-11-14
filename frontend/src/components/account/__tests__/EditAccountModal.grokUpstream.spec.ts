@@ -1444,7 +1444,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
 
       await wrapper.findAll('button').find(button => button.text().includes('admin.accounts.fillRelatedModels'))!.trigger('click')
       const filled = selector.props('modelValue') as string[]
-      expect(filled).toContain('listed-model')
+      expect(filled).not.toContain('listed-model')
       expect(filled.length).toBeGreaterThan(1)
 
       await wrapper.findAll('button').find(button => button.text().includes('admin.accounts.clearAllModels'))!.trigger('click')

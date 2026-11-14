@@ -27,6 +27,20 @@ describe('API Client', () => {
 
   // --- 请求拦截器 ---
 
+  it('does not refresh or clear the admin session for upstream account authentication errors', async () => {
+    localStorage.setItem('auth_token', 'admin-token')
+    localStorage.setItem('refresh_token', 'admin-refresh')
+    const adapter = vi.fn().mockImplementation(config => Promise.reject({
+      config, message: 'upstream authentication failed',
+      response: { status: 401, headers: {}, data: { code: 'OPENAI_UPSTREAM_AUTH_INVALID', message: 'revoked' } },
+    }))
+    apiClient.defaults.adapter = adapter
+    await expect(apiClient.post('/admin/openai/accounts/7/quota/refresh')).rejects.toMatchObject({ code: 'OPENAI_UPSTREAM_AUTH_INVALID', message: 'revoked' })
+    expect(adapter).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('auth_token')).toBe('admin-token')
+    expect(localStorage.getItem('refresh_token')).toBe('admin-refresh')
+  })
+
   describe('请求拦截器', () => {
     it('规范化相对 API base，避免在回调页拼出相对 v1 路径', async () => {
       vi.resetModules()

@@ -124,6 +124,7 @@
 
     <!-- OpenAI OAuth accounts: single source from /usage API -->
     <template v-else-if="account.platform === 'openai' && account.type === 'oauth'">
+      <p v-if="usageInfo?.error || error || account.extra?.openai_upstream_health" class="max-w-[250px] text-[11px] text-amber-700 dark:text-amber-400" :title="usageInfo?.error || error || ''">{{ t('admin.accounts.openaiHealth.historical') }}</p>
       <div v-if="hasOpenAIUsageFallback" class="space-y-1">
         <UsageProgressBar
           v-if="usageInfo?.five_hour"
@@ -1544,12 +1545,18 @@ const refreshAccountStateAfterUsage = async () => {
   const hasRecoverableQuota429 = Boolean(
     props.account.rate_limit_reset_at && quota429State?.source === 'openai_codex_quota_429'
   )
-  // Only state sources that this usage refresh can recover need a canonical
-  // row follow-up. Generic 429s keep their existing behavior.
-  if (!props.account.temp_unschedulable_until && !hasRecoverableQuota429) return
+  if (props.account.platform !== 'openai' && !props.account.temp_unschedulable_until && !hasRecoverableQuota429) return
+  const accountID = props.account.id
   try {
-    const updated = await adminAPI.accounts.getById(props.account.id)
-    if (!updated.temp_unschedulable_until && !updated.rate_limit_reset_at) {
+    const updated = await adminAPI.accounts.getById(accountID)
+    if (updated?.id !== accountID || props.account.id !== accountID) return
+    const previousHealth = props.account.extra?.openai_upstream_health as { kind?: string; message?: string } | undefined
+    const nextHealth = updated.extra?.openai_upstream_health as { kind?: string; message?: string } | undefined
+    const stateChanged = updated.status !== props.account.status || updated.error_message !== props.account.error_message ||
+      previousHealth?.kind !== nextHealth?.kind || previousHealth?.message !== nextHealth?.message ||
+      Boolean(props.account.temp_unschedulable_until && !updated.temp_unschedulable_until) ||
+      Boolean(props.account.rate_limit_reset_at && !updated.rate_limit_reset_at)
+    if (stateChanged) {
       emit('account-updated', updated)
     }
   } catch (e) {
@@ -1585,7 +1592,6 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
     if (!unmounted.value) {
       usageInfo.value = result
       _usageCache.set(props.account.id, { data: result, ts: Date.now() })
-      await refreshAccountStateAfterUsage()
     }
   } catch (e: any) {
     if (!unmounted.value) {
@@ -1593,6 +1599,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
       console.error('Failed to load usage:', e)
     }
   } finally {
+    await refreshAccountStateAfterUsage()
     if (!unmounted.value) loading.value = false
   }
 }
@@ -1649,12 +1656,14 @@ const attachVisibilityObserver = () => {
 
 const loadActiveUsage = async () => {
   activeQueryLoading.value = true
+  error.value = null
   try {
     usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
-    await refreshAccountStateAfterUsage()
   } catch (e: any) {
+    error.value = e?.message || t('common.error')
     console.error('Failed to load active usage:', e)
   } finally {
+    await refreshAccountStateAfterUsage()
     activeQueryLoading.value = false
   }
 }

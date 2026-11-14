@@ -67,6 +67,13 @@ func scopedAccountFieldPermissions(fields map[string]json.RawMessage, create boo
 				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_INPUT", "禁止更改类型或平台")
 			}
 			continue
+		case "model_catalog":
+			var edit ModelCatalogEdit
+			if json.Unmarshal(raw, &edit) != nil || validateModelCatalogSource(edit.Source) != nil {
+				return nil, infraerrors.BadRequest("INVALID_MODEL_CATALOG_SOURCE", "模型来源格式无效")
+			}
+			permissions = append(permissions, "accounts.models.write")
+			continue
 		case "credentials":
 			var credentials map[string]json.RawMessage
 			if json.Unmarshal(raw, &credentials) != nil || len(credentials) == 0 {
@@ -155,22 +162,23 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 	}
 	if id == 0 {
 		var input struct {
-			ProxyID        *int64         `json:"proxy_id"`
-			ProxyMode      string         `json:"proxy_mode"`
-			RandomProxy    bool           `json:"random_proxy"`
-			Name           string         `json:"name"`
-			Notes          *string        `json:"notes"`
-			Extra          map[string]any `json:"extra"`
-			Platform       string         `json:"platform"`
-			Type           string         `json:"type"`
-			Credentials    map[string]any `json:"credentials"`
-			RateMultiplier *float64       `json:"rate_multiplier"`
-			GroupIDs       []int64        `json:"group_ids"`
-			Concurrency    int            `json:"concurrency"`
-			Priority       int            `json:"priority"`
-			LoadFactor     *int           `json:"load_factor"`
-			ExpiresAt      *int64         `json:"expires_at"`
-			AutoPause      *bool          `json:"auto_pause_on_expired"`
+			ModelCatalog   *ModelCatalogEdit `json:"model_catalog"`
+			ProxyID        *int64            `json:"proxy_id"`
+			ProxyMode      string            `json:"proxy_mode"`
+			RandomProxy    bool              `json:"random_proxy"`
+			Name           string            `json:"name"`
+			Notes          *string           `json:"notes"`
+			Extra          map[string]any    `json:"extra"`
+			Platform       string            `json:"platform"`
+			Type           string            `json:"type"`
+			Credentials    map[string]any    `json:"credentials"`
+			RateMultiplier *float64          `json:"rate_multiplier"`
+			GroupIDs       []int64           `json:"group_ids"`
+			Concurrency    int               `json:"concurrency"`
+			Priority       int               `json:"priority"`
+			LoadFactor     *int              `json:"load_factor"`
+			ExpiresAt      *int64            `json:"expires_at"`
+			AutoPause      *bool             `json:"auto_pause_on_expired"`
 		}
 		body, _ := json.Marshal(fields)
 		if err = json.Unmarshal(body, &input); err != nil {
@@ -209,7 +217,7 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		if e != nil {
 			return nil, e
 		}
-		return s.scopedAdminCreateTransaction(ctx, &CreateAccountInput{ProxyID: input.ProxyID, ProxyMode: proxyMode, Name: input.Name, Notes: input.Notes, Platform: input.Platform, Type: input.Type, Credentials: input.Credentials, Extra: input.Extra, RateMultiplier: input.RateMultiplier, GroupIDs: input.GroupIDs, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause, SkipDefaultGroupBind: true})
+		return s.scopedAdminCreateTransaction(ctx, &CreateAccountInput{ModelCatalog: input.ModelCatalog, ProxyID: input.ProxyID, ProxyMode: proxyMode, Name: input.Name, Notes: input.Notes, Platform: input.Platform, Type: input.Type, Credentials: input.Credentials, Extra: input.Extra, RateMultiplier: input.RateMultiplier, GroupIDs: input.GroupIDs, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause, SkipDefaultGroupBind: true})
 	}
 	result, err := s.scopedAdminTransaction(ctx, id, action == "accounts.delete", func(txctx context.Context) (*Account, error) {
 		a, e := s.accountRepo.GetByID(txctx, id)
@@ -260,21 +268,22 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 			return s.ClearAccountError(txctx, id)
 		}
 		var input struct {
-			ProxyID        *int64         `json:"proxy_id"`
-			ProxyMode      string         `json:"proxy_mode"`
-			RandomProxy    bool           `json:"random_proxy"`
-			Name           string         `json:"name"`
-			Notes          *string        `json:"notes"`
-			Credentials    map[string]any `json:"credentials"`
-			RateMultiplier *float64       `json:"rate_multiplier"`
-			Concurrency    *int           `json:"concurrency"`
-			Priority       *int           `json:"priority"`
-			LoadFactor     *int           `json:"load_factor"`
-			Status         string         `json:"status"`
-			GroupIDs       *[]int64       `json:"group_ids"`
-			ExpiresAt      *int64         `json:"expires_at"`
-			AutoPause      *bool          `json:"auto_pause_on_expired"`
-			Schedulable    *bool          `json:"schedulable"`
+			ModelCatalog   *ModelCatalogEdit `json:"model_catalog"`
+			ProxyID        *int64            `json:"proxy_id"`
+			ProxyMode      string            `json:"proxy_mode"`
+			RandomProxy    bool              `json:"random_proxy"`
+			Name           string            `json:"name"`
+			Notes          *string           `json:"notes"`
+			Credentials    map[string]any    `json:"credentials"`
+			RateMultiplier *float64          `json:"rate_multiplier"`
+			Concurrency    *int              `json:"concurrency"`
+			Priority       *int              `json:"priority"`
+			LoadFactor     *int              `json:"load_factor"`
+			Status         string            `json:"status"`
+			GroupIDs       *[]int64          `json:"group_ids"`
+			ExpiresAt      *int64            `json:"expires_at"`
+			AutoPause      *bool             `json:"auto_pause_on_expired"`
+			Schedulable    *bool             `json:"schedulable"`
 		}
 		body, _ := json.Marshal(fields)
 		if e = json.Unmarshal(body, &input); e != nil {
@@ -296,6 +305,9 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 			return nil, e
 		}
 		// 受限更新按已授权字段补丁合并，避免上游完整编辑语义删除未授予的连接配置。
+		if _, edited := input.Credentials["model_mapping"]; edited && input.ModelCatalog == nil && a.SupportsAutomaticModelCatalog() {
+			input.ModelCatalog = &ModelCatalogEdit{Source: "custom", Revision: a.ModelCatalog().Revision}
+		}
 		if input.Credentials != nil {
 			merged := maps.Clone(a.Credentials)
 			if merged == nil {
@@ -304,7 +316,7 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 			maps.Copy(merged, input.Credentials)
 			input.Credentials = merged
 		}
-		updated, e := s.UpdateAccount(txctx, id, &UpdateAccountInput{ProxyID: input.ProxyID, Name: input.Name, Notes: input.Notes, Credentials: input.Credentials, RateMultiplier: input.RateMultiplier, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, Status: input.Status, GroupIDs: input.GroupIDs, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause})
+		updated, e := s.UpdateAccount(txctx, id, &UpdateAccountInput{ModelCatalog: input.ModelCatalog, ProxyID: input.ProxyID, Name: input.Name, Notes: input.Notes, Credentials: input.Credentials, RateMultiplier: input.RateMultiplier, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, Status: input.Status, GroupIDs: input.GroupIDs, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause})
 		if e != nil {
 			return nil, e
 		}

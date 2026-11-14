@@ -133,7 +133,7 @@ const ModelWhitelistSelectorStub = defineComponent({
       default: undefined,
     },
   },
-  emits: ['update:modelValue', 'upstream-synced'],
+  emits: ['update:modelValue', 'upstream-synced', 'catalog-source'],
   template: `<button
     type="button"
     data-testid="model-whitelist-selector"
@@ -203,6 +203,25 @@ async function openCodexImportStep(toggleClicks = 0) {
 }
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
+  it('defaults a new OAuth import to upstream and saves an explicit manual selection', async () => {
+    const wrapper = await openCodexImportStep()
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    expect(importCodexSessionMock.mock.calls[0]?.[0]?.model_catalog).toEqual({ source: 'upstream', revision: '' })
+    wrapper.unmount()
+    const manual = mountModal()
+    await selectButtonByText(manual, 'OpenAI')
+    expect(manual.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([])
+    manual.getComponent(ModelWhitelistSelectorStub).vm.$emit('catalog-source', 'builtin')
+    manual.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', ['chosen'])
+    await manual.get('form#create-account-form input[type="text"]').setValue('Manual import')
+    await manual.get('form#create-account-form').trigger('submit.prevent')
+    await manual.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    expect(importCodexSessionMock.mock.calls[1]?.[0]?.model_catalog).toEqual({ source: 'builtin', revision: '' })
+    expect(importCodexSessionMock.mock.calls[1]?.[0]?.credential_extras?.model_mapping).toEqual({ chosen: 'chosen' })
+    manual.unmount()
+  })
   beforeEach(() => {
     authIsSimpleMode.value = true
     createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'openai', type: 'apikey' })

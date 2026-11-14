@@ -978,8 +978,9 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		if resp.StatusCode == http.StatusTooManyRequests {
 			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
 		}
-		// 401 Unauthorized: 标记账号为永久错误
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
+		if credentialAccount.IsOpenAIOAuth() {
+			_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "account_test", resp.StatusCode, body)
+		} else if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
 			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
@@ -987,6 +988,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 
 	// Process SSE stream
+	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "account_test", http.StatusOK, nil)
 	return s.processOpenAIStream(c, resp.Body)
 }
 
@@ -2331,7 +2333,9 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
+		if credentialAccount.IsOpenAIOAuth() {
+			_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "compact_test", resp.StatusCode, body)
+		} else if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
 			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
@@ -2343,6 +2347,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	}
 
 	s.sendEvent(c, TestEvent{Type: "content", Text: "Compact probe succeeded (native remote compaction v2)"})
+	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "compact_test", http.StatusOK, nil)
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
 }
@@ -3230,6 +3235,7 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		body = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, credentialAccount, body)
+		_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "image_test", resp.StatusCode, body)
 		message := strings.TrimSpace(extractUpstreamErrorMessage(body))
 		if message == "" {
 			message = fmt.Sprintf("Image upstream returned %d", resp.StatusCode)

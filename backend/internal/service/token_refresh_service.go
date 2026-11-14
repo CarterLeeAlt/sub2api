@@ -986,7 +986,9 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		if isNonRetryableRefreshError(err) {
 			errorMsg := "Token refresh failed (non-retryable): " + logredact.RedactText(err.Error())
 			isGrokOAuth := account.IsGrokOAuth()
-			if !isGrokOAuth {
+			openAIHealthRepo, conditionalOpenAI := s.accountRepo.(OpenAIUpstreamHealthRepository)
+			conditionalOpenAI = conditionalOpenAI && account.IsOpenAIOAuth() && !account.IsOpenAIAgentIdentity()
+			if !isGrokOAuth && !conditionalOpenAI {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
 			}
 			s.clearAntigravityForceTokenRefresh(ctx, account, "non_retryable")
@@ -1011,6 +1013,11 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 						return errRefreshSkipped
 					}
 				}
+			} else if conditionalOpenAI {
+				persistentlyBlocked, setErr = openAIHealthRepo.SaveOpenAIUpstreamHealth(ctx, account, OpenAIUpstreamHealth{Kind: "auth_invalid", Source: "token_refresh", Message: errorMsg, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+				if setErr == nil && !persistentlyBlocked {
+					return errRefreshSkipped
+				}
 			} else {
 				setErr = s.accountRepo.SetError(ctx, account.ID, errorMsg)
 				persistentlyBlocked = setErr == nil
@@ -1025,7 +1032,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 						err: fmt.Errorf("failed to conditionally persist Grok OAuth refresh failure: %w", setErr),
 					}
 				}
-			} else if isGrokOAuth && persistentlyBlocked {
+			} else if (isGrokOAuth || conditionalOpenAI) && persistentlyBlocked {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
 			}
 			cacheInvalidationFailed := false

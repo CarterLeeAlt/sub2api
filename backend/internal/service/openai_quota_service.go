@@ -109,6 +109,7 @@ type openAICreditsSnapshot struct {
 // Fields not relevant to the quota card are intentionally omitted to keep the
 // surface narrow; full upstream payload preservation is unnecessary.
 type OpenAIQuotaUsage struct {
+	Warning               *OpenAIUpstreamHealth        `json:"warning,omitempty"`
 	UserID                string                       `json:"user_id,omitempty"`
 	AccountID             string                       `json:"account_id,omitempty"`
 	Email                 string                       `json:"email,omitempty"`
@@ -226,6 +227,10 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 	if err != nil {
 		return nil, err
 	}
+	identity, err := captureOpenAIQuotaIdentity(ctx, s.accountRepo, accountID, accessToken, chatGPTAccountID, proxyURL, fedRAMP)
+	if err != nil {
+		return nil, err
+	}
 
 	client, err := s.privacyClientFactory(proxyURL)
 	if err != nil {
@@ -249,7 +254,7 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 			SetSuccessResult(&wirePayload).
 			Get(chatGPTUsageURL)
 		if err != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_REQUEST_FAILED", "upstream request failed: %v", err)
+			return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota", 0, []byte(`{"error":{"message":"Upstream network request failed"}}`))
 		}
 		if !resp.IsSuccessState() {
 			if agentIdentity && !recovered && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, []byte(resp.String())) {
@@ -262,7 +267,7 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 			status := resp.StatusCode
 			body := truncate(s.redactQuotaErrorBody(ctx, accountID, resp.String()), 240)
 			slog.Warn("openai_quota_query_failed", "account_id", accountID, "status", status, "body", body)
-			return nil, infraerrors.Newf(mapUpstreamStatus(status), "OPENAI_QUOTA_UPSTREAM_ERROR", "upstream returned %d: %s", status, body)
+			return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota", status, resp.Bytes())
 		}
 		break
 	}
@@ -270,6 +275,7 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 	if !payload.RateLimitPresent {
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_UPSTREAM_INVALID_RESPONSE", "upstream response omitted required rate_limit field")
 	}
+	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota", http.StatusOK, nil)
 
 	payload.FetchedAt = time.Now().Unix()
 	if !includeResetCreditDetails {
@@ -278,7 +284,14 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 	if !s.canUseResetCredits(ctx, accountID) {
 		return &payload, nil
 	}
-	details := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
+	details, detailsErr := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID, identity)
+	if detailsErr != nil {
+		kind := openAIHealthErrorKind(detailsErr)
+		if kind == "auth_invalid" || kind == "auth_refresh_required" {
+			return nil, detailsErr
+		}
+		payload.Warning = &OpenAIUpstreamHealth{Kind: kind, Source: "reset_credits", Message: detailsErr.Error()}
+	}
 	if details != nil {
 		hasDetailCount := details.AvailableCount != nil
 		if payload.RateLimitResetCredits == nil {
@@ -375,11 +388,11 @@ func (s *OpenAIQuotaService) cacheResetCreditsSnapshotAt(ctx context.Context, ac
 	return nil
 }
 
-func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client *req.Client, accessToken, chatGPTAccountID string, fedRAMP bool, accountID int64) *openAIRateLimitResetCreditDetails {
+func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client *req.Client, accessToken, chatGPTAccountID string, fedRAMP bool, accountID int64, identity *Account) (*openAIRateLimitResetCreditDetails, error) {
 	quotaHeaders, _, headerErr := s.buildCodexQuotaHeaders(ctx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 	if headerErr != nil {
 		slog.Warn("openai_quota_reset_credit_details_auth_failed", "account_id", accountID, "error", headerErr)
-		return nil
+		return nil, headerErr
 	}
 	resp, err := client.R().
 		SetContext(ctx).
@@ -387,24 +400,25 @@ func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client
 		Get(chatGPTRateLimitCreditsURL)
 	if err != nil {
 		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "error", err)
-		return nil
+		return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", 0, []byte(`{"error":{"message":"Reset credit details request failed"}}`))
 	}
 	if !resp.IsSuccessState() {
 		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "status", resp.StatusCode)
-		return nil
+		return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", resp.StatusCode, resp.Bytes())
 	}
+	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", http.StatusOK, nil)
 
 	details, err := parseOpenAIRateLimitResetCreditDetails(resp.Bytes())
 	if err != nil {
 		slog.Warn("openai_quota_reset_credit_details_parse_failed", "account_id", accountID, "error", err)
 		if details.AvailableCount == nil {
-			return nil
+			return nil, nil
 		}
 	}
 	if details.AvailableCount == nil && !details.CreditListPresent {
-		return nil
+		return nil, nil
 	}
-	return &details
+	return &details, nil
 }
 
 // ResetCredit consumes one rate_limit_reset_credit for the given OpenAI account.
@@ -448,6 +462,10 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 	if err != nil {
 		return nil, err
 	}
+	identity, err := captureOpenAIQuotaIdentity(ctx, s.accountRepo, accountID, accessToken, chatGPTAccountID, proxyURL, fedRAMP)
+	if err != nil {
+		return nil, err
+	}
 
 	client, err := s.privacyClientFactory(proxyURL)
 	if err != nil {
@@ -485,7 +503,7 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 			status := resp.StatusCode
 			body := truncate(s.redactQuotaErrorBody(callCtx, accountID, resp.String()), 240)
 			slog.Warn("openai_quota_reset_failed", "account_id", accountID, "status", status, "body", body)
-			return nil, infraerrors.Newf(mapUpstreamStatus(status), "OPENAI_QUOTA_RESET_UPSTREAM_ERROR", "upstream returned %d: %s", status, body)
+			return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota_reset", status, resp.Bytes())
 		}
 		break
 	}
@@ -577,6 +595,10 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 		}
 		accessToken, err = s.tokenProvider.GetAccessToken(ctx, account)
 		if err != nil {
+			if isNonRetryableRefreshError(err) && !isSharedProviderRefreshError(err) {
+				body, _ := json.Marshal(map[string]any{"error": map[string]string{"code": "token_invalidated", "message": err.Error()}})
+				return "", "", "", false, observeOpenAIUpstreamResponse(ctx, s.accountRepo, account, "token_refresh", http.StatusUnauthorized, body)
+			}
 			return "", "", "", false, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_TOKEN_UNAVAILABLE", "failed to acquire access token: %v", err)
 		}
 		if strings.TrimSpace(accessToken) == "" {
@@ -880,11 +902,11 @@ func clearAbsentCodexWindowExtra(updates map[string]any, window string) {
 // mapUpstreamStatus collapses upstream HTTP statuses into a stable set we
 // surface from the admin handler. 4xx upstream errors are surfaced as 502
 // (BadGateway) so callers can distinguish "your input is bad" (400) from
-// "upstream said no" (502); 401/403 are bubbled directly to hint at re-auth.
+// "upstream said no" (502). Upstream authentication must not invalidate the admin session.
 func mapUpstreamStatus(status int) int {
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return status
+		return http.StatusBadGateway
 	case status == http.StatusTooManyRequests:
 		return http.StatusTooManyRequests
 	case status >= 400 && status < 500:

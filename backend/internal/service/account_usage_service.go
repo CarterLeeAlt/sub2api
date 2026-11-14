@@ -816,6 +816,11 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 
 	applyExtraToUsage(usage, account.Extra, now)
+	if health := accountOpenAIUpstreamHealth(account); health.Kind != "" {
+		usage.Error = health.Message
+		usage.ErrorCode = health.Kind
+		usage.NeedsReauth = health.Kind == "auth_invalid"
+	}
 	// In production the quota service is authoritative.  Legacy Extra fields
 	// from before /wham/usage was introduced must not be rendered while either
 	// window's presence is still unknown (including transient probe failures).
@@ -843,6 +848,9 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 				quotaUsage, err = s.openAIQuotaService.QueryUsageWindows(ctx, account.ID)
 			}
 			if err == nil {
+				usage.Error = ""
+				usage.ErrorCode = ""
+				usage.NeedsReauth = false
 				// Order concurrent observations by response completion, not request
 				// start. A request that started earlier but returned later must not
 				// be discarded merely because the upstream call took longer.
@@ -853,6 +861,9 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 				}
 			} else {
 				allowThresholdRecovery = false
+				usage.Error = err.Error()
+				usage.ErrorCode = openAIHealthErrorKind(err)
+				usage.NeedsReauth = usage.ErrorCode == "auth_invalid"
 				slog.Warn("openai_codex_wham_snapshot_refresh_failed", "account_id", account.ID, "error", err)
 			}
 		}

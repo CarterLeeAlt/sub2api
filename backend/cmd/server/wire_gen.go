@@ -362,7 +362,11 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, geminiCachedContentService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, balanceNotifyService, digestSessionStore, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openAIQuotaSnapshotRefreshService, openCodeGoUsageService, auditLogService, promptService, pluginManager)
+	openAIModelCatalogRefreshService, err := service.ProvideOpenAIModelCatalogRefreshService(accountRepository, adminAccountRepository, accountTestService, leaderLockCache)
+	if err != nil {
+		return nil, err
+	}
+	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, geminiCachedContentService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, balanceNotifyService, digestSessionStore, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openAIQuotaSnapshotRefreshService, openAIModelCatalogRefreshService, openCodeGoUsageService, auditLogService, promptService, pluginManager)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -447,6 +451,7 @@ func provideCleanup(
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	openAIQuotaSnapshotRefresh *service.OpenAIQuotaSnapshotRefreshService,
+	openAIModelCatalogRefresh *service.OpenAIModelCatalogRefreshService,
 	opencodeGoUsage *service.OpenCodeGoUsageService,
 	auditLog *service.AuditLogService,
 	promptAudit *securityaudit.PromptService,
@@ -462,6 +467,12 @@ func provideCleanup(
 		}
 
 		parallelSteps := []cleanupStep{
+			{"OpenAIModelCatalogRefreshService", func() error {
+				if openAIModelCatalogRefresh != nil {
+					openAIModelCatalogRefresh.Stop()
+				}
+				return nil
+			}},
 			{"OpenAIQuotaSnapshotRefreshService", func() error {
 				if openAIQuotaSnapshotRefresh != nil {
 					openAIQuotaSnapshotRefresh.Stop()

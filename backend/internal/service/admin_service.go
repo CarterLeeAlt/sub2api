@@ -402,6 +402,7 @@ type UpdateGroupInput struct {
 }
 
 type CreateAccountInput struct {
+	ModelCatalog       *ModelCatalogEdit
 	ProxyMode          string // 受限写入在验权后选择代理。
 	Name               string
 	Notes              *string
@@ -438,6 +439,7 @@ type ShadowOptions struct {
 }
 
 type UpdateAccountInput struct {
+	ModelCatalog          *ModelCatalogEdit
 	ProxyMode             string // 受限写入在验权后选择代理。
 	Name                  string
 	Notes                 *string

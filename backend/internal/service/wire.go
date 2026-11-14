@@ -233,6 +233,22 @@ func ProvideOpenAIQuotaSnapshotRefreshService(
 	return service, nil
 }
 
+func ProvideOpenAIModelCatalogRefreshService(repo AccountRepository, adminRepo AdminAccountRepository, reader *AccountTestService, locks LeaderLockCache) (*OpenAIModelCatalogRefreshService, error) {
+	store, ok := repo.(AccountModelCatalogRepository)
+	if !ok {
+		return nil, fmt.Errorf("account repository does not support model catalog refresh")
+	}
+	svc := NewOpenAIModelCatalogRefreshService(store, reader, locks)
+	store.SetModelCatalogWake(svc.Wake)
+	adminStore, ok := adminRepo.(AccountModelCatalogRepository)
+	if !ok {
+		return nil, fmt.Errorf("admin account repository does not support model catalog refresh")
+	}
+	adminStore.SetModelCatalogWake(svc.Wake)
+	svc.Start()
+	return svc, nil
+}
+
 func ProvideAccountUsageService(
 	accountRepo AccountRepository,
 	usageLogRepo UsageLogRepository,
@@ -928,6 +944,7 @@ var ProviderSet = wire.NewSet(
 	ProvideOpenAITokenProvider,
 	ProvideOpenAIQuotaService,
 	ProvideOpenAIQuotaSnapshotRefreshService,
+	ProvideOpenAIModelCatalogRefreshService,
 	ProvideGrokQuotaService,
 	ProvideCNProviderQuotaService,
 	ProvideCNProviderBalanceService,

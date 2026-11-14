@@ -1253,7 +1253,7 @@ func filterSchedulerCredentials(credentials map[string]any) map[string]any {
 		// Gemini 显式缓存的候选过滤（GeminiExplicitCacheExclusions）读本投影判定账号是否支持显式缓存：
 		// 官方地址、Vertex 认证方式与上游网关的显式缓存声明。缺这几个键时只能按类型粗筛，
 		// 不支持的账号要逐个选中后才被剔除。
-		"base_url", "auth_mode", service.GeminiExplicitCacheUpstreamCredentialKey, service.GeminiExplicitCacheUpstreamMaxTTLCredentialKey}
+		"base_url", "auth_mode", "openai_auth_mode", service.GeminiExplicitCacheUpstreamCredentialKey, service.GeminiExplicitCacheUpstreamMaxTTLCredentialKey}
 	filtered := make(map[string]any)
 	for _, key := range keys {
 		if value, ok := credentials[key]; ok && value != nil {
@@ -1317,6 +1317,8 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// model_not_supported —— 转发阶段却仍按透传工作，表现为"单独测账号能通、
 		// 走网关报 no available accounts"。
 		"openai_passthrough",
+		service.AccountModelCatalogExtraKey,
+		service.OpenAIUpstreamHealthExtraKey,
 		"openai_oauth_passthrough",
 		// 生图尺寸档位在候选过滤阶段按本投影判定，裁掉后受限账号会接到不允许的档位。
 		service.AccountExtraOpenAIImageSizeTiers,

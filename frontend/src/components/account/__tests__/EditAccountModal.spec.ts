@@ -81,7 +81,7 @@ const ModelWhitelistSelectorStub = defineComponent({
       default: () => []
     }
   },
-  emits: ['update:modelValue'],
+  emits: ['update:modelValue', 'catalog-source'],
   template: `
     <div>
       <button
@@ -346,6 +346,23 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
+  it('saves an explicit source and revision only after a model selection changes', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra.model_catalog = { source: 'upstream', revision: 'r1', ready: true }
+    account.credentials.model_mapping = { fresh: 'fresh', alias: 'manual' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]).not.toHaveProperty('model_catalog')
+    const selector = wrapper.getComponent(ModelWhitelistSelectorStub)
+    selector.vm.$emit('catalog-source', 'custom')
+    selector.vm.$emit('update:modelValue', [])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.model_catalog).toEqual({ source: 'custom', revision: 'r1' })
+    expect(updateAccountMock.mock.calls[1]?.[1]?.credentials?.model_mapping).toEqual({ alias: 'manual' })
+    wrapper.unmount()
+  })
   beforeEach(() => {
     authIsSimpleMode.value = true
   })

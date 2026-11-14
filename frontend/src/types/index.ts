@@ -1591,6 +1591,7 @@ export interface OpenAIResponsesState {
 }
 
 export interface CreateAccountRequest {
+  model_catalog?: { source: 'upstream' | 'builtin' | 'custom'; revision: string }
   name: string
   notes?: string | null
   platform: AccountPlatform
@@ -1610,6 +1611,7 @@ export interface CreateAccountRequest {
 }
 
 export interface UpdateAccountRequest {
+  model_catalog?: { source: 'upstream' | 'builtin' | 'custom'; revision: string }
   name?: string
   notes?: string | null
   type?: AccountType
@@ -1739,6 +1741,7 @@ export interface AdminDataImportResult {
 }
 
 export interface CodexSessionImportRequest {
+  model_catalog?: { source: 'upstream' | 'builtin' | 'custom'; revision: string }
   content?: string
   contents?: string[]
   name?: string

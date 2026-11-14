@@ -683,6 +683,8 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 	require.Equal(t, 1, usage.RateLimitResetCredits.AvailableCount)
 	require.Equal(t, 1, detailCalls)
 	require.Empty(t, usage.RateLimitResetCredits.Credits)
+	require.NotNil(t, usage.Warning)
+	require.Equal(t, "permission_denied", usage.Warning.Kind)
 
 	// Count-only responses remain useful and must be cached without inventing an
 	// expiration timestamp.

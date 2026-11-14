@@ -129,6 +129,7 @@ func provideCleanup(
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	openAIQuotaSnapshotRefresh *service.OpenAIQuotaSnapshotRefreshService,
+	openAIModelCatalogRefresh *service.OpenAIModelCatalogRefreshService,
 	opencodeGoUsage *service.OpenCodeGoUsageService,
 	auditLog *service.AuditLogService,
 	promptAudit *securityaudit.PromptService,
@@ -145,6 +146,12 @@ func provideCleanup(
 
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		parallelSteps := []cleanupStep{
+			{"OpenAIModelCatalogRefreshService", func() error {
+				if openAIModelCatalogRefresh != nil {
+					openAIModelCatalogRefresh.Stop()
+				}
+				return nil
+			}},
 			{"OpenAIQuotaSnapshotRefreshService", func() error {
 				if openAIQuotaSnapshotRefresh != nil {
 					openAIQuotaSnapshotRefresh.Stop()

@@ -22,6 +22,7 @@ import (
 )
 
 type Account struct {
+	ModelCatalogEdit        *ModelCatalogEdit `json:"-"`
 	ID                      int64
 	Name                    string
 	Notes                   *string
@@ -192,6 +193,9 @@ func (a *Account) EffectiveLoadFactor() int {
 }
 
 func (a *Account) IsSchedulable() bool {
+	if a.ModelCatalogPending() {
+		return false
+	}
 	if !a.IsActive() || !a.Schedulable {
 		return false
 	}

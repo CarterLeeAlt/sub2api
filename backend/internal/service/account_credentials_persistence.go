@@ -23,11 +23,24 @@ func persistAccountCredentials(ctx context.Context, repo AccountRepository, acco
 		return nil
 	}
 
+	previousToken := account.GetOpenAIAccessToken()
+	health := accountOpenAIUpstreamHealth(account)
 	account.Credentials = shallowCopyMap(credentials)
+	var err error
 	if updater, ok := any(repo).(accountCredentialsUpdater); ok {
-		return updater.UpdateCredentials(ctx, account.ID, account.Credentials)
+		err = updater.UpdateCredentials(ctx, account.ID, account.Credentials)
+	} else {
+		err = repo.Update(ctx, account)
 	}
-	return repo.Update(ctx, account)
+	if err == nil && account.IsOpenAIOAuth() && previousToken != account.GetOpenAIAccessToken() {
+		account.Extra = shallowCopyMap(account.Extra)
+		delete(account.Extra, OpenAIUpstreamHealthExtraKey)
+		if health.Kind == "auth_refresh_required" && account.TempUnschedulableReason == "OAuth 401: "+health.Message {
+			account.TempUnschedulableUntil = nil
+			account.TempUnschedulableReason = ""
+		}
+	}
+	return err
 }
 
 // sparkShadowAllowedCredentialKeys 是 spark 影子账号唯一可写的凭据键集合(仅模型映射)。

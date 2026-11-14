@@ -924,7 +924,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		}
 		// OpenAI: token_invalidated / token_revoked 表示 token 被永久作废（非过期），直接标记 error
 		openai401Code := extractUpstreamErrorCode(responseBody)
-		if authAccount.Platform == PlatformOpenAI && (openai401Code == "token_invalidated" || openai401Code == "token_revoked") {
+		if authAccount.Platform == PlatformOpenAI && (openai401Code == "token_invalidated" || openai401Code == "token_revoked" || strings.Contains(strings.ToLower(upstreamMsg), "invalidated oauth token")) {
 			msg := "Token revoked (401): account authentication permanently revoked"
 			if upstreamMsg != "" {
 				msg = "Token revoked (401): " + upstreamMsg

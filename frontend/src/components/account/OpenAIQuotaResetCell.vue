@@ -76,7 +76,7 @@
         {{ t('admin.accounts.openaiQuotaReset.updatedAt', { time: formatResetCreditExpiry(cachedSnapshotFetchedAt, 'short') }) }}
       </span>
       <span
-        v-if="cachedSnapshotStale"
+        v-if="cachedSnapshotStale && !healthFailure && !error"
         class="rounded bg-amber-50 px-1 py-0.5 font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
         data-testid="reset-credit-cache-stale"
       >
@@ -84,7 +84,7 @@
       </span>
     </div>
 
-    <div v-if="primaryResetCreditExpiry && !patResetCreditsBlocked" class="space-y-1">
+    <div v-if="primaryResetCreditExpiry && !patResetCreditsBlocked && !healthFailure" class="space-y-1">
       <div class="flex flex-wrap items-center gap-1">
         <span
           class="inline-flex max-w-full items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 tabular-nums dark:bg-dark-800 dark:text-gray-300"
@@ -125,13 +125,11 @@
     </div>
 
     <!-- Error / success feedback -->
-    <div
-      v-if="error"
-      class="text-[10px] text-red-600 dark:text-red-400"
-      :title="error"
-    >
-      {{ truncatedError }}
-    </div>
+    <details v-if="healthFailure || error" class="max-w-[280px] text-[11px] text-red-600 dark:text-red-400" data-testid="openai-health-error">
+      <summary class="cursor-pointer">{{ t(openAIHealthLabel(healthFailure?.kind || errorKind)) }}</summary>
+      <p class="mt-1 whitespace-pre-wrap break-words">{{ healthFailure?.message || error }}</p>
+      <p v-if="cachedSnapshotFetchedAt">{{ t('admin.accounts.openaiHealth.historical') }}</p>
+    </details>
     <div
       v-else-if="resetWarning"
       class="text-[10px] text-amber-600 dark:text-amber-400"
@@ -170,6 +168,8 @@ import {
   type OpenAIQuotaResetResult
 } from '@/api/admin/accounts'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import { accountsAPI } from '@/api/admin/accounts'
+import { openAIHealth, openAIErrorKind, openAIHealthLabel } from './openaiHealth'
 
 const props = defineProps<{
   account: Account
@@ -200,6 +200,8 @@ const patResetCreditsBlocked = computed(() =>
 const loading = ref(false)
 const resetting = ref(false)
 const error = ref<string | null>(null)
+const errorKind = ref('request_failed')
+const healthFailure = computed(() => openAIHealth(props.account))
 const data = ref<OpenAIQuotaUsage | null>(null)
 const resetMessage = ref<string | null>(null)
 const resetWarning = ref<string | null>(null)
@@ -300,7 +302,7 @@ const hasAuthoritativeResetCreditCount = (usage: OpenAIQuotaUsage | null): boole
   return typeof count === 'number' && Number.isFinite(count) && count >= 0
 }
 
-const hasResetCreditCount = computed(() => hasAuthoritativeResetCreditCount(data.value))
+const hasResetCreditCount = computed(() => !healthFailure.value && hasAuthoritativeResetCreditCount(data.value))
 const availableResetCount = computed(() => data.value?.rate_limit_reset_credits?.available_count ?? 0)
 const resetCreditExpirations = computed(() =>
   (data.value?.rate_limit_reset_credits?.credits ?? [])
@@ -326,6 +328,7 @@ const resetCreditDetailsToggleLabel = computed(() => {
 })
 
 const resetButtonTitle = computed(() => {
+  if (healthFailure.value) return t(openAIHealthLabel(healthFailure.value.kind))
   if (patResetCreditsBlocked.value) return t('admin.accounts.openaiQuotaReset.patDisabledTooltip')
   if (isShadow.value) return t('admin.accounts.openaiQuotaReset.resetTooltipShadow')
   if (!hasResetCreditCount.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNeedQuery')
@@ -342,10 +345,12 @@ const countButtonTitle = computed(() => {
   return t('admin.accounts.openaiQuotaReset.countTooltipRefresh')
 })
 
-const truncatedError = computed(() => {
-  if (!error.value) return ''
-  return error.value.length > 80 ? `${error.value.slice(0, 80)}…` : error.value
-})
+const refreshCanonicalAccount = async (accountID: number) => {
+  try {
+    const updated = await accountsAPI.getById(accountID)
+    if (props.account.id === accountID && updated?.id === accountID) emit('account-updated', updated)
+  } catch { /* Keep the operation result when the row refresh is unavailable. */ }
+}
 
 const getResetCreditExpiryTime = (value: string): number => {
   const time = new Date(value).getTime()
@@ -405,6 +410,7 @@ const handleQuery = async () => {
   const accountID = props.account.id
   loading.value = true
   error.value = null
+  errorKind.value = 'request_failed'
   resetMessage.value = null
   resetWarning.value = null
   showResetCreditDetails.value = false
@@ -414,13 +420,15 @@ const handleQuery = async () => {
     if (!hasAuthoritativeResetCreditCount(result)) {
       data.value = null
       if (cachedSnapshotFetchedAt.value) cachedSnapshotStale.value = true
-      error.value = t('admin.accounts.openaiQuotaReset.refreshCountUnavailable')
+      error.value = result.warning?.message || t('admin.accounts.openaiQuotaReset.refreshCountUnavailable')
+      errorKind.value = result.warning?.kind || 'request_failed'
       return
     }
     // The upstream read succeeded even when the snapshot write was rejected, so
     // the live count and expiration details are always adopted for this view.
     data.value = result
     markResetCreditDataFresh(result)
+    if (result.warning) { error.value=result.warning.message;errorKind.value=result.warning.kind }
     if (!result.cache_persisted) {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.refreshCachePersistFailed')
     }
@@ -432,7 +440,9 @@ const handleQuery = async () => {
     data.value = null
     if (cachedSnapshotFetchedAt.value) cachedSnapshotStale.value = true
     error.value = extractErrorMessage(e)
+    errorKind.value = openAIErrorKind(e)
   } finally {
+    await refreshCanonicalAccount(accountID)
     if (props.account.id === accountID) loading.value = false
   }
 }
@@ -495,7 +505,9 @@ const confirmReset = async () => {
     data.value = null
     cachedSnapshotStale.value = true
     error.value = extractErrorMessage(e)
+    errorKind.value = openAIErrorKind(e)
   } finally {
+    await refreshCanonicalAccount(accountID)
     if (props.account.id === accountID) resetting.value = false
   }
 }

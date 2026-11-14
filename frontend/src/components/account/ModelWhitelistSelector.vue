@@ -92,17 +92,17 @@
       </div>
     </div>
 
+    <div v-if="automaticCatalog" class="mb-3 space-y-1 text-xs text-gray-500 dark:text-gray-400" data-testid="model-catalog-status">
+      <p>{{ t('admin.accounts.modelCatalog.source') }}：{{ t(`admin.accounts.modelCatalog.${catalogSource}`) }} · {{ t(catalogSource === 'upstream' ? 'admin.accounts.modelCatalog.automatic' : 'admin.accounts.modelCatalog.manual') }}</p>
+      <p v-if="catalogState?.synced_at">{{ t('admin.accounts.modelCatalog.lastSuccess') }}：{{ new Date(catalogState.synced_at).toLocaleString() }}</p>
+      <p v-if="catalogSource === 'upstream' && !catalogState?.ready">{{ t('admin.accounts.modelCatalog.pending') }}</p>
+      <p v-if="catalogState?.error" class="text-amber-600">{{ catalogState.error }}</p>
+      <p>{{ t('admin.accounts.modelCatalog.saveHint') }}</p>
+    </div>
     <!-- Quick Actions -->
     <div class="mb-4 flex flex-wrap gap-2">
       <button
-        type="button"
-        @click="fillRelated"
-        class="rounded-lg border border-blue-200 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30"
-      >
-        {{ t('admin.accounts.fillRelatedModels') }}
-      </button>
-      <button
-        v-if="canSyncUpstream && showSyncButton"
+        v-if="(canSyncUpstream || automaticCatalog) && showSyncButton"
         type="button"
         data-testid="sync-upstream-models"
         @click="syncUpstreamModels"
@@ -111,9 +111,14 @@
       >
         {{ isSyncingUpstream ? t('admin.accounts.syncUpstreamModelsLoading') : t('admin.accounts.syncUpstreamModels') }}
       </button>
+      <button type="button" @click="fillRelated" :disabled="isSyncingUpstream"
+        class="rounded-lg border border-blue-200 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-60 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30">
+        {{ t('admin.accounts.fillRelatedModels') }}
+      </button>
       <button
         type="button"
         @click="clearAll"
+        :disabled="isSyncingUpstream"
         class="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
       >
         {{ t('admin.accounts.clearAllModels') }}
@@ -157,6 +162,7 @@ import Icon from '@/components/icons/Icon.vue'
 import { allModels, getModelsByPlatform } from '@/composables/useModelWhitelist'
 import { supportsUpstreamModelSync } from '@/constants/platformCatalog'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import type { ModelCatalogSource, ModelCatalogState } from './modelCatalog'
 
 const { t } = useI18n()
 
@@ -173,12 +179,16 @@ const props = withDefaults(defineProps<{
     api_key: string
   }
   showSyncButton?: boolean
+  automaticCatalog?: boolean
+  catalogSource?: ModelCatalogSource
+  catalogState?: ModelCatalogState
 }>(), { showSyncButton: true })
 
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]
   'upstream-synced': []
   'upstream-sync-finished': []
+  'catalog-source': [value: ModelCatalogSource]
 }>()
 
 const appStore = useAppStore()
@@ -260,6 +270,9 @@ const toggleDropdown = () => {
 }
 
 const removeModel = (model: string) => {
+  upstreamSyncVersion += 1
+  isSyncingUpstream.value = false
+  emit('catalog-source', 'custom')
   emit('update:modelValue', props.modelValue.filter(m => m !== model))
 }
 
@@ -267,6 +280,9 @@ const toggleModel = (model: string) => {
   if (props.modelValue.includes(model)) {
     removeModel(model)
   } else {
+    upstreamSyncVersion += 1
+    isSyncingUpstream.value = false
+    emit('catalog-source', 'custom')
     emit('update:modelValue', [...props.modelValue, model])
   }
 }
@@ -287,6 +303,9 @@ const addCustom = () => {
     appStore.showInfo(t('admin.accounts.modelMappingConflict', { from: model, to: conflict.to.trim() }))
     return
   }
+  upstreamSyncVersion += 1
+  isSyncingUpstream.value = false
+  emit('catalog-source', 'custom')
   emit('update:modelValue', [...props.modelValue, model])
   customModel.value = ''
 }
@@ -296,7 +315,7 @@ const handleEnter = () => {
 }
 
 const fillRelated = () => {
-  const newModels = [...props.modelValue]
+  const newModels: string[] = []
   for (const platform of normalizedPlatforms.value) {
     for (const model of getModelsByPlatform(platform)) {
       if (!newModels.includes(model)) {
@@ -304,6 +323,7 @@ const fillRelated = () => {
       }
     }
   }
+  emit('catalog-source', 'builtin')
   emit('update:modelValue', newModels)
 }
 
@@ -334,6 +354,11 @@ const normalizeSyncedModels = (models: string[]) => {
 }
 
 const syncUpstreamModels = async () => {
+  if (props.automaticCatalog && !props.accountId && !canSyncUpstream.value) {
+    emit('catalog-source', 'upstream')
+    emit('update:modelValue', [])
+    return
+  }
   if (isSyncingUpstream.value || !canSyncUpstream.value) return
 
   const syncVersion = upstreamSyncVersion
@@ -366,7 +391,9 @@ const syncUpstreamModels = async () => {
     if (!accountId) {
       emit('upstream-synced')
     }
-    if (await shouldReplaceWithOpenAIOAuthModels()) {
+    const replace = props.automaticCatalog || await shouldReplaceWithOpenAIOAuthModels()
+    if (!isCurrentSync()) return
+    if (replace) {
       const currentModels = normalizeSyncedModels(props.modelValue)
       const currentSet = new Set(currentModels)
       const addedCount = upstreamModels.filter(model => !currentSet.has(model)).length
@@ -374,6 +401,7 @@ const syncUpstreamModels = async () => {
         currentModels.length !== upstreamModels.length ||
         currentModels.some((model, index) => model !== upstreamModels[index])
 
+      emit('catalog-source', 'upstream')
       emit('update:modelValue', upstreamModels)
       if (changed) {
         appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
@@ -429,6 +457,7 @@ const syncUpstreamModels = async () => {
 defineExpose({ syncUpstreamModels, isSyncingUpstream })
 
 const clearAll = () => {
+  emit('catalog-source', 'custom')
   emit('update:modelValue', [])
 }
 

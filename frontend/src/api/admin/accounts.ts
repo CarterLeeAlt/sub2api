@@ -921,6 +921,7 @@ export interface OpenAIRateLimitResetCredits {
 }
 
 export interface OpenAIQuotaUsage {
+  warning?: { kind: string; message: string; source?: string }
   user_id?: string
   account_id?: string
   email?: string

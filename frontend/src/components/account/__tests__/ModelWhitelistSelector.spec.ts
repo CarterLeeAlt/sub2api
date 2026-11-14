@@ -100,6 +100,45 @@ function findModelRow(wrapper: ReturnType<typeof mountSelector>, modelId: string
 }
 
 describe('ModelWhitelistSelector', () => {
+  it('replaces the whitelist with built-in models and switches to manual maintenance', async () => {
+    const wrapper = mountSelector({ modelValue: ['obsolete-model'], automaticCatalog: true, catalogSource: 'upstream', modelMappings: [{ from: 'alias', to: 'target' }] })
+    const buttons = wrapper.findAll('button')
+    const builtin = buttons.find(button => button.text() === 'admin.accounts.fillRelatedModels')!
+    const clear = buttons.find(button => button.text() === 'admin.accounts.clearAllModels')!
+    expect(buttons.findIndex(button => button.attributes('data-testid') === 'sync-upstream-models')).toBeLessThan(buttons.indexOf(builtin))
+    expect(buttons.indexOf(builtin)).toBeLessThan(buttons.indexOf(clear))
+    await builtin.trigger('click')
+    expect(wrapper.emitted('catalog-source')?.at(-1)).toEqual(['builtin'])
+    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).not.toContain('obsolete-model')
+    expect(wrapper.props('modelMappings')).toEqual([{ from: 'alias', to: 'target' }])
+    await clear.trigger('click')
+    expect(wrapper.emitted('catalog-source')?.at(-1)).toEqual(['custom'])
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([[]])
+    wrapper.unmount()
+  })
+
+  it('chooses upstream for a new OAuth account without a browser request', async () => {
+    const wrapper = mountSelector({ automaticCatalog: true, catalogSource: 'custom' })
+    await syncButton(wrapper).trigger('click')
+    expect(wrapper.emitted('catalog-source')?.at(-1)).toEqual(['upstream'])
+    expect(syncUpstreamModels).not.toHaveBeenCalled()
+    expect(syncUpstreamModelsPreview).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps a manual edit when an earlier upstream request finishes late', async () => {
+    const pending = deferred<{models: string[]}>()
+    syncUpstreamModels.mockReturnValueOnce(pending.promise)
+    const wrapper = mountSelector({ automaticCatalog: true, catalogSource: 'upstream', accountId: 46 })
+    await syncButton(wrapper).trigger('click')
+    await wrapper.find('input[placeholder="admin.accounts.enterCustomModelName"]').setValue('manual')
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.addModel')!.trigger('click')
+    pending.resolve({ models: ['remote'] })
+    await flushPromises()
+    expect(wrapper.emitted('catalog-source')?.at(-1)).toEqual(['custom'])
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([['manual']])
+    wrapper.unmount()
+  })
   beforeEach(() => {
     copyToClipboard.mockClear()
     showError.mockReset()

@@ -962,13 +962,17 @@
             :account-id="account?.id"
             :show-sync-button="account.platform !== 'grok' || !account.id"
             @upstream-sync-finished="refreshGrokDiagnostics"
+            :automatic-catalog="automaticModelCatalogEligible"
+            :catalog-source="modelCatalogSource"
+            :catalog-state="accountModelCatalog(account)"
+            @catalog-source="selectModelCatalogSource"
           />
 
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
+              <span v-if="allowedModels.length === 0 && modelMappings.length === 0 && !(automaticModelCatalogEligible && modelCatalogSource === 'upstream')">{{
                 t('admin.accounts.supportsAllModels')
               }}</span>
             </p>
@@ -1228,10 +1232,11 @@
 
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
-            <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id" />
+            <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id"
+              :automatic-catalog="automaticModelCatalogEligible" :catalog-source="modelCatalogSource" :catalog-state="accountModelCatalog(account)" @catalog-source="selectModelCatalogSource" />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
+              <span v-if="allowedModels.length === 0 && modelMappings.length === 0 && !(automaticModelCatalogEligible && modelCatalogSource === 'upstream')">{{
                 t('admin.accounts.supportsAllModels')
               }}</span>
             </p>
@@ -3379,6 +3384,7 @@ import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
 import OpenAIImageSizeTiersField from '@/components/account/OpenAIImageSizeTiersField.vue'
+import { accountModelCatalog, supportsAutomaticModelCatalog, type ModelCatalogSource } from '@/components/account/modelCatalog'
 import {
   OPENAI_IMAGE_SIZE_TIERS,
   applyOpenAIImageSizeTiersToExtra,
@@ -4119,6 +4125,16 @@ const customBaseUrl = ref('')
 
 // OpenAI 自动透传开关（OAuth/API Key）
 const openaiPassthroughEnabled = ref(false)
+const modelCatalogSource = ref<ModelCatalogSource>('custom')
+const modelCatalogEdited = ref(false)
+const modelCatalogRevision = ref('')
+let initialModelMappings = ''
+const automaticModelCatalogEligible = computed(() => props.account != null && supportsAutomaticModelCatalog({ ...props.account, extra: { ...props.account.extra, openai_passthrough: openaiPassthroughEnabled.value, openai_oauth_passthrough: false } }))
+const selectModelCatalogSource = (source: ModelCatalogSource) => {
+  if (!automaticModelCatalogEligible.value) return
+  modelCatalogSource.value = source
+  modelCatalogEdited.value = true
+}
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
@@ -4525,6 +4541,7 @@ const loadModelRestrictionFromMapping = (rawMapping?: Record<string, unknown>) =
   const parsed = splitModelMappingObject(rawMapping)
   allowedModels.value = parsed.allowedModels
   modelMappings.value = parsed.modelMappings
+  initialModelMappings = JSON.stringify(parsed.modelMappings)
   modelRestrictionMode.value =
     parsed.modelMappings.length > 0 && parsed.allowedModels.length === 0
       ? 'mapping'
@@ -4560,6 +4577,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   if (!newAccount) {
     return
   }
+  modelCatalogSource.value = accountModelCatalog(newAccount).source ?? 'custom'
+  modelCatalogRevision.value = accountModelCatalog(newAccount).revision ?? ''
+  modelCatalogEdited.value = false
   // 进入回填窗口：抑制 CN 模式/协议 watcher 联动重置 base_url（见 syncingForm 注释）。
   syncingForm.value = true
   void nextTick(() => {
@@ -5579,6 +5599,9 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   try {
+    if ((modelCatalogEdited.value || JSON.stringify(modelMappings.value) !== initialModelMappings) && automaticModelCatalogEligible.value) {
+      updatePayload.model_catalog = { source: modelCatalogSource.value, revision: modelCatalogRevision.value }
+    }
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
     updatedAccount = await persistGrokMediaEligibility(accountID, updatedAccount)
     appStore.showSuccess(t('admin.accounts.accountUpdated'))
