@@ -1,5 +1,7 @@
 .PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
 
+FRONTEND := pwsh -NoProfile -File tools/frontend.ps1
+
 FRONTEND_CRITICAL_VITEST := \
 	src/i18n/__tests__/localeKeyCompleteness.spec.ts \
 	src/api/__tests__/client.spec.ts \
@@ -41,7 +43,7 @@ build-backend:
 
 # 编译前端（需要已安装依赖）
 build-frontend:
-	@pnpm --dir frontend run build
+	@$(FRONTEND) run build
 
 # 运行测试（后端 + 前端）
 test: test-backend test-frontend
@@ -50,9 +52,10 @@ test-backend:
 	@$(MAKE) -C backend test
 
 test-frontend:
-	@pnpm --dir frontend run lint:check
-	@pnpm --dir frontend run typecheck
+	@$(FRONTEND) run test:toolchain
+	@$(FRONTEND) run lint:check
+	@$(FRONTEND) run typecheck
 	@$(MAKE) test-frontend-critical
 
 test-frontend-critical:
-	@pnpm --dir frontend exec vitest run $(FRONTEND_CRITICAL_VITEST)
+	@$(FRONTEND) exec vitest run $(FRONTEND_CRITICAL_VITEST)

@@ -37,8 +37,8 @@
 # golangci-lint（CI 用 v2.13，本地建议装同一版以免版本差异带来的噪音）
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13
 
-# pnpm (前端包管理)
-npm install -g pnpm
+# 前端工具链（需要 PowerShell 7、curl、tar；在仓库根目录运行）
+pwsh -NoProfile -File tools/frontend.ps1 setup
 ```
 
 ## 三、CI/CD 流水线
@@ -54,8 +54,17 @@ npm install -g pnpm
 ### CI 要求
 
 - Go 版本必须是 **1.27.4**：三个 workflow 都用 `go-version-file: backend/go.mod` 取版本，随后硬断言 `go version | grep -q 'go1.27.4'`。升级 Go 时要同时改 `backend/go.mod`、`backend-ci.yml`（两处）、`release.yml`、`security-scan.yml` 里的这句断言，**以及三个 Dockerfile 里的 Go 构建镜像**（`Dockerfile` / `deploy/Dockerfile` 的 `ARG GOLANG_IMAGE`、`backend/Dockerfile` 的 `FROM golang:`）。前者漏了 CI 会在版本校验步骤直接失败；**后者漏了 CI 不会报，而是等到有人用这些 Dockerfile 构建时才失败**（`go.mod requires go >= X (running Y; GOTOOLCHAIN=local)`）。
-- 前端使用 `pnpm install --frozen-lockfile`，必须提交 `pnpm-lock.yaml`
-- 前端 CI 使用 Node.js **24.22.2**、pnpm **9.15.9**；Vue I18n **11.4.14** 及配套消息编译器要求 Node.js 22 及以上。工作区工具链验证时，`PATH` 同时包含本地 Node.js 和 pnpm 入口，保证构建脚本内嵌的 `pnpm` 命令使用相同版本。
+- 前端通过 `pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile` 安装，必须提交 `frontend/pnpm-lock.yaml`。
+- 前端 Node.js **24.22.2**、pnpm **12.18.0** 由 `frontend/package.json` 锁定。本地、CI 和 Docker 使用同一个隔离执行器 `tools/frontend.mjs`；原生入口为 `tools/frontend.ps1`，Docker 从指定版本镜像复制 Node 到相同的仓库工具目录。pnpm 使用官方 `@pnpm/exe.<平台>-<架构>` 原生包，Linux 按 glibc/musl 选择对应发行包，并校验下载完整性。
+
+### 前端强制隔离
+
+- `setup` 校验下载文件后将 Node、pnpm 安装到 `.toolchains/`；其他命令要求工具已就绪，路径或版本不符直接退出。已有符合版本的工作区副本会复用。
+- 执行器使用绝对路径启动工具，向子进程传递项目内的 pnpm store、缓存、状态和配置目录，并将项目内 Node、pnpm 入口置于 PATH 首位。外部目录、指向仓库外的目录链接、全局安装和位置覆盖参数在启动 pnpm 前拒绝。
+- store 使用 `.cache/security-scan-fix/pnpm-store`，缓存使用 `.cache/security-scan-fix/pnpm-cache`，其他状态位于 `.cache/frontend/`；混合工具目录为 `.toolchains/pnpm-home/`。目录与依赖覆盖规则由 `pnpm-workspace.yaml` 和执行器的 `pnpm_config_*` 环境设置，不依赖用户全局配置。`.npmrc` 仅设置 npm 缓存。
+- `package.json` 的安装及任务入口校验隔离环境。构建通过当前已校验 Node 直接运行 i18n 测试、类型检查与 Vite，避免再次从 PATH 查找包管理器。`pnpm-workspace.yaml` 的 `pmOnFail: error` 要求版本不符时直接报错；`dangerouslyAllowAllBuilds: true` 保持项目允许依赖构建脚本的既有策略。升级时同步检查锁文件的包完整性；Docker 镜像源参数使用 `PNPM_CONFIG_REGISTRY`。
+- 回归入口：`pwsh -NoProfile -File tools/frontend.ps1 run test:toolchain`，验证污染 PATH、嵌套调用、外部缓存、目录链接、缺少工具、错误版本和生产构建。临时验证数据位于 `.tmp/frontend-isolation-*`。
+- 这是仓库入口与受支持工具的执行约束，不是操作系统文件沙箱；任意另写的程序或主动绕开入口的外部命令仍受其自身权限约束。
 
 ### 本地测试命令
 
@@ -69,23 +78,22 @@ cd backend && go test -tags=integration ./...
 # 代码质量检查
 cd backend && golangci-lint run ./...
 
-# 前端依赖安装（必须用 pnpm）
-cd frontend && pnpm install
+# 前端依赖安装（仓库根目录）
+pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile
 ```
 
 ## 四、常见坑点 & 解决方案
 
 ### 坑 1：pnpm-lock.yaml 必须同步提交
 
-**问题**：`package.json` 新增依赖后，CI 的 `pnpm install --frozen-lockfile` 失败。
+**问题**：`package.json` 新增依赖后，CI 的冻结锁文件安装失败。
 
 **原因**：上游 CI 使用 pnpm，lock 文件不同步会报错。
 
 **解决**：
 ```bash
-cd frontend
-pnpm install  # 更新 pnpm-lock.yaml
-git add pnpm-lock.yaml
+pwsh -NoProfile -File tools/frontend.ps1 install  # 更新 pnpm-lock.yaml
+git add frontend/pnpm-lock.yaml
 git commit -m "chore: update pnpm-lock.yaml"
 ```
 
@@ -97,9 +105,8 @@ git commit -m "chore: update pnpm-lock.yaml"
 
 **解决**：
 ```bash
-cd frontend
-rm -rf node_modules  # 或 PowerShell: Remove-Item -Recurse -Force node_modules
-pnpm install
+# 先确认并移走冲突的 frontend/node_modules，再从仓库根目录重新安装。
+pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile
 ```
 
 ---
@@ -282,15 +289,15 @@ git rebase upstream/main
 ### 前端操作
 
 ```bash
-# 安装依赖（必须用 pnpm）
-cd frontend
-pnpm install
+# 安装依赖（仓库根目录）
+pwsh -NoProfile -File tools/frontend.ps1 setup
+pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile
 
 # 开发服务器
-pnpm dev
+pwsh -NoProfile -File tools/frontend.ps1 run dev
 
 # 构建
-pnpm build
+pwsh -NoProfile -File tools/frontend.ps1 run build
 ```
 
 ### 后端操作

@@ -1,0 +1,23 @@
+# Use the pinned workspace toolchain and preserve the dependency policy.
+packages:
+  - '.'
+pmOnFail: error
+storeDir: ../.cache/security-scan-fix/pnpm-store
+cacheDir: ../.cache/security-scan-fix/pnpm-cache
+engineStrict: true
+ignoreScripts: false
+dangerouslyAllowAllBuilds: true
+overrides:
+  js-cookie: 3.0.7
+  form-data@<4.0.6: '>=4.0.6'
+  postcss@<8.5.18: '>=8.5.18'
+  dompurify@<3.4.17: '>=3.4.17'
+  source-map-js@<1.2.2: '>=1.2.2'
+  follow-redirects@<1.16.2: '>=1.16.2'
+  decode-uri-component@<0.5.1: '>=0.5.1'
+  mermaid@<11.16.1: 11.16.1
+  yaml@>=1.0.0 <1.10.3: 1.10.3
+  uuid@>=11.0.0 <11.1.1: 11.1.1
+  uuid@>=13.0.0 <13.0.1: 13.0.2
+  colord@<2.9.4: 2.9.4
+  katex@<0.18.2: 0.18.2

@@ -543,7 +543,7 @@ cd sub2api/deploy
 #### 前置条件
 
 - Go 1.21+
-- Node.js 18+
+- PowerShell 7、curl、tar（前端初始化会在仓库内安装固定版本的 Node.js 和 pnpm）
 - PostgreSQL 15+
 - Redis 7+
 
@@ -554,17 +554,16 @@ cd sub2api/deploy
 git clone https://github.com/CarterLeeAlt/sub2api.git
 cd sub2api
 
-# 2. 安装 pnpm（如果还没有安装）
-npm install -g pnpm
+# 2. 初始化仓库内前端工具链
+pwsh -NoProfile -File tools/frontend.ps1 setup
 
 # 3. 编译前端
-cd frontend
-pnpm install
-pnpm run build
-# 构建产物输出到 ../backend/internal/web/dist/
+pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile
+pwsh -NoProfile -File tools/frontend.ps1 run build
+# 构建产物输出到 backend/internal/web/dist/
 
 # 4. 编译后端（嵌入前端）
-cd ../backend
+cd backend
 VERSION="$(./scripts/resolve-version.sh)"
 go build -tags embed -ldflags="-X main.Version=${VERSION}" -o sub2api ./cmd/server
 
@@ -732,9 +731,8 @@ websocat -H="Sec-WebSocket-Protocol: sub2api-admin, jwt.<ADMIN_TOKEN>" ws://loca
 cd backend
 go run ./cmd/server
 
-# 前端（支持热重载）
-cd frontend
-pnpm run dev
+# 前端（支持热重载；在另一个终端的仓库根目录运行）
+pwsh -NoProfile -File tools/frontend.ps1 run dev
 ```
 
 #### 代码生成

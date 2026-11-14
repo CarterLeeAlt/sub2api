@@ -505,7 +505,7 @@ Build and run from source code for development or customization.
 #### Prerequisites
 
 - Go 1.21+
-- Node.js 18+
+- PowerShell 7, curl and tar (the frontend setup installs pinned Node.js and pnpm inside the repository)
 - PostgreSQL 15+
 - Redis 7+
 
@@ -516,17 +516,16 @@ Build and run from source code for development or customization.
 git clone https://github.com/CarterLeeAlt/sub2api.git
 cd sub2api
 
-# 2. Install pnpm (if not already installed)
-npm install -g pnpm
+# 2. Set up the repository-local frontend toolchain
+pwsh -NoProfile -File tools/frontend.ps1 setup
 
 # 3. Build frontend
-cd frontend
-pnpm install
-pnpm run build
-# Output will be in ../backend/internal/web/dist/
+pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile
+pwsh -NoProfile -File tools/frontend.ps1 run build
+# Output will be in backend/internal/web/dist/
 
 # 4. Build backend with embedded frontend
-cd ../backend
+cd backend
 VERSION="$(./scripts/resolve-version.sh)"
 go build -tags embed -ldflags="-X main.Version=${VERSION}" -o sub2api ./cmd/server
 
@@ -730,9 +729,8 @@ Because step 5 above pre-creates `config.yaml`, the setup wizard will be **skipp
 cd backend
 go run ./cmd/server
 
-# Frontend (with hot reload)
-cd frontend
-pnpm run dev
+# Frontend (with hot reload; run from the repository root in another terminal)
+pwsh -NoProfile -File tools/frontend.ps1 run dev
 ```
 
 #### Code Generation

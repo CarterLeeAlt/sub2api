@@ -3,17 +3,27 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": "24.22.2",
+    "pnpm": "12.18.0"
+  },
+  "devEngines": {
+    "packageManager": { "name": "pnpm", "version": "12.18.0", "onFail": "error" }
+  },
   "scripts": {
-    "dev": "vite",
-    "check:i18n": "vitest run src/i18n/__tests__/localeKeyCompleteness.spec.ts",
-    "build": "pnpm run check:i18n && vue-tsc -b && vite build",
-    "preview": "vite preview",
-    "lint": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix",
-    "lint:check": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts",
-    "typecheck": "vue-tsc --noEmit",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "preinstall": "node ../tools/frontend.mjs guard",
+    "dev": "node ../tools/frontend.mjs guard && vite",
+    "check:i18n": "node ../tools/frontend.mjs guard && vitest run src/i18n/__tests__/localeKeyCompleteness.spec.ts",
+    "build": "node ../tools/frontend.mjs build",
+    "preview": "node ../tools/frontend.mjs guard && vite preview",
+    "lint": "node ../tools/frontend.mjs guard && eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix",
+    "lint:check": "node ../tools/frontend.mjs guard && eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts",
+    "typecheck": "node ../tools/frontend.mjs guard && vue-tsc --noEmit",
+    "test": "node ../tools/frontend.mjs guard && vitest",
+    "test:run": "node ../tools/frontend.mjs guard && vitest run",
+    "test:coverage": "node ../tools/frontend.mjs guard && vitest run --coverage",
+    "test:toolchain": "node ../tools/frontend.mjs guard && node --test ../tools/frontend.test.mjs"
   },
   "dependencies": {
     "@airwallex/components-sdk": "^1.30.2",
@@ -59,22 +69,5 @@
     "vite-plugin-checker": "^0.9.1",
     "vitest": "^2.1.9",
     "vue-tsc": "^2.2.0"
-  },
-  "pnpm": {
-    "overrides": {
-      "js-cookie": "3.0.7",
-      "form-data@<4.0.6": ">=4.0.6",
-      "postcss@<8.5.18": ">=8.5.18",
-      "dompurify@<3.4.17": ">=3.4.17",
-      "source-map-js@<1.2.2": ">=1.2.2",
-      "follow-redirects@<1.16.2": ">=1.16.2",
-      "decode-uri-component@<0.5.1": ">=0.5.1",
-      "mermaid@<11.16.1": "11.16.1",
-      "yaml@>=1.0.0 <1.10.3": "1.10.3",
-      "uuid@>=11.0.0 <11.1.1": "11.1.1",
-      "uuid@>=13.0.0 <13.0.1": "13.0.2",
-      "colord@<2.9.4": "2.9.4",
-      "katex@<0.18.2": "0.18.2"
-    }
   }
 }

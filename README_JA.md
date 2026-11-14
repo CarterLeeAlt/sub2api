@@ -501,7 +501,7 @@ cd sub2api/deploy
 #### 前提条件
 
 - Go 1.21+
-- Node.js 18+
+- PowerShell 7、curl、tar（固定バージョンの Node.js と pnpm はリポジトリ内にセットアップ）
 - PostgreSQL 15+
 - Redis 7+
 
@@ -512,17 +512,16 @@ cd sub2api/deploy
 git clone https://github.com/CarterLeeAlt/sub2api.git
 cd sub2api
 
-# 2. pnpm をインストール（未インストールの場合）
-npm install -g pnpm
+# 2. リポジトリ内のフロントエンドツールをセットアップ
+pwsh -NoProfile -File tools/frontend.ps1 setup
 
 # 3. フロントエンドをビルド
-cd frontend
-pnpm install
-pnpm run build
-# 出力先: ../backend/internal/web/dist/
+pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile
+pwsh -NoProfile -File tools/frontend.ps1 run build
+# 出力先: backend/internal/web/dist/
 
 # 4. フロントエンドを組み込んだバックエンドをビルド
-cd ../backend
+cd backend
 VERSION="$(./scripts/resolve-version.sh)"
 go build -tags embed -ldflags="-X main.Version=${VERSION}" -o sub2api ./cmd/server
 
@@ -659,9 +658,8 @@ URL バリデーションまたはレスポンスヘッダーフィルタリン�
 cd backend
 go run ./cmd/server
 
-# フロントエンド（ホットリロード付き）
-cd frontend
-pnpm run dev
+# フロントエンド（別のターミナルでリポジトリのルートから実行）
+pwsh -NoProfile -File tools/frontend.ps1 run dev
 ```
 
 #### コード生成

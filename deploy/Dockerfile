@@ -6,7 +6,7 @@
 # Stage 3: Final minimal image
 # =============================================================================
 
-ARG NODE_IMAGE=node:24-alpine
+ARG NODE_IMAGE=node:24.22.2-alpine
 ARG GOLANG_IMAGE=golang:1.27.4-alpine
 ARG ALPINE_IMAGE=alpine:3.20
 ARG GOPROXY=https://goproxy.cn,direct
@@ -17,25 +17,24 @@ ARG GOSUMDB=sum.golang.google.cn
 # -----------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS frontend-builder
 
-WORKDIR /app/frontend
+WORKDIR /app
 ENV NODE_OPTIONS=--max-old-space-size=1536
 
-# Install pnpm. Keep this pinned to the lockfile-compatible major version so
-# Docker builds remain reproducible when pnpm changes config validation rules.
-RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
-
-# Install dependencies first (better caching)
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/.npmrc frontend/pnpm-workspace.yaml ./frontend/
+COPY tools/frontend.mjs ./tools/
+RUN apk add --no-cache curl && node tools/frontend.mjs provision-node
+ENV PATH="/app/.toolchains/frontend-bin:${PATH}"
+RUN node tools/frontend.mjs setup
+RUN node tools/frontend.mjs install --frozen-lockfile
 
 # Copy frontend source and build.
 # LegalDocumentView.vue (admin-compliance gate) build-time imports
 # ../../../../docs/legal/*.md?raw, so docs/legal/ must sit beside frontend/
-# in the image (WORKDIR /app/frontend -> resolves to /app/docs/legal/*.md).
+# in the image (the build runs in /app/frontend and resolves /app/docs/legal/*.md).
 # Copy only that subtree to keep the build dependency minimal.
-COPY frontend/ ./
+COPY frontend/ ./frontend/
 COPY docs/legal/ /app/docs/legal/
-RUN pnpm run build
+RUN node tools/frontend.mjs run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder

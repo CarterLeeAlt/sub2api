@@ -7,13 +7,13 @@
 # Stage 3: Final minimal image
 # =============================================================================
 
-ARG NODE_IMAGE=node:24-alpine
+ARG NODE_IMAGE=node:24.22.2-alpine
 ARG GOLANG_IMAGE=golang:1.27.4-alpine
 ARG ALPINE_IMAGE=alpine:3.21
 ARG POSTGRES_IMAGE=postgres:18-alpine
 ARG GOPROXY=https://goproxy.cn,direct
 ARG GOSUMDB=sum.golang.google.cn
-ARG NPM_CONFIG_REGISTRY=
+ARG PNPM_CONFIG_REGISTRY=
 
 # -----------------------------------------------------------------------------
 # Stage 1: Frontend Builder
@@ -21,28 +21,26 @@ ARG NPM_CONFIG_REGISTRY=
 # --platform=$BUILDPLATFORM: the frontend output is JS (arch-neutral), so build
 # it on the native host arch instead of under QEMU emulation for the target.
 FROM --platform=${BUILDPLATFORM} ${NODE_IMAGE} AS frontend-builder
-ARG NPM_CONFIG_REGISTRY
+ARG PNPM_CONFIG_REGISTRY
 ARG COMMIT=unknown
 
-WORKDIR /app/frontend
-
-# Install pnpm (pinned to v9 to match CI and keep builds reproducible)
-RUN corepack enable && corepack prepare pnpm@9 --activate
-
-# Install dependencies first (better caching)
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN --mount=type=cache,id=sub2api-pnpm-store,target=/root/.local/share/pnpm/store \
-    if [ -n "${NPM_CONFIG_REGISTRY}" ]; then pnpm config set registry "${NPM_CONFIG_REGISTRY}"; fi && \
-    pnpm install --frozen-lockfile --prefer-offline
+WORKDIR /app
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/.npmrc frontend/pnpm-workspace.yaml ./frontend/
+COPY tools/frontend.mjs ./tools/
+RUN apk add --no-cache curl && node tools/frontend.mjs provision-node
+ENV PATH="/app/.toolchains/frontend-bin:${PATH}"
+RUN node tools/frontend.mjs setup
+RUN --mount=type=cache,id=sub2api-pnpm-store,target=/app/.cache/security-scan-fix/pnpm-store \
+    node tools/frontend.mjs install --frozen-lockfile --prefer-offline
 
 # Copy frontend source and build.
 # LegalDocumentView.vue (admin-compliance gate) build-time imports
 # ../../../../docs/legal/*.md?raw, so docs/legal/ must sit beside frontend/
-# in the image (WORKDIR /app/frontend -> resolves to /app/docs/legal/*.md).
+# in the image (the build runs in /app/frontend and resolves /app/docs/legal/*.md).
 # Copy only that subtree to keep the build dependency minimal.
-COPY frontend/ ./
+COPY frontend/ ./frontend/
 COPY docs/legal/ /app/docs/legal/
-RUN VITE_BUILD_COMMIT="${COMMIT}" pnpm run build
+RUN VITE_BUILD_COMMIT="${COMMIT}" node tools/frontend.mjs run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder
