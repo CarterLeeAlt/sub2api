@@ -754,6 +754,7 @@ let usageBatchFlushTimer: ReturnType<typeof setTimeout> | null = null
 let queuedUsageBatchForce = false
 let usageBatchRequestToken = 0
 let usageBatchInFlight = false
+const usageBatchAbort = new AbortController()
 
 const buildDefaultTodayStats = (): WindowStats => ({
   requests: 0,
@@ -818,7 +819,8 @@ const flushQueuedUsageBatch = async () => {
   }, {})
 
   try {
-    const result = await adminAPI.accounts.getBatchUsage(accountIDs, force)
+    const result = await adminAPI.accounts.getBatchUsage(accountIDs, force, usageBatchAbort.signal)
+    if (usageBatchAbort.signal.aborted) return
 
     const usageMap = result.usage ?? {}
     const errorMap = result.errors ?? {}
@@ -860,6 +862,7 @@ const flushQueuedUsageBatch = async () => {
       patchAccountInList(updatedAccount)
     }
   } catch (error) {
+    if (usageBatchAbort.signal.aborted) return
     const nextErrors = { ...usageBatchErrorByAccountId.value }
     const nextLoading = { ...usageBatchLoadingByAccountId.value }
     for (const accountID of accountIDs) {
@@ -875,13 +878,13 @@ const flushQueuedUsageBatch = async () => {
     console.error('Failed to load account usage batch:', error)
   } finally {
     usageBatchInFlight = false
-    if (pendingUsageBatchIds.size > 0 && usageBatchFlushTimer === null) {
+    if (!usageBatchAbort.signal.aborted && pendingUsageBatchIds.size > 0 && usageBatchFlushTimer === null) {
       usageBatchFlushTimer = setTimeout(() => { void flushQueuedUsageBatch() }, 0)
     }
   }
 }
 
-const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
+const queueBatchedUsage = (account: Account, options?: { force?: boolean; invalidateCache?: boolean }) => {
   if (!isDesktopViewport.value) return
   if (!accountSupportsBatchUsage(account)) return
 
@@ -889,7 +892,7 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
   const cacheKey = account.id
   const key = String(cacheKey)
 
-  if (force) {
+  if (force || options?.invalidateCache) {
     usageBatchCache.delete(cacheKey)
   } else {
     const cached = usageBatchCache.get(cacheKey)
@@ -1534,6 +1537,15 @@ const handleManualRefresh = async () => {
   // Force usage cells to refetch /usage on explicit user refresh.
   usageManualRefreshToken.value += 1
 }
+
+// Background quota writes must reach an open page even when the faster table
+// auto-refresh is off. Provider queries retain their own freshness gate.
+useIntervalFn(() => {
+  if (autoRefreshEnabled.value || document.hidden || loading.value || isAnyModalOpen.value) return
+  if (menu.show || showAccountToolsDropdown.value || showAutoRefreshDropdown.value || inAutoRefreshSilentWindow()) return
+  if (!accounts.value.some(account => account.platform === 'openai' && account.type === 'oauth')) return
+  void refreshAccountsIncrementally()
+}, 60_000)
 
 const loadUpstreamBillingProbeGlobalState = async () => {
   try {
@@ -2626,6 +2638,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  usageBatchAbort.abort()
   bulkEditPreviewVersion++
   upstreamBillingRateAbortController?.abort()
   if (usageBatchFlushTimer !== null) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/tidwall/gjson"
 	"golang.org/x/sync/singleflight"
 )
@@ -102,7 +104,7 @@ func (s *CNProviderBalanceService) QueryBalanceForAccount(ctx context.Context, a
 	}
 	key := "cn_balance:" + strconv.FormatInt(account.ID, 10)
 	resultCh := s.flight.DoChan(key, func() (any, error) {
-		probeCtx, cancel := context.WithTimeout(context.Background(), cnBalanceUpstreamTimeout+5*time.Second)
+		probeCtx, cancel := context.WithTimeout(context.Background(), 2*cnBalanceUpstreamTimeout+5*time.Second)
 		defer cancel()
 		return s.queryBalanceForAccount(probeCtx, account)
 	})
@@ -148,9 +150,7 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 	}
 	targetURL = validatedURL
 	proxyURL := s.resolveProxyURL(ctx, account)
-	callCtx, cancel := context.WithTimeout(ctx, cnBalanceUpstreamTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_BALANCE_REQUEST_BUILD_FAILED", "build request: %v", err)
 	}
@@ -158,7 +158,9 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 	req.Header.Set("Accept", "application/json")
 	account.ApplyHeaderOverrides(req.Header)
 
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	resp, err := httpclient.DoRead(req, cnBalanceUpstreamTimeout, cnBalanceMaxBodyBytes, func(r *http.Request) (*http.Response, error) {
+		return s.httpUpstream.Do(r, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	})
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "CN_BALANCE_REQUEST_FAILED", "upstream request failed: %v", err)
 	}
@@ -187,7 +189,22 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 	switch provider {
 	case PlatformKimi:
 		// Moonshot：code==0 成功；data.available_balance（number），单币种 CNY。
-		balance, _ := cnParseF64(gjson.GetBytes(bodyBytes, "data.available_balance").Value())
+		if !gjson.ValidBytes(bodyBytes) {
+			result.Error = "Invalid balance response: malformed JSON"
+			return result, nil
+		}
+		if code := gjson.GetBytes(bodyBytes, "code"); code.Exists() {
+			value, valid := cnParseF64(code.Value())
+			if !valid || value != 0 {
+				result.Error = "Balance API returned an error"
+				return result, nil
+			}
+		}
+		balance, ok := cnParseF64(gjson.GetBytes(bodyBytes, "data.available_balance").Value())
+		if !ok || math.IsNaN(balance) || math.IsInf(balance, 0) {
+			result.Error = "Invalid balance response: missing or invalid available_balance"
+			return result, nil
+		}
 		entries = append(entries, CNProviderBalanceEntry{Currency: "CNY", Balance: balance})
 	case PlatformDeepseek:
 		// is_available 缺省视为 true（健康）；显式存在时取其值。

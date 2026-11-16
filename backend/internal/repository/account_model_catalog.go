@@ -89,11 +89,12 @@ func (r *accountRepository) wakeModelCatalogAfterCommit(ctx context.Context) {
 	}
 }
 
-// All accounts observed in this round share a delay measured from its completion.
-// A configuration edit clears attempted_at, so a late round cannot postpone it.
+// Successful observations share the round delay; failures retain their shorter
+// retry deadline. A configuration edit clears attempted_at.
 func (r *accountRepository) FinishModelCatalogRound(ctx context.Context, startedAt, nextSyncAt time.Time) error {
 	_, err := r.sql.ExecContext(ctx, `UPDATE accounts SET extra=jsonb_set(extra,'{model_catalog,next_sync_at}',to_jsonb($2::text))
 		WHERE deleted_at IS NULL AND extra->'model_catalog'->>'source'='upstream'
+		AND COALESCE(extra->'model_catalog'->>'error','')=''
 		AND NULLIF(extra->'model_catalog'->>'attempted_at','')::timestamptz >= $1`, startedAt, nextSyncAt.Format(time.RFC3339Nano))
 	return err
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/tidwall/gjson"
 )
 
@@ -71,9 +72,7 @@ func (c *clineAccountClient) get(ctx context.Context, path string) (gjson.Result
 	if err != nil {
 		return gjson.Result{}, infraerrors.New(http.StatusForbidden, c.errPrefix+"_URL_REJECTED", err.Error())
 	}
-	callCtx, cancel := context.WithTimeout(ctx, cnQuotaUpstreamTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, validatedURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, validatedURL, nil)
 	if err != nil {
 		return gjson.Result{}, infraerrors.Newf(http.StatusInternalServerError, c.errPrefix+"_REQUEST_BUILD_FAILED", "build request: %v", err)
 	}
@@ -81,7 +80,9 @@ func (c *clineAccountClient) get(ctx context.Context, path string) (gjson.Result
 	req.Header.Set("Accept", "application/json")
 	c.account.ApplyHeaderOverrides(req.Header)
 
-	resp, err := c.httpUpstream.Do(req, c.proxyURL, c.account.ID, maxInt(c.account.Concurrency, 1))
+	resp, err := httpclient.DoRead(req, cnQuotaUpstreamTimeout, cnQuotaMaxBodyBytes, func(r *http.Request) (*http.Response, error) {
+		return c.httpUpstream.Do(r, c.proxyURL, c.account.ID, maxInt(c.account.Concurrency, 1))
+	})
 	if err != nil {
 		return gjson.Result{}, fmt.Errorf("upstream request failed: %w", err)
 	}

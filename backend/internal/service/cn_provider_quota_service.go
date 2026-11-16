@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/tidwall/gjson"
 	"golang.org/x/sync/singleflight"
 )
@@ -113,7 +114,7 @@ func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, accou
 	}
 	key := "cn_quota:" + strconv.FormatInt(account.ID, 10)
 	resultCh := s.flight.DoChan(key, func() (any, error) {
-		probeCtx, cancel := context.WithTimeout(context.Background(), cnQuotaUpstreamTimeout+5*time.Second)
+		probeCtx, cancel := context.WithTimeout(context.Background(), 2*cnQuotaUpstreamTimeout+5*time.Second)
 		defer cancel()
 		return s.queryUsageForAccount(probeCtx, account)
 	})
@@ -187,9 +188,7 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	targetURL = validatedURL
 
 	proxyURL := s.resolveProxyURL(ctx, account)
-	callCtx, cancel := context.WithTimeout(ctx, cnQuotaUpstreamTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_REQUEST_BUILD_FAILED", "build request: %v", err)
 	}
@@ -208,7 +207,9 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	// 探测与真实转发保持同一套账号级请求头覆写，避免探测通过但转发失败。
 	account.ApplyHeaderOverrides(req.Header)
 
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	resp, err := httpclient.DoRead(req, cnQuotaUpstreamTimeout, cnQuotaMaxBodyBytes, func(r *http.Request) (*http.Response, error) {
+		return s.httpUpstream.Do(r, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	})
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "CN_QUOTA_REQUEST_FAILED", "upstream request failed: %v", err)
 	}
@@ -234,6 +235,10 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	}
 
 	// 智谱业务级错误（HTTP 2xx 但 success=false）。
+	if !gjson.ValidBytes(bodyBytes) {
+		result.Error = "Invalid quota response: malformed JSON"
+		return result, nil
+	}
 	if provider == PlatformZhipu {
 		if success := gjson.GetBytes(bodyBytes, "success"); success.Exists() && !success.Bool() {
 			msg := strings.TrimSpace(gjson.GetBytes(bodyBytes, "msg").String())

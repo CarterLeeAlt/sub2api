@@ -65,7 +65,7 @@
     </div>
 
     <div
-      v-if="cachedSnapshotFetchedAt || cachedSnapshotStale"
+      v-if="cachedSnapshotFetchedAt || cachedSnapshotStale || loading"
       class="flex flex-wrap items-center gap-1 text-[10px] text-gray-500 dark:text-gray-400"
       data-testid="reset-credit-cache-status"
     >
@@ -76,11 +76,11 @@
         {{ t('admin.accounts.openaiQuotaReset.updatedAt', { time: formatResetCreditExpiry(cachedSnapshotFetchedAt, 'short') }) }}
       </span>
       <span
-        v-if="cachedSnapshotStale && !healthFailure && !error"
+        v-if="loading || (cachedSnapshotStale && !healthFailure && !error)"
         class="rounded bg-amber-50 px-1 py-0.5 font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
         data-testid="reset-credit-cache-stale"
       >
-        {{ t('admin.accounts.openaiQuotaReset.stale') }}
+        {{ t(loading ? 'admin.accounts.openaiQuotaReset.refreshing' : 'admin.accounts.openaiQuotaReset.stale') }}
       </span>
     </div>
 
@@ -158,6 +158,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
@@ -295,6 +296,15 @@ const markResetCreditDataFresh = (usage: OpenAIQuotaUsage) => {
 }
 
 hydrateCachedResetCredits(props.account)
+
+useIntervalFn(() => {
+  if (loading.value || resetting.value) return
+  const fetched = cachedSnapshotFetchedAt.value
+  if (fetched && Date.now() - new Date(fetched).getTime() > resetCreditCacheStaleAfterMs) {
+    data.value = null
+    cachedSnapshotStale.value = true
+  }
+}, 30_000)
 
 // 影子账号的额度查询会 resolve 到母账号,但影子本身不支持重置(后端返回 409);
 // 重置必须在母账号上进行。前端据此禁用影子的重置入口(外审 F6)。

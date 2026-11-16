@@ -788,7 +788,7 @@ const props = withDefaults(
     batchedUsage?: AccountUsageInfo | null
     batchedUsageError?: string | null
     batchedUsageLoading?: boolean
-    requestBatchedUsage?: ((account: Account, options?: { force?: boolean }) => void) | null
+    requestBatchedUsage?: ((account: Account, options?: { force?: boolean; invalidateCache?: boolean }) => void) | null
   }>(),
   {
     todayStats: null,
@@ -1527,7 +1527,7 @@ const isAnthropicOAuthOrSetupToken = computed(() => {
   return props.account.platform === 'anthropic' && (props.account.type === 'oauth' || props.account.type === 'setup-token')
 })
 
-const requestParentBatchUsage = (options?: { force?: boolean }) => {
+const requestParentBatchUsage = (options?: { force?: boolean; invalidateCache?: boolean }) => {
   if (!isBatchManaged.value || !shouldFetchUsage.value) return
   props.requestBatchedUsage?.(props.account, options)
 }
@@ -1842,7 +1842,9 @@ watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return
 
   if (isBatchManaged.value) {
-    requestParentBatchUsage({ force: true })
+    // Re-read local windows after a background snapshot update. Only an
+    // explicit operator refresh should bypass the server's upstream cooldown.
+    requestParentBatchUsage({ invalidateCache: true })
     return
   }
 

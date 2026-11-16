@@ -163,7 +163,7 @@ export async function refreshGrokToken(
 }
 
 export async function queryQuota(id: number): Promise<GrokQuotaProbeResult> {
-  const { data } = await apiClient.get<GrokQuotaProbeResult>(`/admin/grok/accounts/${id}/quota`)
+  const { data } = await apiClient.get<GrokQuotaProbeResult>(`/admin/grok/accounts/${id}/quota`, { timeout: 60_000 })
   return data
 }
 

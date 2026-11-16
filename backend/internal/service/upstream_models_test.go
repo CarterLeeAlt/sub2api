@@ -599,10 +599,26 @@ func TestSyncUpstreamModelCatalogDoesNotUseConfiguredModelsForRealUpstreamFailur
 				},
 			})
 			require.Error(t, err)
-			require.Len(t, upstream.requests, 1)
+			attempts := 1
+			if tt.statusCode == http.StatusBadGateway {
+				attempts = 2
+			}
+			require.Len(t, upstream.requests, attempts)
 			require.Equal(t, tt.statusCode, upstreamModelSyncStatusCode(err))
 		})
 	}
+}
+
+func TestUpstreamModelReadRecoversBeforePublishingFailure(t *testing.T) {
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{StatusCode: 503, Body: io.NopCloser(strings.NewReader(`unavailable`))},
+		{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"recovered-model"}]}`))},
+	}}
+	svc := &AccountTestService{httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
+	models, err := svc.FetchUpstreamSupportedModels(context.Background(), &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test", "base_url": "https://provider.example/v1"}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"recovered-model"}, models)
+	require.Len(t, upstream.requests, 2)
 }
 
 func TestSyncUpstreamModelCatalogRequiresConfiguredModelsForUnsupportedListEndpoint(t *testing.T) {
@@ -761,6 +777,7 @@ func TestSyncUpstreamModelCatalogDoesNotOverwriteSnapshotWhenRegistryFails(t *te
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"x-preview-f-free"}]}`))},
 		{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))},
+		{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))},
 	}}
 	repo := &upstreamModelMetadataRepoStub{}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
@@ -788,6 +805,7 @@ func TestSyncUpstreamModelCatalogDoesNotPersistPartialMetadataWhenRegistryFails(
 			"id":"partially-described-model",
 			"display_name":"Partial Model"
 		}]}`))},
+		{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))},
 		{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))},
 	}}
 	repo := &upstreamModelMetadataRepoStub{}

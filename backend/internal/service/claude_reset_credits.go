@@ -159,7 +159,7 @@ func (s *ClaudeResetCreditService) fetchBlock(ctx context.Context, token, proxy 
 		return nil, err
 	}
 	s.headers(ctx, req, token)
-	resp, err := s.do(req, proxy)
+	resp, err := httpclient.DoRead(req, 25*time.Second, 1<<20, func(r *http.Request) (*http.Response, error) { return s.do(r, proxy) })
 	if err != nil {
 		return nil, infraerrors.ServiceUnavailable("CLAUDE_RESET_QUERY_FAILED", "reset status request failed")
 	}

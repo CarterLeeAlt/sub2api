@@ -22,7 +22,7 @@ export interface ClaudeResetCredits {
 }
 
 export async function getClaudeResetCredits(id: number): Promise<ClaudeResetCredits> {
-  const { data } = await apiClient.get<ClaudeResetCredits>(`/admin/accounts/${id}/claude/reset-credits`)
+  const { data } = await apiClient.get<ClaudeResetCredits>(`/admin/accounts/${id}/claude/reset-credits`, { timeout: 60_000 })
   return data
 }
 

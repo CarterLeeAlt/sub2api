@@ -128,7 +128,7 @@ func (c *githubReleaseClient) FetchLatestRelease(ctx context.Context, repo strin
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpclient.DoRead(req, 30*time.Second, 0, c.httpClient.Do)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +163,7 @@ func (c *githubReleaseClient) FetchRecentReleases(ctx context.Context, repo stri
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpclient.DoRead(req, 30*time.Second, 0, c.httpClient.Do)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func (c *githubReleaseClient) FetchChecksumFile(ctx context.Context, url string)
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpclient.DoRead(req, 30*time.Second, 0, c.httpClient.Do)
 	if err != nil {
 		return nil, err
 	}

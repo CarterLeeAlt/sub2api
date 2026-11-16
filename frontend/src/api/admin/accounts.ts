@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { retryRead } from '../readRetry'
 import type { OpenAIReferralRefreshResult, OpenAIReferralSendResult } from '@/types/openaiReferrals'
 import type {
   Account,
@@ -381,7 +382,7 @@ export async function getUsage(id: number, source?: 'passive' | 'active', force?
   if (source) params.source = source
   if (force) params.force = 'true'
   const { data } = await apiClient.get<AccountUsageInfo>(`/admin/accounts/${id}/usage`, {
-    timeout: 60_000,
+    timeout: 90_000,
     params: Object.keys(params).length > 0 ? params : undefined
   })
   return data
@@ -393,11 +394,11 @@ export interface BatchAccountUsageResponse {
   account_updates?: Record<string, Account>
 }
 
-export async function getBatchUsage(accountIds: number[], force?: boolean): Promise<BatchAccountUsageResponse> {
-  const { data } = await apiClient.post<BatchAccountUsageResponse>('/admin/accounts/usage/batch', {
+export async function getBatchUsage(accountIds: number[], force?: boolean, signal?: AbortSignal): Promise<BatchAccountUsageResponse> {
+  const { data } = await retryRead(() => apiClient.post<BatchAccountUsageResponse>('/admin/accounts/usage/batch', {
     account_ids: accountIds,
     force: force === true
-  }, { timeout: 60_000 })
+  }, { timeout: 60_000, signal }), signal)
   return data
 }
 

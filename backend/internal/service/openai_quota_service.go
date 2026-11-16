@@ -32,7 +32,6 @@ const (
 	chatGPTRateLimitCreditsURL  = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 	chatGPTRateLimitResetURL    = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
 	openaiQuotaUpstreamTimeout  = 20 * time.Second
-	openaiQuotaReadRetryDelay   = 250 * time.Millisecond
 	openaiQuotaCodexBeta        = "codex-1"
 	openaiQuotaCodexOriginator  = "Codex Desktop"
 	openaiQuotaCodexLanguageTag = "zh-CN"
@@ -316,33 +315,17 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 // persisted; caller cancellation says nothing about upstream account health.
 // Credit consumption must not use this read-only retry path.
 func (s *OpenAIQuotaService) getQuotaResponse(ctx context.Context, client *req.Client, headers map[string]string, endpoint string, identity *Account, source string) (*req.Response, error) {
-	for attempt := 0; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		callCtx, cancel := context.WithTimeout(ctx, openaiQuotaUpstreamTimeout)
-		resp, err := client.R().SetContext(callCtx).SetHeaders(headers).Get(endpoint)
-		cancel()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		retryable := err != nil || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout
-		if attempt == 0 && retryable {
-			timer := time.NewTimer(openaiQuotaReadRetryDelay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, ctx.Err()
-			case <-timer.C:
-			}
-			continue
-		}
-		if err != nil {
-			body, _ := json.Marshal(map[string]any{"error": map[string]string{"message": err.Error()}})
-			return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, source, 0, body)
-		}
-		return resp, nil
+	resp, err := readReqResponse(ctx, openaiQuotaUpstreamTimeout, func(callCtx context.Context) (*req.Response, error) {
+		return client.R().SetContext(callCtx).SetRetryCount(0).SetHeaders(headers).Get(endpoint)
+	})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
+	if err != nil {
+		body, _ := json.Marshal(map[string]any{"error": map[string]string{"message": err.Error()}})
+		return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, source, 0, body)
+	}
+	return resp, nil
 }
 
 // CacheResetCreditsSnapshot persists a complete reset-credit snapshot after an
@@ -437,18 +420,21 @@ func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client
 		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "status", resp.StatusCode)
 		return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", resp.StatusCode, resp.Bytes())
 	}
-	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", http.StatusOK, nil)
-
 	details, err := parseOpenAIRateLimitResetCreditDetails(resp.Bytes())
 	if err != nil {
 		slog.Warn("openai_quota_reset_credit_details_parse_failed", "account_id", accountID, "error", err)
-		if details.AvailableCount == nil {
-			return nil, nil
+		failure := observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", http.StatusBadGateway,
+			[]byte(`{"error":{"message":"Invalid reset-credit response"}}`))
+		if details.AvailableCount != nil {
+			return &details, failure
 		}
+		return nil, failure
 	}
 	if details.AvailableCount == nil && !details.CreditListPresent {
-		return nil, nil
+		return nil, observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", http.StatusBadGateway,
+			[]byte(`{"error":{"message":"Reset-credit response omitted count and credits"}}`))
 	}
+	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "reset_credits", http.StatusOK, nil)
 	return &details, nil
 }
 

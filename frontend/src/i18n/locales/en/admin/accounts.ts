@@ -1831,7 +1831,8 @@ export default {
         refreshCachePersistFailed: 'Showing the live count, but the cache update failed, so the previous cached value was kept.',
         refreshCountUnavailable: 'The current reset-credit count could not be loaded. Try again later.',
         updatedAt: 'Reset check updated {time}',
-        stale: 'Reset-credit information expired; waiting for refresh',
+        stale: 'Reset-credit information expired; click Count to refresh',
+        refreshing: 'Checking reset credits…',
         confirmTitle: 'Confirm Weekly Limit Reset',
         confirmMessage: 'This will consume 1 reset credit to immediately restore the current window ({count} remaining). This action cannot be undone. Continue?'
       },

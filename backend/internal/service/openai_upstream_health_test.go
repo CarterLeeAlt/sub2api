@@ -246,3 +246,29 @@ func TestOpenAIQuotaReadRetriesBeforePublishingFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIResetDetailsInvalidPayloadReportsFailure(t *testing.T) {
+	for _, body := range []string{`{"credits":`, `{}`, `null`, ``} {
+		t.Run(body, func(t *testing.T) {
+			a := &Account{ID: 100, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "test", "chatgpt_account_id": "workspace"}}
+			repo := &healthQuotaRepo{stubQuotaAccountRepo: stubQuotaAccountRepo{accounts: map[int64]*Account{100: a}}}
+			cache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(a): "test"}}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/backend-api/wham/usage" {
+					_, _ = w.Write([]byte(`{"rate_limit":null}`))
+					return
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			svc := NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, cache, nil), newQuotaRedirectingFactory(server), nil)
+			usage, err := svc.QueryUsage(context.Background(), a.ID)
+			require.NoError(t, err)
+			require.Nil(t, usage.RateLimitResetCredits)
+			require.NotNil(t, usage.Warning)
+			require.Equal(t, "reset_credits", usage.Warning.Source)
+			require.Equal(t, "request_failed", repo.observations[len(repo.observations)-1].Kind)
+		})
+	}
+}

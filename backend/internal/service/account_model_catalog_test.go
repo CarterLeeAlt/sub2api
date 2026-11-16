@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"testing"
 	"time"
@@ -155,6 +156,9 @@ func TestModelCatalogRefreshResultsAndManualScheduling(t *testing.T) {
 					require.Equal(t, original, got.GetModelMapping())
 					require.Equal(t, ready, got.ModelCatalog().Ready)
 					require.NotEmpty(t, got.ModelCatalog().Error)
+					next, err := time.Parse(time.RFC3339Nano, got.ModelCatalog().NextSyncAt)
+					require.NoError(t, err)
+					require.WithinDuration(t, before.Add(2*time.Minute), next, time.Second)
 				}
 			})
 		}
@@ -191,4 +195,29 @@ func TestModelCatalogRefreshSerialAcrossInstances(t *testing.T) {
 	require.NoError(t, <-done)
 	require.Equal(t, int64(2), <-entered)
 	require.Len(t, store.saved, 2)
+}
+
+func TestModelCatalogRefreshHTTPFailureSchedule(t *testing.T) {
+	for _, status := range []int{401, 403, 404, 408, 429, 500, 502, 503, 504} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			a := catalogTestAccount()
+			SetAccountModelCatalog(a, AccountModelCatalog{Source: "upstream", Revision: "r"})
+			store := &catalogRefreshTestStore{accounts: []Account{*a}}
+			reader := catalogRefreshTestReader(func(context.Context, *Account) ([]string, error) {
+				return nil, &UpstreamModelSyncError{Kind: UpstreamModelSyncErrorUpstream, StatusCode: status, Message: "upstream failed"}
+			})
+			worker := NewOpenAIModelCatalogRefreshService(store, reader, &fakeLeaderLockCache{})
+			defer worker.Stop()
+			before := time.Now()
+			require.NoError(t, worker.RunOnce(context.Background()))
+			require.Len(t, store.saved, 1)
+			next, err := time.Parse(time.RFC3339Nano, store.saved[0].ModelCatalog().NextSyncAt)
+			require.NoError(t, err)
+			if status == 401 || status == 403 || status == 404 {
+				require.False(t, next.Before(before.Add(30*time.Minute)))
+			} else {
+				require.WithinDuration(t, before.Add(2*time.Minute), next, time.Second)
+			}
+		})
+	}
 }

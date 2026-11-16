@@ -550,6 +550,11 @@ func TestAccountHandlerSyncUpstreamModels_MetadataEnrichmentFailureReturnsWarnin
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
 			Body:       io.NopCloser(strings.NewReader(`{"error":"registry unavailable"}`)),
 		},
+		{
+			StatusCode: http.StatusBadGateway,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":"registry unavailable"}`)),
+		},
 	}}
 	router := setupSyncUpstreamModelsRouter(svc, upstream)
 

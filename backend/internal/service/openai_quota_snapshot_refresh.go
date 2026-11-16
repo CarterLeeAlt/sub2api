@@ -98,6 +98,8 @@ type OpenAIQuotaSnapshotRefreshService struct {
 	nextDelay      func() time.Duration
 	accountTimeout time.Duration
 	retryWait      func(ctx context.Context, delay time.Duration) error
+	nextRefresh    map[int64]time.Time // protected by cycleMu
+	failures       map[int64]int
 }
 
 func NewOpenAIQuotaSnapshotRefreshService(
@@ -116,6 +118,8 @@ func NewOpenAIQuotaSnapshotRefreshService(
 		nextDelay:      randomOpenAIQuotaSnapshotRefreshDelay,
 		accountTimeout: openAIQuotaSnapshotRefreshAccountTimeout,
 		retryWait:      waitOutOpenAIQuotaSnapshotRetryDelay,
+		nextRefresh:    make(map[int64]time.Time),
+		failures:       make(map[int64]int),
 	}
 }
 
@@ -194,7 +198,9 @@ func (s *OpenAIQuotaSnapshotRefreshService) runLoop() {
 		if err := s.RunOnce(s.parentCtx); err != nil {
 			slog.Warn("openai_quota_snapshot_refresh_cycle_failed", "error", err)
 		}
-		delay = s.nextDelay()
+		// Due times belong to individual accounts, not to the end of a sweep.
+		// A failed account becomes due independently of healthy accounts.
+		delay = time.Minute
 	}
 }
 
@@ -228,6 +234,7 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 		return nil
 	}
 	defer release()
+	seen := make(map[int64]bool)
 
 	for page := 1; ; page++ {
 		accounts, result, err := s.repo.ListWithFilters(
@@ -257,10 +264,31 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 			if !account.IsOpenAIOAuth() || account.IsShadow() {
 				continue
 			}
+			seen[account.ID] = true
+			if s.now().Before(s.nextRefresh[account.ID]) {
+				continue
+			}
+			// Persisted success also bounds request frequency after restarts or
+			// leadership changes between service instances.
+			if snapshot, ok := account.Extra[openaiQuotaResetCreditsKey].(map[string]any); ok {
+				if fetched, err := time.Parse(time.RFC3339Nano, fmt.Sprint(snapshot["fetched_at"])); err == nil && s.now().Sub(fetched) < 10*time.Minute && s.failures[account.ID] == 0 {
+					continue
+				}
+			}
 			// Serial on purpose: one upstream query at a time keeps the request
 			// footprint minimal and avoids concurrent-quota-check failures.
 			if err := s.refreshAccountWithRetry(ctx, &account); err != nil {
 				slog.Warn("openai_quota_snapshot_refresh_account_failed", "account_id", account.ID, "error", err)
+				s.failures[account.ID] = min(s.failures[account.ID]+1, 4)
+				delay := min(time.Duration(1<<(s.failures[account.ID]-1))*time.Minute, 5*time.Minute)
+				switch openAIHealthErrorKind(err) {
+				case "auth_invalid", "auth_refresh_required", "permission_denied", "quota_exhausted", "rate_limited":
+					delay = s.nextDelay()
+				}
+				s.nextRefresh[account.ID] = s.now().Add(delay)
+			} else {
+				delete(s.failures, account.ID)
+				s.nextRefresh[account.ID] = s.now().Add(s.nextDelay())
 			}
 			if !s.renewLeaderLock(ctx) {
 				return fmt.Errorf("OpenAI quota snapshot refresh leader lock lost after account %d", account.ID)
@@ -268,6 +296,12 @@ func (s *OpenAIQuotaSnapshotRefreshService) RunOnce(ctx context.Context) error {
 		}
 
 		if len(accounts) < openAIQuotaSnapshotRefreshPageSize || result == nil || page >= result.Pages {
+			for id := range s.nextRefresh {
+				if !seen[id] {
+					delete(s.nextRefresh, id)
+					delete(s.failures, id)
+				}
+			}
 			return nil
 		}
 	}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 )
 
 // Command Code 的积分与用量窗口来自 /alpha 下四个只读接口（官方 CLI /usage 同源，
@@ -174,9 +175,7 @@ func (c *commandCodeUsageClient) get(ctx context.Context, path string, query url
 	if err != nil {
 		return infraerrors.New(http.StatusForbidden, "CN_QUOTA_URL_REJECTED", err.Error())
 	}
-	callCtx, cancel := context.WithTimeout(ctx, cnQuotaUpstreamTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, validatedURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, validatedURL, nil)
 	if err != nil {
 		return infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_REQUEST_BUILD_FAILED", "build request: %v", err)
 	}
@@ -184,7 +183,9 @@ func (c *commandCodeUsageClient) get(ctx context.Context, path string, query url
 	req.Header.Set("Accept", "application/json")
 	c.account.ApplyHeaderOverrides(req.Header)
 
-	resp, err := c.httpUpstream.Do(req, c.proxyURL, c.account.ID, maxInt(c.account.Concurrency, 1))
+	resp, err := httpclient.DoRead(req, cnQuotaUpstreamTimeout, cnQuotaMaxBodyBytes, func(r *http.Request) (*http.Response, error) {
+		return c.httpUpstream.Do(r, c.proxyURL, c.account.ID, maxInt(c.account.Concurrency, 1))
+	})
 	if err != nil {
 		return fmt.Errorf("upstream request failed: %w", err)
 	}

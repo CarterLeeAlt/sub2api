@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -125,4 +126,21 @@ func (s *ClaudeUsageServiceSuite) TestFetchUsage_InvalidProxyReturnsError() {
 
 func TestClaudeUsageServiceSuite(t *testing.T) {
 	suite.Run(t, new(ClaudeUsageServiceSuite))
+}
+
+func TestClaudeUsageRetriesBeforeReturningOrCachingFailure(t *testing.T) {
+	var calls atomic.Int32
+	server := newLocalTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, `{"five_hour":{"utilization":25}}`)
+	}))
+	defer server.Close()
+	fetcher := &claudeUsageService{usageURL: server.URL, allowPrivateHosts: true}
+	usage, err := fetcher.FetchUsage(context.Background(), "token", "")
+	require.NoError(t, err)
+	require.Equal(t, 25.0, usage.FiveHour.Utilization)
+	require.EqualValues(t, 2, calls.Load())
 }

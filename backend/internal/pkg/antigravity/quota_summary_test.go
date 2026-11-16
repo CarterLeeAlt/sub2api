@@ -5,10 +5,58 @@ package antigravity
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+type quotaSummaryRetryTransport func(*http.Request) (*http.Response, error)
+
+func (f quotaSummaryRetryTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestQuotaSummaryFallsBackAfterNetworkFailure(t *testing.T) {
+	calls := 0
+	client := &Client{httpClient: &http.Client{Transport: quotaSummaryRetryTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("connection reset")
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"groups":[]}`)), Request: r}, nil
+	})}}
+	if _, err := client.RetrieveUserQuotaSummary(context.Background(), "test", "project"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected fallback, got %d calls", calls)
+	}
+}
+
+type interruptedQuotaSummaryBody struct{}
+
+func (interruptedQuotaSummaryBody) Read(p []byte) (int, error) {
+	return copy(p, `{"groups":`), io.ErrUnexpectedEOF
+}
+func (interruptedQuotaSummaryBody) Close() error { return nil }
+func TestQuotaSummaryFallsBackAfterInterruptedBody(t *testing.T) {
+	calls := 0
+	client := &Client{httpClient: &http.Client{Transport: quotaSummaryRetryTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body := io.NopCloser(strings.NewReader(`{"groups":[]}`))
+		if calls == 1 {
+			body = interruptedQuotaSummaryBody{}
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: body, Request: r}, nil
+	})}}
+	if _, err := client.RetrieveUserQuotaSummary(context.Background(), "test", "project"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected body failure fallback, got %d", calls)
+	}
+}
 
 // The shape Google returned for a consumer Ultra account on 2026-11-04.
 const quotaSummaryBody = `{

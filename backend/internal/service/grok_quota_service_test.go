@@ -464,7 +464,7 @@ func TestGrokQuotaServiceFetchBillingDoesNotRetryNonTransientStatuses(t *testing
 	}
 }
 
-func TestIsRetryableGrokBillingStatus(t *testing.T) {
+func TestGrokBillingRetriesOnlyTransientResponses(t *testing.T) {
 	tests := []struct {
 		status int
 		want   bool
@@ -479,7 +479,16 @@ func TestIsRetryableGrokBillingStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(strconv.Itoa(tt.status), func(t *testing.T) {
-			require.Equal(t, tt.want, isRetryableGrokBillingStatus(tt.status))
+			upstream := &grokQuotaSequenceUpstream{steps: []grokQuotaUpstreamStep{
+				{status: tt.status, body: `{}`}, {status: http.StatusOK, body: `{"config":{}}`},
+			}}
+			svc := &GrokQuotaService{httpUpstream: upstream}
+			_, _, _ = svc.fetchBilling(context.Background(), healthyGrokQuotaOAuthAccount(400), "token", "", true)
+			calls := 1
+			if tt.want {
+				calls = 2
+			}
+			require.Len(t, upstream.snapshotRequests(), calls)
 		})
 	}
 }

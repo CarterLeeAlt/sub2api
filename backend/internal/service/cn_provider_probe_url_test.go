@@ -198,5 +198,5 @@ func TestCNProviderBalanceService_OfficialHostPassesValidation(t *testing.T) {
 	svc := NewCNProviderBalanceService(repo, nil, upstream, cnProbeAllowlistConfig("api.deepseek.com"))
 
 	_, _ = svc.QueryBalance(context.Background(), 3)
-	require.Equal(t, 1, upstream.calls, "official host must pass URL policy and reach the upstream layer")
+	require.Equal(t, 2, upstream.calls, "official host passes URL policy; the injected transport failure is retried once")
 }

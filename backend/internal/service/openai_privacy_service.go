@@ -122,7 +122,7 @@ func fetchChatGPTAccountInfo(ctx context.Context, clientFactory PrivacyClientFac
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 
 	client, err := clientFactory(proxyURL)
@@ -132,14 +132,17 @@ func fetchChatGPTAccountInfo(ctx context.Context, clientFactory PrivacyClientFac
 	}
 
 	var result map[string]any
-	resp, err := client.R().
-		SetContext(ctx).
-		SetHeader("Authorization", "Bearer "+accessToken).
-		SetHeader("Origin", "https://chatgpt.com").
-		SetHeader("Referer", "https://chatgpt.com/").
-		SetHeader("Accept", "application/json").
-		SetSuccessResult(&result).
-		Get(chatGPTAccountsCheckURL)
+	resp, err := readReqResponse(ctx, 15*time.Second, func(attemptCtx context.Context) (*req.Response, error) {
+		result = nil
+		return client.R().SetRetryCount(0).
+			SetContext(attemptCtx).
+			SetHeader("Authorization", "Bearer "+accessToken).
+			SetHeader("Origin", "https://chatgpt.com").
+			SetHeader("Referer", "https://chatgpt.com/").
+			SetHeader("Accept", "application/json").
+			SetSuccessResult(&result).
+			Get(chatGPTAccountsCheckURL)
+	})
 
 	if err != nil {
 		slog.Warn("chatgpt_account_check_request_error", "error", err.Error())
@@ -233,7 +236,7 @@ func fetchChatGPTSubscriptionExpiresAt(ctx context.Context, clientFactory Privac
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 
 	client, err := clientFactory(proxyURL)
@@ -242,21 +245,25 @@ func fetchChatGPTSubscriptionExpiresAt(ctx context.Context, clientFactory Privac
 		return ""
 	}
 
-	var result struct {
+	type subscriptionInfo struct {
 		PlanType    string `json:"plan_type"`
 		ActiveUntil string `json:"active_until"`
 		WillRenew   bool   `json:"will_renew"`
 		ID          string `json:"id"`
 	}
-	resp, err := client.R().
-		SetContext(ctx).
-		SetHeader("Authorization", "Bearer "+accessToken).
-		SetHeader("Origin", "https://chatgpt.com").
-		SetHeader("Referer", "https://chatgpt.com/").
-		SetHeader("Accept", "application/json").
-		SetSuccessResult(&result).
-		SetQueryParam("account_id", accountID).
-		Get(chatGPTSubscriptionsURL)
+	var result subscriptionInfo
+	resp, err := readReqResponse(ctx, 15*time.Second, func(attemptCtx context.Context) (*req.Response, error) {
+		result = subscriptionInfo{}
+		return client.R().SetRetryCount(0).
+			SetContext(attemptCtx).
+			SetHeader("Authorization", "Bearer "+accessToken).
+			SetHeader("Origin", "https://chatgpt.com").
+			SetHeader("Referer", "https://chatgpt.com/").
+			SetHeader("Accept", "application/json").
+			SetSuccessResult(&result).
+			SetQueryParam("account_id", accountID).
+			Get(chatGPTSubscriptionsURL)
+	})
 	if err != nil {
 		slog.Warn("chatgpt_subscription_request_error", "error", err.Error())
 		return ""

@@ -15,7 +15,7 @@ const (
 	// 与 openAICodexVersionSyncInterval 的放缓口径保持一致（fork 决策）。
 	claudeCodeVersionSyncInterval = 48 * time.Hour
 	// claudeCodeVersionSyncTimeout 单次同步的整体超时。
-	claudeCodeVersionSyncTimeout = 30 * time.Second
+	claudeCodeVersionSyncTimeout = 130 * time.Second
 	// claudeCodeVersionSyncRepo 官方 Claude Code CLI 仓库。
 	claudeCodeVersionSyncRepo = "anthropics/claude-code"
 	// claudeCodeVersionSyncPerPage 回退路径单次拉取的 release 数量（主路径见
@@ -63,18 +63,7 @@ func (s *ClaudeCodeVersionSyncService) Start() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-
-		s.runInitial()
-		for {
-			select {
-			case <-ticker.C:
-				s.runOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
+		runPeriodicReadRefresh(s.stopCh, s.interval, s.runInitial, s.runOnce)
 	}()
 }
 
@@ -90,12 +79,12 @@ func (s *ClaudeCodeVersionSyncService) Stop() {
 
 // runInitial 执行启动时的首次同步。若同步值在一个同步周期内已被刷新过则跳过：
 // 频繁重启、滚动发布或崩溃重启会让「启动即同步」放大成对 GitHub 的连续请求，
-// 而同步间隔只有 1 小时，重启后没有立刻重新拉取的必要。
-func (s *ClaudeCodeVersionSyncService) runInitial() {
+// 同步值仍然新鲜时，重启无需再次查询。
+func (s *ClaudeCodeVersionSyncService) runInitial() bool {
 	if s.syncedWithinInterval() {
-		return
+		return true
 	}
-	s.runOnce()
+	return s.runOnce()
 }
 
 // syncedWithinInterval 判断已同步值是否仍在一个同步周期内。
@@ -118,36 +107,37 @@ func (s *ClaudeCodeVersionSyncService) syncedWithinInterval() bool {
 	return time.Since(setting.UpdatedAt) < s.interval
 }
 
-func (s *ClaudeCodeVersionSyncService) runOnce() {
+func (s *ClaudeCodeVersionSyncService) runOnce() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeVersionSyncTimeout)
 	defer cancel()
 
 	if !s.autoSyncEnabled(ctx) {
-		return
+		return true
 	}
 
 	latest := s.fetchLatestStableVersion(ctx)
 	if latest == "" {
-		return
+		return false
 	}
 
 	current, err := s.settingRepo.GetValue(ctx, SettingKeyClaudeCodeClientVersionSynced)
 	if err != nil && !errors.Is(err, ErrSettingNotFound) {
 		// 无法确认已有版本时跳过写入，避免数据库短暂故障导致版本降级。
 		slog.Warn("claude_code_version_sync_current_read_failed", "error", err)
-		return
+		return false
 	}
 	current = NormalizeClaudeCodeClientVersion(current)
 	// 只向前推进：上游偶发返回旧数据或重新发布历史 tag 时不把已同步的版本号降级。
 	if current != "" && CompareVersions(latest, current) <= 0 {
-		return
+		return true
 	}
 	if err := s.settingRepo.Set(ctx, SettingKeyClaudeCodeClientVersionSynced, latest); err != nil {
 		slog.Warn("claude_code_version_sync_persist_failed", "version", latest, "error", err)
-		return
+		return false
 	}
 	s.settingService.InvalidateClaudeCodeClientVersionCache()
 	slog.Info("claude_code_version_synced", "previous", current, "version", latest)
+	return true
 }
 
 // fetchLatestStableVersion 取官方最新稳定版 CLI 版本号；取不到时返回空串，

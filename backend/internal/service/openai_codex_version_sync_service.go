@@ -13,7 +13,7 @@ const (
 	// 48 小时足以跟上，同时把对 GitHub API 的调用压到每两天 1 次。
 	openAICodexVersionSyncInterval = 48 * time.Hour
 	// openAICodexVersionSyncTimeout 单次同步的整体超时。
-	openAICodexVersionSyncTimeout = 30 * time.Second
+	openAICodexVersionSyncTimeout = 130 * time.Second
 	// openAICodexVersionSyncRepo 官方 Codex 客户端仓库。
 	openAICodexVersionSyncRepo = "openai/codex"
 	// openAICodexVersionSyncPerPage 回退路径单次拉取的 release 数量（主路径见
@@ -63,18 +63,7 @@ func (s *OpenAICodexVersionSyncService) Start() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-
-		s.runInitial()
-		for {
-			select {
-			case <-ticker.C:
-				s.runOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
+		runPeriodicReadRefresh(s.stopCh, s.interval, s.runInitial, s.runOnce)
 	}()
 }
 
@@ -91,11 +80,11 @@ func (s *OpenAICodexVersionSyncService) Stop() {
 // runInitial 执行启动时的首次同步。若同步值在一个同步周期内已被刷新过则跳过：
 // 频繁重启、滚动发布或崩溃重启会让「启动即同步」放大成对 GitHub 的连续请求，
 // 而版本号是天级变化的，重启后没有立刻重新拉取的必要。
-func (s *OpenAICodexVersionSyncService) runInitial() {
+func (s *OpenAICodexVersionSyncService) runInitial() bool {
 	if s.syncedWithinInterval() {
-		return
+		return true
 	}
-	s.runOnce()
+	return s.runOnce()
 }
 
 // syncedWithinInterval 判断已同步值是否仍在一个同步周期内。
@@ -118,30 +107,31 @@ func (s *OpenAICodexVersionSyncService) syncedWithinInterval() bool {
 	return time.Since(setting.UpdatedAt) < s.interval
 }
 
-func (s *OpenAICodexVersionSyncService) runOnce() {
+func (s *OpenAICodexVersionSyncService) runOnce() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), openAICodexVersionSyncTimeout)
 	defer cancel()
 
 	if !s.autoSyncEnabled(ctx) {
-		return
+		return true
 	}
 
 	latest := s.fetchLatestStableVersion(ctx)
 	if latest == "" {
-		return
+		return false
 	}
 
 	current := NormalizeCodexClientVersion(s.currentSyncedVersion(ctx))
 	// 只向前推进：上游偶发返回旧数据或重新发布历史 tag 时不把已同步的版本号降级。
 	if current != "" && CompareVersions(latest, current) <= 0 {
-		return
+		return true
 	}
 	if err := s.settingRepo.Set(ctx, SettingKeyOpenAICodexClientVersionSynced, latest); err != nil {
 		slog.Warn("openai_codex_version_sync_persist_failed", "version", latest, "error", err)
-		return
+		return false
 	}
 	s.settingService.InvalidateOpenAICodexClientVersionCache()
 	slog.Info("openai_codex_version_synced", "previous", current, "version", latest)
+	return true
 }
 
 // fetchLatestStableVersion 取官方最新稳定版客户端版本号；取不到时返回空串，

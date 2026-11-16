@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"sync"
 	"time"
 
@@ -134,7 +136,7 @@ func (s *OpenAIModelCatalogRefreshService) refresh(ctx context.Context, a *Accou
 	if err != nil {
 		return err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	models, fetchErr := s.reader.FetchUpstreamSupportedModels(requestCtx, a)
 	cancel()
 	now := time.Now().UTC()
@@ -146,6 +148,25 @@ func (s *OpenAIModelCatalogRefreshService) refresh(ctx context.Context, a *Accou
 	}
 	if fetchErr != nil {
 		state.Error = SanitizeUpstreamErrorMessage(fetchErr.Error())
+		// Temporary failures get a short follow-up; configuration and permanent
+		// client errors retain the normal cadence until the account is corrected.
+		var syncErr *UpstreamModelSyncError
+		var manifestErr *codexModelsManifestUpstreamError
+		var status int
+		permanent := false
+		if errors.As(fetchErr, &syncErr) {
+			status = syncErr.StatusCode
+			permanent = syncErr.Kind == UpstreamModelSyncErrorConfiguration || syncErr.Kind == UpstreamModelSyncErrorUnsupported
+		}
+		if errors.As(fetchErr, &manifestErr) {
+			status = manifestErr.statusCode
+		}
+		if status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests {
+			permanent = true
+		}
+		if !permanent {
+			state.NextSyncAt = now.Add(2 * time.Minute).Format(time.RFC3339Nano)
+		}
 	} else {
 		state.Added, state.Removed = ReplaceAccountModelWhitelist(a, models)
 		state.SyncedAt = state.AttemptedAt

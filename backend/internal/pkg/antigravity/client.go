@@ -317,6 +317,9 @@ func IsConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
 
 	// 检查超时错误
 	var netErr net.Error
@@ -740,6 +743,9 @@ func (c *Client) fetchAvailableModels(ctx context.Context, availableURLs []strin
 		respBodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
 		_ = resp.Body.Close() // 立即关闭，避免循环内 defer 导致的资源泄漏
 		if err != nil {
+			if ctx.Err() == nil && shouldFallbackToNextURL(err, resp.StatusCode) && urlIdx < len(availableURLs)-1 {
+				continue
+			}
 			return nil, nil, fmt.Errorf("读取响应失败: %w", err)
 		}
 		if int64(len(respBodyBytes)) > bodyLimit {

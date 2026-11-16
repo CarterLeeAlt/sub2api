@@ -112,6 +112,7 @@ func TestAccountHandlerGrokModelDiagnosticsSyncRereadsLatestAccount(t *testing.T
 	upstream := &grokDiagHandlerUpstream{responses: []*http.Response{
 		{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"grok-4.7"}]}`))},
 		{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"registry-down"}`))},
+		{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"registry-down"}`))},
 	}}
 	router := newGrokDiagSyncRouter(adminSvc, repo, upstream)
 
@@ -154,6 +155,7 @@ func TestAccountHandlerGrokModelDiagnosticsSyncErrorAndPreviewStayUnchanged(t *t
 
 	previewRouter := newGrokDiagSyncRouter(newStubAdminService(), nil, &grokDiagHandlerUpstream{responses: []*http.Response{
 		{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"grok-4.7"}]}`))},
+		{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"registry-secret"}`))},
 		{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"registry-secret"}`))},
 	}})
 	previewRec := httptest.NewRecorder()

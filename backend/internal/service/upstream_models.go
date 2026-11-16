@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 )
 
 const (
@@ -1401,10 +1402,16 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 }
 
 func (s *AccountTestService) doUpstreamModelsRequest(req *http.Request, proxyURL string, account *Account) (*http.Response, error) {
-	if s.tlsFPProfileService == nil {
-		return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, nil)
+	bodyLimit := resolveModelsListReadLimit(s.cfg)
+	if bodyLimit < upstreamModelsBodyLimit {
+		bodyLimit = upstreamModelsBodyLimit
 	}
-	return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	return httpclient.DoRead(req, 15*time.Second, bodyLimit, func(r *http.Request) (*http.Response, error) {
+		if s.tlsFPProfileService == nil {
+			return s.httpUpstream.DoWithTLS(r, proxyURL, account.ID, account.Concurrency, nil)
+		}
+		return s.httpUpstream.DoWithTLS(r, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	})
 }
 
 func upstreamModelsProxyURL(account *Account) string {

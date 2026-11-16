@@ -53,7 +53,7 @@ export interface CNProviderBalanceResult {
 /** 查询 Coding Plan 滚动窗口用量（5h + weekly）。 */
 export async function queryQuota(id: number): Promise<CNProviderQuotaProbeResult> {
   const { data } = await apiClient.get<CNProviderQuotaProbeResult>(
-    `/admin/cn-providers/accounts/${id}/quota`
+    `/admin/cn-providers/accounts/${id}/quota`, { timeout: 60_000 }
   )
   return data
 }
@@ -61,7 +61,7 @@ export async function queryQuota(id: number): Promise<CNProviderQuotaProbeResult
 /** 查询 payg 账号余额。 */
 export async function queryBalance(id: number): Promise<CNProviderBalanceResult> {
   const { data } = await apiClient.get<CNProviderBalanceResult>(
-    `/admin/cn-providers/accounts/${id}/balance`
+    `/admin/cn-providers/accounts/${id}/balance`, { timeout: 60_000 }
   )
   return data
 }

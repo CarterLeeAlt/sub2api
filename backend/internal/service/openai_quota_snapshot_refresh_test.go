@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/stretchr/testify/require"
 )
@@ -351,6 +352,21 @@ func TestOpenAIQuotaSnapshotRefreshDelayCoversTenThroughFifteenMinutes(t *testin
 		require.LessOrEqual(t, delay, 15*time.Minute)
 		require.Zero(t, delay%time.Minute)
 	}
+}
+
+func TestOpenAIQuotaSnapshotFailureGetsIndependentShortRetry(t *testing.T) {
+	now := time.Now()
+	repo := &quotaSnapshotRefreshRepoStub{accounts: []Account{quotaSnapshotParent(1, StatusActive, true), quotaSnapshotParent(2, StatusActive, true)}}
+	quota := &quotaSnapshotUsageReaderStub{usage: quotaSnapshotTestUsage(), errors: map[int64]error{1: infraerrors.New(502, "OPENAI_UPSTREAM_NETWORK_ERROR", "network error")}}
+	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
+	svc.now = func() time.Time { return now }
+	require.NoError(t, svc.RunOnce(context.Background()))
+	require.Equal(t, []int64{1, 2}, quota.calls)
+	now = now.Add(time.Minute)
+	delete(quota.errors, 1)
+	require.NoError(t, svc.RunOnce(context.Background()))
+	require.Equal(t, []int64{1, 2, 1}, quota.calls, "healthy accounts must not be retried with failed accounts")
+	require.Zero(t, svc.failures[1])
 }
 
 func TestOpenAIQuotaSnapshotRefreshLeaderLockSkipsBusyAndErrors(t *testing.T) {

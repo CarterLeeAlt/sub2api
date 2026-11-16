@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
@@ -91,7 +93,19 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		// synced catalog at whatever models shipped with that historical version.
 		// Transport errors are classified here with the request's credential owner.
 		gateway := &OpenAIGatewayService{accountRepo: s.accountRepo}
-		manifest, err := gateway.FetchCodexModelsManifest(ctx, account, "", "")
+		var manifest *OpenAIModelsResponse
+		err := httpclient.RetryRead(ctx, 15*time.Second, func(attemptCtx context.Context) (int, http.Header, error) {
+			var fetchErr error
+			manifest, fetchErr = gateway.FetchCodexModelsManifest(attemptCtx, account, "", "")
+			if fetchErr == nil {
+				return http.StatusOK, nil, nil
+			}
+			var upstreamErr *codexModelsManifestUpstreamError
+			if errors.As(fetchErr, &upstreamErr) && upstreamErr.retryable {
+				return upstreamErr.statusCode, upstreamErr.headers, fetchErr
+			}
+			return http.StatusBadRequest, nil, fetchErr
+		})
 		if err != nil {
 			var upstreamErr *codexModelsManifestUpstreamError
 			if errors.As(err, &upstreamErr) {

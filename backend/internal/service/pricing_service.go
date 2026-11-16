@@ -618,9 +618,6 @@ func (s *PricingService) downloadPricingData() error {
 	}
 	logger.LegacyPrintf("service.pricing", "[Pricing] Downloading from %s", remoteURL)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	// 获取远程哈希（用于同步锚点，不作为完整性校验）
 	var remoteHash string
 	if strings.TrimSpace(s.cfg.Pricing.HashURL) != "" {
@@ -630,6 +627,8 @@ func (s *PricingService) downloadPricingData() error {
 		}
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
+	defer cancel()
 	body, err := s.remoteClient.FetchPricingJSON(ctx, remoteURL)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
@@ -1203,7 +1202,7 @@ func (s *PricingService) fetchRemoteHash() (string, error) {
 		return "", err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
 	defer cancel()
 
 	hash, err := s.remoteClient.FetchHashText(ctx, hashURL)

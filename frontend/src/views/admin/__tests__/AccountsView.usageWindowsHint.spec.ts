@@ -298,7 +298,7 @@ describe('admin AccountsView usage windows hint', () => {
     const wrapper = mountView()
     await flushPromises()
     await wrapper.get('[data-test="request-usage"]').trigger('click')
-    await vi.waitFor(() => expect(getBatchUsage).toHaveBeenCalledWith([41], false))
+    await vi.waitFor(() => expect(getBatchUsage).toHaveBeenCalledWith([41], false, expect.any(AbortSignal)))
 
     await wrapper.get('[data-test="save-account"]').trigger('click')
     expect(wrapper.get('[data-test="account-threshold"]').text()).toBe('100')
@@ -326,11 +326,25 @@ describe('admin AccountsView usage windows hint', () => {
     await flushPromises()
     await Promise.all(wrapper.findAll('[data-test="request-usage"]').map(button => button.trigger('click')))
     await vi.waitFor(() => expect(getBatchUsage).toHaveBeenCalledTimes(1))
-    expect(getBatchUsage).toHaveBeenNthCalledWith(1, [1, 2, 3, 4, 5, 6], false)
+    expect(getBatchUsage).toHaveBeenNthCalledWith(1, [1, 2, 3, 4, 5, 6], false, expect.any(AbortSignal))
     rejectFirst(new Error('upstream temporarily unavailable'))
     await vi.waitFor(() => expect(getBatchUsage).toHaveBeenCalledTimes(3))
-    expect(getBatchUsage).toHaveBeenNthCalledWith(2, [7, 8, 9, 10, 11, 12], false)
-    expect(getBatchUsage).toHaveBeenNthCalledWith(3, [13], false)
+    expect(getBatchUsage).toHaveBeenNthCalledWith(2, [7, 8, 9, 10, 11, 12], false, expect.any(AbortSignal))
+    expect(getBatchUsage).toHaveBeenNthCalledWith(3, [13], false, expect.any(AbortSignal))
     wrapper.unmount()
+  })
+
+  it('receives background snapshots with fast auto-refresh off and stops on unmount', async () => {
+    vi.useFakeTimers()
+    listAccounts.mockResolvedValueOnce({ items: [{ id: 1, name: 'quota', platform: 'openai', type: 'oauth', credentials: {}, extra: {}, updated_at: '2026-01-01' }], total: 1, pages: 1 })
+    const wrapper = mountView()
+    try {
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(listWithEtag).toHaveBeenCalledTimes(1)
+      wrapper.unmount()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(listWithEtag).toHaveBeenCalledTimes(1)
+    } finally { wrapper.unmount(); vi.useRealTimers() }
   })
 })

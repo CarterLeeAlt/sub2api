@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"golang.org/x/sync/singleflight"
 )
@@ -23,8 +24,6 @@ const (
 	grokQuotaProbeInput      = "hi"
 	grokQuotaDefaultModel    = grokDefaultResponsesModel
 	grokBillingExtraKey      = "grok_billing_snapshot"
-	grokBillingMaxAttempts   = 2
-	grokBillingRetryDelay    = 100 * time.Millisecond
 )
 
 type GrokQuotaProbeResult struct {
@@ -278,7 +277,7 @@ func (s *GrokQuotaService) probeBilling(ctx context.Context, accountID int64) (*
 		return nil, err
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, grokQuotaUpstreamTimeout)
+	probeCtx, cancel := context.WithTimeout(ctx, 2*grokQuotaUpstreamTimeout+time.Second)
 	defer cancel()
 	type billingResult struct {
 		summary *xai.BillingSummary
@@ -359,7 +358,7 @@ func (s *GrokQuotaService) runProbeFlight(
 		return nil, infraerrors.New(http.StatusInternalServerError, "GROK_QUOTA_NOT_CONFIGURED", "grok quota service is not configured")
 	}
 	resultCh := s.probeFlight.DoChan(key, func() (any, error) {
-		sharedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grokQuotaUpstreamTimeout+5*time.Second)
+		sharedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*grokQuotaUpstreamTimeout+5*time.Second)
 		defer cancel()
 		return probe(sharedCtx)
 	})
@@ -390,63 +389,41 @@ func (s *GrokQuotaService) fetchBilling(
 	if err != nil {
 		return nil, 0, infraerrors.Newf(http.StatusBadRequest, "GROK_QUOTA_BASE_URL_INVALID", "invalid Grok base_url: %v", err)
 	}
-	for attempt := 0; attempt < grokBillingMaxAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, billingURL, nil)
-		if err != nil {
-			return nil, 0, infraerrors.Newf(http.StatusInternalServerError, "GROK_QUOTA_PROBE_REQUEST_BUILD_FAILED", "failed to build billing request: %v", err)
-		}
-		xai.ApplyCLIBillingHeaders(req, token)
-		// billing 探测与真实转发保持同一套账号级请求头覆写。
-		account.ApplyHeaderOverrides(req.Header)
-		resp, requestErr := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 2))
-
-		statusCode := 0
-		var bodyBytes []byte
-		if requestErr == nil {
-			statusCode = resp.StatusCode
-			bodyBytes, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			_ = resp.Body.Close()
-		}
-
-		shouldRetry := requestErr != nil || isRetryableGrokBillingStatus(statusCode)
-		if shouldRetry && attempt+1 < grokBillingMaxAttempts {
-			timer := time.NewTimer(grokBillingRetryDelay)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, statusCode, infraerrors.Newf(http.StatusBadGateway, "GROK_QUOTA_PROBE_REQUEST_FAILED", "billing request failed: %v", ctx.Err())
-			}
-			continue
-		}
-
-		if requestErr != nil {
-			return nil, 0, infraerrors.Newf(http.StatusBadGateway, "GROK_QUOTA_PROBE_REQUEST_FAILED", "billing request failed: %v", requestErr)
-		}
-		if statusCode == http.StatusTooManyRequests {
-			return nil, statusCode, nil
-		}
-		if statusCode >= 400 {
-			bodyText := truncate(strings.TrimSpace(string(bodyBytes)), 240)
-			slog.Warn("grok_quota_billing_failed", "account_id", account.ID, "weekly", weekly, "status", statusCode, "body", bodyText)
-			return nil, statusCode, infraerrors.Newf(mapUpstreamStatus(statusCode), "GROK_QUOTA_PROBE_UPSTREAM_ERROR", "billing returned %d: %s", statusCode, bodyText)
-		}
-		payload, err := xai.ParseBillingPayload(bodyBytes)
-		if err != nil {
-			return nil, statusCode, infraerrors.Newf(http.StatusBadGateway, "GROK_QUOTA_BILLING_PARSE_ERROR", "failed to parse billing body: %v", err)
-		}
-		return xai.BuildBillingSummary(payload.Config), statusCode, nil
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, billingURL, nil)
+	if err != nil {
+		return nil, 0, infraerrors.Newf(http.StatusInternalServerError, "GROK_QUOTA_PROBE_REQUEST_BUILD_FAILED", "failed to build billing request: %v", err)
 	}
-	return nil, 0, infraerrors.New(http.StatusBadGateway, "GROK_QUOTA_PROBE_REQUEST_FAILED", "billing request failed")
-}
+	xai.ApplyCLIBillingHeaders(req, token)
+	// billing 探测与真实转发保持同一套账号级请求头覆写。
+	account.ApplyHeaderOverrides(req.Header)
+	resp, requestErr := httpclient.DoRead(req, grokQuotaUpstreamTimeout, 1<<20, func(r *http.Request) (*http.Response, error) {
+		return s.httpUpstream.Do(r, proxyURL, account.ID, maxInt(account.Concurrency, 2))
+	})
 
-func isRetryableGrokBillingStatus(statusCode int) bool {
-	switch statusCode {
-	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
+	statusCode := 0
+	var bodyBytes []byte
+	if requestErr == nil {
+		statusCode = resp.StatusCode
+		bodyBytes, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
 	}
+
+	if requestErr != nil {
+		return nil, 0, infraerrors.Newf(http.StatusBadGateway, "GROK_QUOTA_PROBE_REQUEST_FAILED", "billing request failed: %v", requestErr)
+	}
+	if statusCode == http.StatusTooManyRequests {
+		return nil, statusCode, nil
+	}
+	if statusCode >= 400 {
+		bodyText := truncate(strings.TrimSpace(string(bodyBytes)), 240)
+		slog.Warn("grok_quota_billing_failed", "account_id", account.ID, "weekly", weekly, "status", statusCode, "body", bodyText)
+		return nil, statusCode, infraerrors.Newf(mapUpstreamStatus(statusCode), "GROK_QUOTA_PROBE_UPSTREAM_ERROR", "billing returned %d: %s", statusCode, bodyText)
+	}
+	payload, err := xai.ParseBillingPayload(bodyBytes)
+	if err != nil {
+		return nil, statusCode, infraerrors.Newf(http.StatusBadGateway, "GROK_QUOTA_BILLING_PARSE_ERROR", "failed to parse billing body: %v", err)
+	}
+	return xai.BuildBillingSummary(payload.Config), statusCode, nil
 }
 
 func mergeGrokBillingProbeErrors(weeklyStatus, monthlyStatus int, weeklyErr, monthlyErr error) error {

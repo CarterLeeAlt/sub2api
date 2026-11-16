@@ -76,6 +76,33 @@ beforeEach(() => {
 })
 
 describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
+  it('expires a previously fresh snapshot while the page stays open', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account: makeAccount({ extra: {
+      codex_reset_credit_snapshot: { available_count: 2, fetched_at: new Date(Date.now() - 29 * 60_000).toISOString() }
+    } }) } })
+    try {
+      expect(resetButton(wrapper).attributes('disabled')).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(90_000)
+      expect(resetButton(wrapper).attributes('disabled')).toBeDefined()
+      expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').text()).toContain('openaiQuotaReset.stale')
+      expect(refreshOpenAIQuota).not.toHaveBeenCalled()
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
+  it('shows an actual pending query then replaces it with its failure', async () => {
+    let reject!: (error: unknown) => void
+    vi.mocked(refreshOpenAIQuota).mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail }))
+    const wrapper = mount(OpenAIQuotaResetCell, { props: { account: makeAccount({}) } })
+    await wrapper.findAll('button')[0].trigger('click')
+    expect(wrapper.get('[data-testid="reset-credit-cache-stale"]').text()).toContain('openaiQuotaReset.refreshing')
+    reject({ status: 502, message: 'network unavailable' })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="reset-credit-cache-stale"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="openai-health-error"]').text()).toContain('network unavailable')
+    wrapper.unmount()
+  })
+
   it('persists the invalid-account message across remounts and hides the stale-only badge', async () => {
     const account = makeAccount({ status: 'error', error_message: 'Encountered invalidated oauth token', extra: {
       openai_upstream_health: { kind: 'auth_invalid', message: 'Encountered invalidated oauth token' },

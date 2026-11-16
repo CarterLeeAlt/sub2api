@@ -104,6 +104,30 @@ func TestModelCatalogPostgresConsistency(t *testing.T) {
 	// A source edit starts a new round and cannot be delayed by the previous round's completion.
 	require.Empty(t, read().ModelCatalog().NextSyncAt)
 
+	t.Run("round completion preserves failed observation retry deadline", func(t *testing.T) {
+		observation := read()
+		credentials, err := json.Marshal(observation.Credentials)
+		require.NoError(t, err)
+		state := observation.ModelCatalog()
+		state.Error = "temporary upstream failure"
+		state.AttemptedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		state.NextSyncAt = time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+		applied, err := repo.SaveModelCatalogObservation(ctx, observation, state.Revision, string(credentials), state)
+		require.NoError(t, err)
+		require.True(t, applied)
+		next := time.Now().Add(time.Hour)
+		require.NoError(t, repo.FinishModelCatalogRound(ctx, time.Now().Add(-time.Minute), next))
+		require.Equal(t, state.NextSyncAt, read().ModelCatalog().NextSyncAt)
+		observation = read()
+		state.Error = ""
+		state.AttemptedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		applied, err = repo.SaveModelCatalogObservation(ctx, observation, state.Revision, string(credentials), state)
+		require.NoError(t, err)
+		require.True(t, applied)
+		require.NoError(t, repo.FinishModelCatalogRound(ctx, time.Now().Add(-time.Minute), next))
+		require.Equal(t, next.Format(time.RFC3339Nano), read().ModelCatalog().NextSyncAt)
+	})
+
 	t.Run("compound bulk edits roll back fields groups and shadows", func(t *testing.T) {
 		before := read()
 		priority := before.Priority + 10

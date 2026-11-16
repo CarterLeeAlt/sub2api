@@ -128,3 +128,58 @@ func TestCNProviderBalanceService_DeepSeekValidZeroBalanceRemainsSuccessful(t *t
 	require.Len(t, result.Balances, 1)
 	require.Len(t, repo.extraWrites, 1, "a valid upstream zero balance must still be persisted")
 }
+
+func TestKimiInvalidBalanceNeverPersistsZero(t *testing.T) {
+	for _, body := range []string{`{"data":`, `{}`, `{"code":1,"data":{"available_balance":0}}`, `{"code":"error","data":{"available_balance":0}}`, `{"code":0.5,"data":{"available_balance":0}}`, `{"data":{"available_balance":"invalid"}}`, `{"data":{"available_balance":"NaN"}}`, `{"data":{"available_balance":"+Inf"}}`} {
+		t.Run(body, func(t *testing.T) {
+			account := newDeepSeekBalanceProbeAccount()
+			account.Platform = PlatformKimi
+			repo := &cnBalanceProbeRepo{account: account}
+			svc := NewCNProviderBalanceService(repo, nil, &cnBalanceResponseUpstream{statusCode: 200, body: body}, nil)
+			result, err := svc.QueryBalance(context.Background(), account.ID)
+			require.NoError(t, err)
+			require.False(t, result.Success)
+			require.NotEmpty(t, result.Error)
+			require.Empty(t, repo.extraWrites)
+		})
+	}
+}
+
+type brokenBalanceBody struct{}
+
+func (brokenBalanceBody) Read(p []byte) (int, error) { return copy(p, `{"data":`), io.ErrUnexpectedEOF }
+func (brokenBalanceBody) Close() error               { return nil }
+
+type interruptedBalanceUpstream struct {
+	cnBalanceResponseUpstream
+	calls   int
+	recover bool
+}
+
+func (u *interruptedBalanceUpstream) Do(r *http.Request, p string, id int64, n int) (*http.Response, error) {
+	u.calls++
+	if u.recover && u.calls == 2 {
+		return u.cnBalanceResponseUpstream.Do(r, p, id, n)
+	}
+	return &http.Response{StatusCode: 200, Header: make(http.Header), Body: brokenBalanceBody{}}, nil
+}
+func TestKimiInterruptedBalanceRetriesWithoutFalseZero(t *testing.T) {
+	for _, recover := range []bool{false, true} {
+		account := newDeepSeekBalanceProbeAccount()
+		account.Platform = PlatformKimi
+		repo := &cnBalanceProbeRepo{account: account}
+		upstream := &interruptedBalanceUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{200, `{"code":0,"data":{"available_balance":12}}`}, recover: recover}
+		result, err := NewCNProviderBalanceService(repo, nil, upstream, nil).QueryBalance(context.Background(), account.ID)
+		require.Equal(t, 2, upstream.calls)
+		if recover {
+			require.NoError(t, err)
+			require.True(t, result.Success)
+			require.Equal(t, 12.0, result.Balance)
+			require.Len(t, repo.extraWrites, 1)
+		} else {
+			require.Error(t, err)
+			require.Nil(t, result)
+			require.Empty(t, repo.extraWrites)
+		}
+	}
+}
