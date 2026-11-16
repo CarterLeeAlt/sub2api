@@ -33,11 +33,13 @@ type updateServiceGitHubClientStub struct {
 	recentErr      error
 	latestErr      error
 	latestRepo     string
+	latestCalls    int
 	recentRepo     string
 }
 
 func (s *updateServiceGitHubClientStub) FetchLatestRelease(_ context.Context, repo string) (*GitHubRelease, error) {
 	s.latestRepo = repo
+	s.latestCalls++
 	return s.release, s.latestErr
 }
 
@@ -54,14 +56,14 @@ func (s *updateServiceGitHubClientStub) FetchChecksumFile(context.Context, strin
 	panic("FetchChecksumFile should not be called when no update is available")
 }
 
-func TestUpdateServiceForkWithoutReleaseIsExplicitAndCached(t *testing.T) {
+func TestUpdateServiceUpstreamWithoutReleaseIsExplicitAndCached(t *testing.T) {
 	client := &updateServiceGitHubClientStub{latestErr: ErrNoPublishedRelease}
 	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.2.21", "release")
 	info, err := svc.CheckUpdate(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, "CarterLeeAlt/sub2api", client.latestRepo)
+	require.Equal(t, "Wei-Shaw/sub2api", client.latestRepo)
 	require.Equal(t, "no_release", info.WarningCode)
-	require.Contains(t, info.Warning, "CarterLeeAlt/sub2api")
+	require.Contains(t, info.Warning, "Wei-Shaw/sub2api")
 	require.False(t, info.HasUpdate)
 	require.Nil(t, info.ReleaseInfo)
 	cached, err := svc.CheckUpdate(context.Background(), false)
@@ -69,11 +71,100 @@ func TestUpdateServiceForkWithoutReleaseIsExplicitAndCached(t *testing.T) {
 	require.True(t, cached.Cached)
 	require.Equal(t, info.WarningCode, cached.WarningCode)
 	require.Equal(t, info.Warning, cached.Warning)
+	require.Equal(t, 1, client.latestCalls)
 	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrNoPublishedRelease)
+	require.Equal(t, "CarterLeeAlt/sub2api", client.latestRepo)
 	versions, err := svc.ListRollbackVersions(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, versions)
 	require.Equal(t, "CarterLeeAlt/sub2api", client.recentRepo)
+}
+
+func TestUpdateServiceUpstreamNoticeDoesNotSelectForkInstallAssets(t *testing.T) {
+	client := &updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v0.2.22", HTMLURL: "https://github.com/Wei-Shaw/sub2api/releases/tag/v0.2.22"}}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.2.21", "release")
+	info, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, "Wei-Shaw/sub2api", client.latestRepo)
+	require.True(t, info.HasUpdate)
+	require.Equal(t, "0.2.22", info.LatestVersion)
+	require.Equal(t, client.release.HTMLURL, info.ReleaseInfo.HTMLURL)
+
+	// A cached upstream update must never become an install candidate.
+	client.release = &GitHubRelease{TagName: "v0.2.21"}
+	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrNoUpdateAvailable)
+	require.Equal(t, "CarterLeeAlt/sub2api", client.latestRepo)
+	require.Equal(t, 2, client.latestCalls)
+	_, err = svc.ListRollbackVersions(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "CarterLeeAlt/sub2api", client.recentRepo)
+}
+
+func TestUpdateServiceUpstreamComparisonAndCache(t *testing.T) {
+	for _, current := range []string{"0.2.20", "0.2.21", "0.2.22-custom"} {
+		t.Run(current, func(t *testing.T) {
+			client := &updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v0.2.21"}}
+			svc := NewUpdateService(&updateServiceCacheStub{}, client, current, "source")
+			info, err := svc.CheckUpdate(context.Background(), false)
+			require.NoError(t, err)
+			require.Equal(t, current == "0.2.20", info.HasUpdate)
+			require.Empty(t, info.Warning)
+			cached, err := svc.CheckUpdate(context.Background(), false)
+			require.NoError(t, err)
+			require.True(t, cached.Cached)
+			require.Equal(t, info.HasUpdate, cached.HasUpdate)
+			require.Equal(t, 1, client.latestCalls)
+		})
+	}
+}
+
+func TestUpdateServiceCheckFailureAndRecovery(t *testing.T) {
+	client := &updateServiceGitHubClientStub{latestErr: errors.New("network unavailable")}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.2.21", "source")
+	info, err := svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.Equal(t, "check_failed", info.WarningCode)
+	require.False(t, info.Cached)
+	require.False(t, info.HasUpdate)
+	require.Nil(t, info.ReleaseInfo)
+
+	client.latestErr = nil
+	client.release = &GitHubRelease{TagName: "v0.2.22"}
+	info, err = svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.True(t, info.HasUpdate)
+	require.Empty(t, info.WarningCode)
+
+	client.latestErr = errors.New("network unavailable")
+	info, err = svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.Equal(t, "check_failed", info.WarningCode)
+	require.Contains(t, info.Warning, "network unavailable")
+	require.True(t, info.Cached)
+	require.True(t, info.HasUpdate)
+	require.Equal(t, "0.2.22", info.LatestVersion)
+
+	client.latestErr = nil
+	client.release = &GitHubRelease{TagName: "v0.2.23"}
+	info, err = svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.Empty(t, info.Warning)
+	require.Empty(t, info.WarningCode)
+	require.False(t, info.Cached)
+	require.Equal(t, "0.2.23", info.LatestVersion)
+}
+
+func TestUpdateServiceFailedRefreshDoesNotReportCachedNoRelease(t *testing.T) {
+	client := &updateServiceGitHubClientStub{latestErr: ErrNoPublishedRelease}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.2.21", "source")
+	_, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	client.latestErr = errors.New("network unavailable")
+	info, err := svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.Equal(t, "check_failed", info.WarningCode)
+	require.True(t, info.Cached)
+	require.False(t, info.HasUpdate)
 }
 
 func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {

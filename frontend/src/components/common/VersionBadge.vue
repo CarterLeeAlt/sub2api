@@ -9,7 +9,7 @@
             ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
             : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-800 dark:text-dark-400 dark:hover:bg-dark-700'
         ]"
-        :title="statusMessage"
+        :title="versionWarning || statusMessage"
       >
         <span v-if="currentVersion" class="font-medium">v{{ currentVersion }}</span>
         <span v-else class="h-3 w-12 animate-pulse rounded bg-gray-200 dark:bg-dark-600"></span>
@@ -55,12 +55,12 @@
                   </span>
                 </div>
                 <div v-if="buildIdentity" class="mt-1 font-mono text-xs text-gray-500 dark:text-dark-400">{{ buildIdentity }}</div>
-                <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
+                <p class="mt-1 text-xs text-gray-500 dark:text-dark-400" :title="versionWarning || statusMessage">
                   {{ statusMessage }}
                 </p>
               </div>
 
-              <a v-if="noRelease" href="https://github.com/CarterLeeAlt/sub2api" target="_blank" rel="noopener noreferrer"
+              <a v-if="noRelease" href="https://github.com/Wei-Shaw/sub2api" target="_blank" rel="noopener noreferrer"
                 class="flex justify-center text-sm text-primary-600 hover:underline dark:text-primary-400">
                 {{ t('version.viewRepository') }}
               </a>
@@ -125,9 +125,13 @@ const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const versionWarning = computed(() => appStore.versionWarning)
 const noRelease = computed(() => appStore.versionWarningCode === 'no_release')
-const statusMessage = computed(() => noRelease.value
-  ? t('version.noRelease')
-  : versionWarning.value || (hasUpdate.value ? t('version.latestVersion') + ': v' + latestVersion.value : t('version.upToDate')))
+const statusMessage = computed(() => {
+  if (noRelease.value) return t('version.noRelease')
+  if (versionWarning.value) {
+    return releaseInfo.value ? t('version.cachedResult', { version: latestVersion.value }) : t('version.checkFailed')
+  }
+  return t('version.latestVersion') + ': v' + latestVersion.value
+})
 
 function toggleDropdown() {
   dropdownOpen.value = !dropdownOpen.value

@@ -8,7 +8,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const updateCacheKey = "update:latest:" + service.GitHubRepository
+const updateCacheKey = "update:latest:" + service.UpstreamGitHubRepository
 
 type updateCache struct {
 	rdb *redis.Client

@@ -26,12 +26,14 @@ import (
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
-	ErrNoPublishedRelease        = infraerrors.NotFound("NO_PUBLISHED_RELEASE", "no published release is available for "+GitHubRepository)
+	ErrNoPublishedRelease        = infraerrors.NotFound("NO_PUBLISHED_RELEASE", "no published release is available")
 )
 
 const (
 	updateCacheTTL   = 1200 // 20 minutes
 	GitHubRepository = "CarterLeeAlt/sub2api"
+	// Version notifications track upstream; deployment assets belong to the fork.
+	UpstreamGitHubRepository = "Wei-Shaw/sub2api"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -141,11 +143,12 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 	}
 
 	// Fetch from GitHub
-	info, err := s.fetchLatestRelease(ctx)
+	info, err := s.fetchLatestRelease(ctx, UpstreamGitHubRepository)
 	if err != nil {
 		// Return cached on error
 		if cached, cacheErr := s.getFromCache(ctx); cacheErr == nil && cached != nil {
 			cached.Warning = "Using cached data: " + err.Error()
+			cached.WarningCode = "check_failed"
 			return cached, nil
 		}
 		return &UpdateInfo{
@@ -153,6 +156,7 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			LatestVersion:  s.currentVersion,
 			HasUpdate:      false,
 			Warning:        err.Error(),
+			WarningCode:    "check_failed",
 			BuildType:      s.buildType,
 		}, nil
 	}
@@ -165,7 +169,8 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
-	info, err := s.CheckUpdate(ctx, true)
+	// Never use the upstream notification result to select installable assets.
+	info, err := s.fetchLatestRelease(ctx, GitHubRepository)
 	if err != nil {
 		return err
 	}
@@ -404,12 +409,12 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 	return candidates, nil
 }
 
-func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {
-	release, err := s.githubClient.FetchLatestRelease(ctx, GitHubRepository)
+func (s *UpdateService) fetchLatestRelease(ctx context.Context, repository string) (*UpdateInfo, error) {
+	release, err := s.githubClient.FetchLatestRelease(ctx, repository)
 	if errors.Is(err, ErrNoPublishedRelease) {
 		return &UpdateInfo{
 			CurrentVersion: s.currentVersion, LatestVersion: s.currentVersion,
-			WarningCode: "no_release", Warning: "No release has been published for " + GitHubRepository + ".",
+			WarningCode: "no_release", Warning: "No release has been published for " + repository + ".",
 			BuildType: s.buildType,
 		}, nil
 	}

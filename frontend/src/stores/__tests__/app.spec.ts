@@ -95,14 +95,14 @@ describe('useAppStore', () => {
   it('keeps the no-release state in the version cache and clears it explicitly', async () => {
     vi.mocked(checkUpdates).mockResolvedValue({
       current_version: '0.2.21', latest_version: '0.2.21', has_update: false,
-      cached: false, build_type: 'release', warning_code: 'no_release', warning: 'No published fork release.',
+      cached: false, build_type: 'release', warning_code: 'no_release', warning: 'No published upstream release.',
     })
     const store = useAppStore()
     await store.fetchVersion()
     const cached = await store.fetchVersion()
     expect(checkUpdates).toHaveBeenCalledTimes(1)
     expect(cached?.warning_code).toBe('no_release')
-    expect(store.versionWarning).toBe('No published fork release.')
+    expect(store.versionWarning).toBe('No published upstream release.')
     store.clearVersionCache()
     expect(store.versionWarningCode).toBe('')
     expect(store.versionWarning).toBe('')
