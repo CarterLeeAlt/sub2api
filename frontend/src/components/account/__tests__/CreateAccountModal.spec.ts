@@ -162,6 +162,19 @@ function mountModal(groups: any[] = []) {
   })
 }
 
+describe('CreateAccountModal defaults', () => {
+  it('opens with OpenAI first and OAuth selected by default', () => {
+    const wrapper = mountModal()
+    const platformButtons = wrapper.find('[data-tour="account-form-platform"]').findAll('button')
+    expect(platformButtons[0]?.text()).toContain('OpenAI')
+    expect(platformButtons[0]?.classes()).toContain('text-green-600')
+
+    const accountTypeButtons = wrapper.find('[data-tour="account-form-type"]').findAll('button')
+    expect(accountTypeButtons[0]?.text()).toContain('OAuth')
+    expect(accountTypeButtons[0]?.classes()).toContain('border-green-500')
+  })
+})
+
 async function selectButtonByText(wrapper: ReturnType<typeof mountModal>, text: string) {
   const button = wrapper.findAll('button').find((candidate) => candidate.text().includes(text))
   expect(button).toBeDefined()
@@ -174,9 +187,11 @@ async function submitApiKeyAccount(
   disableUpstreamBillingProbe = false
 ) {
   const wrapper = mountModal()
-  await selectButtonByText(wrapper, platform === 'openai' ? 'OpenAI' : 'admin.accounts.claudeConsole')
+  await selectButtonByText(wrapper, platform === 'openai' ? 'OpenAI' : 'Anthropic')
   if (platform === 'openai') {
     await selectButtonByText(wrapper, 'API Key')
+  } else {
+    await selectButtonByText(wrapper, 'admin.accounts.claudeConsole')
   }
   await wrapper.get('form#create-account-form input[type="text"]').setValue(`${platform} account`)
   await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
@@ -1135,6 +1150,7 @@ describe('CreateAccountModal Vertex API key auth', () => {
 
   it('keeps Anthropic Vertex accounts on Service Account JSON only', async () => {
     const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Anthropic')
     await selectButtonByText(wrapper, 'admin.accounts.vertexLabel')
     expect(wrapper.find('[data-testid="vertex-auth-mode-apikey"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="vertex-api-key-input"]').exists()).toBe(false)
