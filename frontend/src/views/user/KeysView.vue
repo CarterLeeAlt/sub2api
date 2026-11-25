@@ -1216,7 +1216,9 @@
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const { t } = useI18n()
-import { keysAPI, authAPI, usageAPI, userGroupsAPI } from '@/api'
+import { keysAPI, usageAPI, userGroupsAPI } from '@/api'
+import { usePageVisible } from '@/composables/usePageVisible'
+import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 import BulkEditKeysModal from '@/components/keys/BulkEditKeysModal.vue'
@@ -1232,7 +1234,7 @@ import BulkEditKeysModal from '@/components/keys/BulkEditKeysModal.vue'
 	import EndpointPopover from '@/components/keys/EndpointPopover.vue'
 	import GroupBadge from '@/components/common/GroupBadge.vue'
 	import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
-	import type { ApiKey, Group, PublicSettings, SubscriptionType, GroupPlatform, UpdateApiKeyRequest } from '@/types'
+	import type { ApiKey, Group, SubscriptionType, GroupPlatform, UpdateApiKeyRequest } from '@/types'
 import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
@@ -1376,6 +1378,7 @@ const handleSelectionChange = (ids: Array<string | number>) => {
 }
 
 const handleBulkUpdated = (succeededIds: number[]) => {
+  if (succeededIds.length) void refreshBatchImageAccess(true)
   const succeeded = new Set(succeededIds)
   selectedIds.value = selectedIds.value.filter((id) => !succeeded.has(id))
   loadApiKeys()
@@ -1418,7 +1421,7 @@ const pendingCcsRow = ref<ApiKey | null>(null)
 const selectedKey = ref<ApiKey | null>(null)
 const copiedKeyId = ref<number | null>(null)
 const groupSelectorKeyId = ref<number | null>(null)
-const publicSettings = ref<PublicSettings | null>(null)
+const publicSettings = computed(() => appStore.cachedPublicSettings)
 const dropdownRef = ref<HTMLElement | null>(null)
 const columnDropdownRef = ref<HTMLElement | null>(null)
 const dropdownPosition = ref<{ top?: number; bottom?: number; left: number } | null>(null)
@@ -1673,14 +1676,6 @@ const loadUserGroupRates = async () => {
   }
 }
 
-const loadPublicSettings = async () => {
-  try {
-    publicSettings.value = await authAPI.getPublicSettings()
-  } catch (error) {
-    console.error('Failed to load public settings:', error)
-  }
-}
-
 const openUseKeyModal = (key: ApiKey) => {
   selectedKey.value = key
   showUseKeyModal.value = true
@@ -1738,6 +1733,12 @@ const editKey = (key: ApiKey) => {
   showEditModal.value = true
 }
 
+const { refreshBatchImageAccess } = useBatchImageAccess()
+const refreshAfterKeyChange = () => {
+  void loadApiKeys()
+  void refreshBatchImageAccess(true)
+}
+
 const toggleKeyStatus = async (key: ApiKey) => {
   const newStatus = key.status === 'active' ? 'inactive' : 'active'
   try {
@@ -1745,7 +1746,7 @@ const toggleKeyStatus = async (key: ApiKey) => {
     appStore.showSuccess(
       newStatus === 'active' ? t('keys.keyEnabledSuccess') : t('keys.keyDisabledSuccess')
     )
-    loadApiKeys()
+    refreshAfterKeyChange()
   } catch (error) {
     appStore.showError(t('keys.failedToUpdateStatus'))
   }
@@ -1793,7 +1794,7 @@ const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
   try {
     await keysAPI.update(key.id, { group_id: newGroupId })
     appStore.showSuccess(t('keys.groupChangedSuccess'))
-    loadApiKeys()
+    refreshAfterKeyChange()
   } catch (error) {
     appStore.showError(t('keys.failedToChangeGroup'))
   }
@@ -1898,7 +1899,7 @@ const handleSubmit = async () => {
       }
     }
     closeModals()
-    loadApiKeys()
+    refreshAfterKeyChange()
   } catch (error: any) {
     const errorMsg = error.response?.data?.detail || t('keys.failedToSave')
     appStore.showError(errorMsg)
@@ -1920,7 +1921,7 @@ const handleDelete = async () => {
     await keysAPI.delete(selectedKey.value.id)
     appStore.showSuccess(t('keys.keyDeletedSuccess'))
     showDeleteDialog.value = false
-    loadApiKeys()
+    refreshAfterKeyChange()
   } catch (error: any) {
     // 优先使用后端返回的错误消息，提供更具体的错误信息给用户
     const errorMsg = error?.message || t('keys.failedToDelete')
@@ -1976,6 +1977,7 @@ const resetQuotaUsed = async () => {
     appStore.showSuccess(t('keys.quotaResetSuccess'))
     key.quota_used = updatedKey.quota_used
     if (key.status !== updatedKey.status) {
+      void refreshBatchImageAccess(true)
       key.status = updatedKey.status
       if (selectedKey.value?.id === key.id) {
         formData.value.status = updatedKey.status === 'active' ? 'active' : 'inactive'
@@ -2087,12 +2089,18 @@ function formatResetTime(resetAt: string | null): string {
   return `${mins}m`
 }
 
+usePageVisible(() => {
+  void loadApiKeys()
+  if (!showCreateModal.value && !showEditModal.value && !showBulkEditModal.value) {
+    void loadGroups()
+    void loadUserGroupRates()
+  }
+})
 onMounted(() => {
   loadSavedColumns()
   loadApiKeys()
   loadGroups()
   loadUserGroupRates()
-  loadPublicSettings()
   document.addEventListener('click', closeGroupSelector)
   resetTimer = setInterval(() => { now.value = new Date() }, 60000)
 })

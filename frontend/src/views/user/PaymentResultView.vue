@@ -102,6 +102,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, onMounted } from 'vue'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
@@ -142,11 +143,15 @@ const returnInfo = ref<ReturnInfo | null>(null)
 const SUCCESS_STATUSES = new Set(['COMPLETED', 'PAID', 'RECHARGING'])
 const PENDING_STATUSES = new Set(['PENDING', 'CREATED', 'WAITING', 'PROCESSING'])
 const STATUS_REFRESH_INTERVAL_MS = 2000
-const STATUS_REFRESH_MAX_ATTEMPTS = 15
+const FAST_REFRESH_ATTEMPTS = 15
+const SLOW_REFRESH_INTERVAL_MS = 30_000
 
 let statusRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let userBalanceRefreshStarted = false
 const refreshAttempts = ref(0)
+let readOrder: (() => Promise<ResolvedOrder | null>) | null = null
+let refreshingOrder = false
+let disposed = false
 
 /** 充值金额 = pay_amount / (1 + fee_rate/100)，fee_rate=0 时等于 pay_amount */
 const baseAmount = computed(() => {
@@ -345,25 +350,30 @@ function clearRecoverySnapshotForTerminalStatus(status: string | null | undefine
   }
 }
 
-function scheduleStatusRefresh(refreshOrder: (() => Promise<ResolvedOrder | null>) | null): void {
+function scheduleStatusRefresh(): void {
   clearStatusRefreshTimer()
-  if (!refreshOrder || !isPending.value || refreshAttempts.value >= STATUS_REFRESH_MAX_ATTEMPTS) {
-    return
-  }
-
-  statusRefreshTimer = setTimeout(async () => {
-    refreshAttempts.value += 1
-    const refreshedOrder = await refreshOrder()
-    if (refreshedOrder) {
-      setResolvedOrder(refreshedOrder)
-      clearRecoverySnapshotForTerminalStatus(refreshedOrder.status)
-    }
-
-    if (isPendingStatus(order.value?.status)) {
-      scheduleStatusRefresh(refreshOrder)
-    }
-  }, STATUS_REFRESH_INTERVAL_MS)
+  if (disposed || document.hidden || !isPending.value) return
+  const interval = refreshAttempts.value < FAST_REFRESH_ATTEMPTS ? STATUS_REFRESH_INTERVAL_MS : SLOW_REFRESH_INTERVAL_MS
+  statusRefreshTimer = setTimeout(refreshPendingOrder, interval)
 }
+
+async function refreshPendingOrder() {
+  if (disposed || document.hidden || !readOrder || refreshingOrder || !isPending.value) return
+  clearStatusRefreshTimer()
+  refreshingOrder = true
+  try {
+    refreshAttempts.value++
+    const fresh = await readOrder()
+    if (!disposed && fresh) {
+      setResolvedOrder(fresh)
+      clearRecoverySnapshotForTerminalStatus(fresh.status)
+    }
+  } finally {
+    refreshingOrder = false
+    scheduleStatusRefresh()
+  }
+}
+usePageVisible(refreshPendingOrder)
 
 onMounted(async () => {
   const resumeToken = readRouteQueryString('resume_token')
@@ -434,7 +444,7 @@ onMounted(async () => {
     }
   }
 
-  const refreshOrder = async (): Promise<ResolvedOrder | null> => {
+  readOrder = async (): Promise<ResolvedOrder | null> => {
     if (resumeToken) {
       const resolvedOrder = await resolveOrderFromResumeToken(resumeToken)
       if (resolvedOrder) {
@@ -458,7 +468,7 @@ onMounted(async () => {
   }
 
   if (isPendingStatus(order.value?.status)) {
-    scheduleStatusRefresh(refreshOrder)
+    scheduleStatusRefresh()
   } else if (order.value) {
     clearRecoverySnapshotForTerminalStatus(order.value.status)
   } else if (returnInfo.value) {
@@ -468,6 +478,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   clearStatusRefreshTimer()
 })
 </script>

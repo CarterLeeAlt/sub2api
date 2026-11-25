@@ -9,7 +9,7 @@ import KeysView from '../KeysView.vue'
 const {
   listKeys,
   updateKey,
-  getPublicSettings,
+  refreshBatchImageAccess,
   getDashboardApiKeysUsage,
   getAvailableGroups,
   getUserGroupRates,
@@ -21,7 +21,7 @@ const {
 } = vi.hoisted(() => ({
   listKeys: vi.fn(),
   updateKey: vi.fn(),
-  getPublicSettings: vi.fn(),
+  refreshBatchImageAccess: vi.fn(),
   getDashboardApiKeysUsage: vi.fn(),
   getAvailableGroups: vi.fn(),
   getUserGroupRates: vi.fn(),
@@ -66,9 +66,6 @@ vi.mock('@/api', () => ({
     delete: vi.fn(),
     toggleStatus: vi.fn(),
   },
-  authAPI: {
-    getPublicSettings,
-  },
   usageAPI: {
     getDashboardApiKeysUsage,
   },
@@ -83,6 +80,10 @@ vi.mock('@/stores/app', () => ({
     showError,
     showSuccess,
   }),
+}))
+
+vi.mock('@/composables/useBatchImageAccess', () => ({
+  useBatchImageAccess: () => ({ refreshBatchImageAccess }),
 }))
 
 vi.mock('@/stores/onboarding', () => ({
@@ -276,7 +277,7 @@ describe('user KeysView column settings', () => {
     listKeys.mockReset()
     updateKey.mockReset()
     vi.mocked(keysAPI.create).mockReset()
-    getPublicSettings.mockReset()
+    refreshBatchImageAccess.mockReset().mockResolvedValue(false)
     getDashboardApiKeysUsage.mockReset()
     getAvailableGroups.mockReset()
     getUserGroupRates.mockReset()
@@ -293,7 +294,6 @@ describe('user KeysView column settings', () => {
       page_size: 20,
       pages: 1,
     })
-    getPublicSettings.mockResolvedValue({})
     getDashboardApiKeysUsage.mockResolvedValue({ stats: {} })
     getAvailableGroups.mockResolvedValue([])
     getUserGroupRates.mockResolvedValue({})
@@ -402,6 +402,7 @@ describe('user KeysView column settings', () => {
     await flushPromises()
     expect(listKeys).toHaveBeenCalledTimes(2)
     expect(table.props('selectedKeys')).toEqual([2])
+    expect(refreshBatchImageAccess).toHaveBeenCalledWith(true)
     wrapper.unmount()
   })
 

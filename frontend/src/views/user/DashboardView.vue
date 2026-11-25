@@ -25,6 +25,8 @@ import type { UsageLog, TrendDataPoint, ModelStat, PlatformQuotaItem } from '@/t
 import { getMyPlatformQuotas } from '@/api/user'
 import { useI18n } from 'vue-i18n'
 import { formatDateLocalInput } from '@/utils/format'
+import { usePageVisible } from '@/composables/usePageVisible'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const authStore = useAuthStore(); const user = computed(() => authStore.user)
 const { t } = useI18n()
@@ -71,9 +73,22 @@ const loadCharts = async () => {
     if (seq === chartRequest) loadingCharts.value = false
   }
 }
-const loadRecent = async () => { loadingUsage.value = true; try { const res = await usageAPI.getByDateRange(startDate.value, endDate.value); recentUsage.value = res.items.slice(0, 5) } catch (error) { console.error('Failed to load recent usage:', error) } finally { loadingUsage.value = false } }
+const beginRecentRequest = useLatestRequest()
+const loadRecent = async () => {
+  const current = beginRecentRequest()
+  loadingUsage.value = true
+  try {
+    const res = await usageAPI.getByDateRange(startDate.value, endDate.value)
+    if (current()) recentUsage.value = res.items.slice(0, 5)
+  } catch (error) {
+    if (current()) console.error('Failed to load recent usage:', error)
+  } finally {
+    if (current()) loadingUsage.value = false
+  }
+}
 const loadPlatformQuotas = async () => { try { const data = await getMyPlatformQuotas(); platformQuotas.value = data.platform_quotas ?? [] } catch (error) { console.warn('Failed to load platform quotas:', error); platformQuotas.value = [] } }
 const refreshAll = () => { loadStats(); loadCharts(); loadRecent(); loadPlatformQuotas() }
 
 onMounted(() => { refreshAll() })
+usePageVisible(refreshAll)
 </script>

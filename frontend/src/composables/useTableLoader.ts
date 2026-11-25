@@ -56,6 +56,7 @@ export function useTableLoader<T, P extends Record<string, any>>(options: TableL
         { signal: currentController.signal }
       )
 
+      if (currentController.signal.aborted) return
       items.value = response.items || []
       pagination.total = response.total || 0
       pagination.pages = response.pages || 0

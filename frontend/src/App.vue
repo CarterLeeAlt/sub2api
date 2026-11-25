@@ -11,6 +11,7 @@ import { getSetupStatus } from '@/api/setup'
 import { updateFavicon } from '@/utils/branding'
 import { FeatureFlags, isFeatureFlagEnabled } from '@/utils/featureFlags'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
+import { usePageVisible } from '@/composables/usePageVisible'
 
 const router = useRouter()
 const route = useRoute()
@@ -59,11 +60,13 @@ watch(
 )
 
 // Watch for authentication state and manage subscription data + announcements
-function onVisibilityChange() {
-  if (document.visibilityState === 'visible' && authStore.isAuthenticated) {
-    announcementStore.fetchAnnouncements()
+usePageVisible(() => {
+  void appStore.fetchPublicSettings(true)
+  if (authStore.isAuthenticated) {
+    void announcementStore.fetchAnnouncements()
+    if (authStore.isAdmin) void adminSettingsStore.fetch(true)
   }
-}
+})
 
 function onAdminComplianceRequired(event: Event) {
   const detail = (event as CustomEvent<Record<string, string>>).detail || {}
@@ -114,14 +117,11 @@ watch(
         announcementStore.fetchAnnouncements()
       }
 
-      // Register visibility change listener
-      document.addEventListener('visibilitychange', onVisibilityChange)
     } else {
       // User logged out: clear data and stop polling
       subscriptionStore.clear()
       announcementStore.reset()
       adminComplianceStore.reset()
-      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   },
   { immediate: true }
@@ -135,7 +135,6 @@ router.afterEach(() => {
 })
 
 onBeforeUnmount(() => {
-  document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('admin-compliance-required', onAdminComplianceRequired)
 })
 

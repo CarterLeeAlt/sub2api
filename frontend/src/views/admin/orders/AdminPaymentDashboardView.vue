@@ -72,6 +72,8 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminPaymentAPI } from '@/api/admin/payment'
@@ -123,18 +125,22 @@ function formatMoney(currency: string, amount: number): string {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
 }
 
+const beginDashboardRequest = useLatestRequest()
 async function loadDashboard() {
+  const current = beginDashboardRequest()
   loading.value = true
   try {
     const res = await adminPaymentAPI.getDashboard(days.value)
-    stats.value = res.data
+    if (current()) stats.value = res.data
   } catch (err: unknown) {
+    if (!current()) return
     appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error')))
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 
 watch(days, () => loadDashboard())
 onMounted(() => loadDashboard())
+usePageVisible(loadDashboard)
 </script>

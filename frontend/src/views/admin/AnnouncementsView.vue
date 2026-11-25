@@ -257,6 +257,7 @@
 </template>
 
 <script setup lang="ts">
+import { usePageVisible } from '@/composables/usePageVisible'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -613,6 +614,7 @@ function openReadStatus(row: Announcement) {
   showReadStatusDialog.value = true
 }
 
+usePageVisible(loadAnnouncements)
 onMounted(async () => {
   await loadSubscriptionGroups()
   await loadAnnouncements()

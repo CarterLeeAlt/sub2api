@@ -50,6 +50,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
@@ -102,7 +104,9 @@ const filteredChannels = computed(() => {
     .filter((ch): ch is UserAvailableChannel => ch !== null)
 })
 
+const beginChannelsRequest = useLatestRequest()
 async function loadChannels() {
+  const current = beginChannelsRequest()
   loading.value = true
   try {
     // 渠道列表和用户专属倍率并发拉取。专属倍率失败不阻塞渠道展示——
@@ -114,14 +118,17 @@ async function loadChannels() {
         return {} as Record<number, number>
       }),
     ])
+    if (!current()) return
     channels.value = list
     userGroupRates.value = rates
   } catch (err: unknown) {
+    if (!current()) return
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 
 onMounted(loadChannels)
+usePageVisible(loadChannels)
 </script>

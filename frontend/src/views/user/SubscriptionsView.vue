@@ -249,6 +249,9 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
+import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
@@ -291,15 +294,19 @@ function subscriptionPeakRateLabel(subscription: UserSubscription): string {
   return formatPeakRateWindow(subscription.group, serverTimezoneLabel(appStore.cachedPublicSettings?.server_utc_offset))
 }
 
+const beginSubscriptionRequest = useLatestRequest()
 async function loadSubscriptions() {
+  const current = beginSubscriptionRequest()
   try {
-    loading.value = true
-    subscriptions.value = await subscriptionsAPI.getMySubscriptions()
+    loading.value = subscriptions.value.length === 0
+    const fresh = await subscriptionsAPI.getMySubscriptions()
+    if (current()) subscriptions.value = fresh
   } catch (error) {
+    if (!current()) return
     console.error('Failed to load subscriptions:', error)
     appStore.showError(t('userSubscriptions.failedToLoad'))
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 
@@ -388,7 +395,7 @@ function formatResetTime(windowStart: string | null, windowHours: number): strin
   return parts ? formatDurationParts(parts) : t('userSubscriptions.windowNotActive')
 }
 
-onMounted(() => {
-  loadSubscriptions()
-})
+onMounted(loadSubscriptions)
+usePageVisible(loadSubscriptions)
+useIntervalFn(() => { if (!document.hidden) void loadSubscriptions() }, 5 * 60_000)
 </script>

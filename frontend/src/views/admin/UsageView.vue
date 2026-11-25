@@ -185,6 +185,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import { saveAs } from 'file-saver'
 import { useRoute } from 'vue-router'
@@ -815,7 +817,9 @@ const selectedErrorId = ref<number | null>(null)
 const toRFC3339 = (d: string | undefined, endOfDay = false): string | undefined =>
   d ? new Date(d + (endOfDay ? 'T23:59:59.999' : 'T00:00:00')).toISOString() : undefined
 
+const beginErrorRequest = useLatestRequest()
 const loadAdminErrors = async () => {
+  const current = beginErrorRequest()
   errLoading.value = true
   try {
     const resp = await listErrorLogs({
@@ -835,13 +839,15 @@ const loadAdminErrors = async () => {
       sort_by: errSortBy.value,
       sort_order: errSortOrder.value,
     })
+    if (!current()) return
     errRows.value = resp.items
     errTotal.value = resp.total
   } catch (error) {
+    if (!current()) return
     console.error('Failed to load admin errors:', error)
     appStore.showError(t('usage.errors.failedToLoad'))
   } finally {
-    errLoading.value = false
+    if (current()) errLoading.value = false
   }
 }
 
@@ -864,6 +870,7 @@ const handleColumnClickOutside = (event: MouseEvent) => {
   }
 }
 
+usePageVisible(refreshData)
 onMounted(() => {
   applyRouteQueryFilters()
   void loadRouteUserFilterLabel()

@@ -106,7 +106,11 @@ const isOpen = ref(false)
 const containerRef = ref<HTMLElement | null>(null)
 const localStartDate = ref(props.startDate)
 const localEndDate = ref(props.endDate)
-const activePreset = ref<string | null>('last24Hours')
+const activePreset = ref<string | null>(null)
+let appliedPreset: string | null = null
+let appliedStart = props.startDate
+let appliedEnd = props.endDate
+let midnightTimer: ReturnType<typeof setTimeout> | undefined
 
 const today = () => formatDateToString(new Date())
 
@@ -245,15 +249,7 @@ const selectPreset = (preset: DatePreset) => {
 }
 
 const onDateChange = () => {
-  // Check if current dates match any preset
   activePreset.value = null
-  for (const preset of presets) {
-    const range = preset.getRange()
-    if (range.start === localStartDate.value && range.end === localEndDate.value) {
-      activePreset.value = preset.value
-      break
-    }
-  }
 }
 
 const toggle = () => {
@@ -261,6 +257,14 @@ const toggle = () => {
 }
 
 const apply = () => {
+  const range = presets.find(preset => preset.value === activePreset.value)?.getRange()
+  if (range) {
+    localStartDate.value = range.start
+    localEndDate.value = range.end
+  }
+  appliedPreset = activePreset.value
+  appliedStart = localStartDate.value
+  appliedEnd = localEndDate.value
   emit('update:startDate', localStartDate.value)
   emit('update:endDate', localEndDate.value)
   emit('change', {
@@ -283,39 +287,58 @@ const handleEscape = (event: KeyboardEvent) => {
   }
 }
 
-// Restore the applied range after dismissal, including parent updates from Apply.
-watch(isOpen, (open) => {
-  if (open) return
-  localStartDate.value = props.startDate
-  localEndDate.value = props.endDate
-  onDateChange()
-}, { flush: 'post' })
+function restoreAppliedRange() {
+  localStartDate.value = appliedStart
+  localEndDate.value = appliedEnd
+  activePreset.value = appliedPreset
+}
 
-// Sync local state with props
-watch(
-  () => props.startDate,
-  (val) => {
-    localStartDate.value = val
-    onDateChange()
-  }
-)
+function detectPreset(start: string, end: string) {
+  return presets.find(preset => {
+    const range = preset.getRange()
+    return range.start === start && range.end === end
+  })?.value ?? null
+}
 
-watch(
-  () => props.endDate,
-  (val) => {
-    localEndDate.value = val
-    onDateChange()
+appliedPreset = detectPreset(appliedStart, appliedEnd)
+restoreAppliedRange()
+watch([() => props.startDate, () => props.endDate], ([start, end]) => {
+  if (start !== appliedStart || end !== appliedEnd) {
+    appliedStart = start
+    appliedEnd = end
+    appliedPreset = detectPreset(start, end)
+    if (!isOpen.value) restoreAppliedRange()
   }
-)
+})
+watch(isOpen, open => { if (!open) restoreAppliedRange() })
+
+function rollDateRange() {
+  if (document.hidden) return
+  const range = presets.find(preset => preset.value === appliedPreset)?.getRange()
+  if (range && (range.start !== appliedStart || range.end !== appliedEnd)) {
+    appliedStart = range.start
+    appliedEnd = range.end
+    if (!isOpen.value) restoreAppliedRange()
+    emit('update:startDate', range.start)
+    emit('update:endDate', range.end)
+    emit('change', { startDate: range.start, endDate: range.end, preset: appliedPreset })
+  }
+  clearTimeout(midnightTimer)
+  const midnight = new Date()
+  midnight.setHours(24, 0, 0, 0)
+  midnightTimer = setTimeout(rollDateRange, midnight.getTime() - Date.now())
+}
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
   document.addEventListener('keydown', handleEscape)
-  // Initialize active preset detection
-  onDateChange()
+  document.addEventListener('visibilitychange', rollDateRange)
+  rollDateRange()
 })
 
 onUnmounted(() => {
+  clearTimeout(midnightTimer)
+  document.removeEventListener('visibilitychange', rollDateRange)
   document.removeEventListener('click', handleClickOutside)
   document.removeEventListener('keydown', handleEscape)
 })

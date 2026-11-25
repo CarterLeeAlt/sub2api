@@ -199,6 +199,7 @@ import { sanitizeUrl } from '@/utils/url'
 import { FeatureFlags, makeSidebarFlag } from '@/utils/featureFlags'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
 import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
+import { usePageVisible } from '@/composables/usePageVisible'
 
 interface NavItem {
   path: string
@@ -960,6 +961,7 @@ watch(
   { immediate: true }
 )
 
+usePageVisible(() => { void refreshBatchImageAccess(true) })
 onMounted(() => {
   void refreshBatchImageAccess()
   if (isAdmin.value) {

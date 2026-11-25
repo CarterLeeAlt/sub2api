@@ -7,6 +7,8 @@ const loaded = ref(false)
 const loading = ref(false)
 const hasAllowedBatchImageKey = ref(false)
 let pendingLoad: Promise<boolean> | null = null
+let generation = 0
+let owner: number | undefined
 const pageSize = 100
 
 function keyAllowsBatchImage(key: ApiKey): boolean {
@@ -19,13 +21,19 @@ function keyAllowsBatchImage(key: ApiKey): boolean {
 
 async function loadBatchImageAccess(force = false): Promise<boolean> {
   const authStore = useAuthStore()
-  if (!authStore.isAuthenticated) {
-    loaded.value = true
+  if (owner !== authStore.user?.id || !authStore.isAuthenticated) {
+    owner = authStore.user?.id
+    generation++
+    pendingLoad = null
     hasAllowedBatchImageKey.value = false
+    loaded.value = false
+    loading.value = false
+  }
+  if (!authStore.isAuthenticated) {
     return false
   }
 
-  if (loaded.value && !force) {
+  if (loaded.value && !pendingLoad && !force) {
     return hasAllowedBatchImageKey.value
   }
 
@@ -34,6 +42,7 @@ async function loadBatchImageAccess(force = false): Promise<boolean> {
   }
 
   loading.value = true
+  const request = ++generation
   pendingLoad = (async () => {
     let page = 1
     while (true) {
@@ -42,6 +51,7 @@ async function loadBatchImageAccess(force = false): Promise<boolean> {
         sort_by: 'created_at',
         sort_order: 'desc'
       })
+      if (request !== generation) return hasAllowedBatchImageKey.value
 
       if ((response.items || []).some(keyAllowsBatchImage)) {
         hasAllowedBatchImageKey.value = true
@@ -59,11 +69,11 @@ async function loadBatchImageAccess(force = false): Promise<boolean> {
     }
   })()
     .catch(() => {
-      hasAllowedBatchImageKey.value = false
-      loaded.value = false
-      return false
+      if (request === generation) loaded.value = false
+      return hasAllowedBatchImageKey.value
     })
     .finally(() => {
+      if (request !== generation) return
       loading.value = false
       pendingLoad = null
     })

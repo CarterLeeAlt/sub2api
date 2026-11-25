@@ -353,6 +353,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import { adminAPI, type AuditLog } from '@/api/admin'
 import { totpAPI } from '@/api'
@@ -534,16 +536,20 @@ function buildQuery() {
   }
 }
 
+const beginLogRequest = useLatestRequest()
 async function fetchLogs() {
+  const current = beginLogRequest()
   loading.value = true
   try {
     const res = await adminAPI.audit.list(buildQuery())
+    if (!current()) return
     logs.value = res.items
     total.value = res.total
   } catch (err: any) {
+    if (!current()) return
     appStore.showError(err?.message || t('admin.audit.loadFailed'))
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 
@@ -683,4 +689,5 @@ function statusDotClass(status: number): string {
 }
 
 onMounted(fetchLogs)
+usePageVisible(fetchLogs)
 </script>

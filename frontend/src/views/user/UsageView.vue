@@ -221,6 +221,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { FeatureFlags, resolveFeatureFlag } from '@/utils/featureFlags'
@@ -871,7 +873,9 @@ const resetErrorRows = () => {
   }
 }
 
+const beginErrorRequest = useLatestRequest()
 const loadErrors = async () => {
+  const current = beginErrorRequest()
   errorLoading.value = true
   try {
     const resp = await usageAPI.listMyErrorRequests({
@@ -886,13 +890,15 @@ const loadErrors = async () => {
       sort_by: errorSortBy.value,
       sort_order: errorSortOrder.value,
     })
+    if (!current()) return
     errorRows.value = resp.items
     errorTotal.value = resp.total
   } catch (error) {
+    if (!current()) return
     console.error('[UsageView] loadErrors failed:', error)
     appStore.showError(t('usage.errors.failedToLoad'))
   } finally {
-    errorLoading.value = false
+    if (current()) errorLoading.value = false
   }
 }
 
@@ -919,6 +925,7 @@ const switchToErrors = () => {
   if (errorRows.value.length === 0) void loadErrors()
 }
 
+usePageVisible(refreshData)
 onMounted(() => {
   loadSavedColumns()
   loadSavedErrColumns()

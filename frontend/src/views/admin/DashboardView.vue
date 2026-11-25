@@ -6,7 +6,11 @@
         <LoadingSpinner />
       </div>
 
-      <template v-else-if="stats">
+      <div v-else-if="!stats" role="alert" class="flex flex-wrap items-center gap-3">
+        <span>{{ t('admin.dashboard.failedToLoad') }}</span>
+        <button type="button" class="btn btn-secondary" @click="loadDashboardStats">{{ t('common.refresh') }}</button>
+      </div>
+      <template v-else>
         <!-- Row 1: Core Stats -->
         <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <!-- Total API Keys -->
@@ -349,6 +353,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
@@ -767,6 +772,7 @@ const loadChartData = async () => {
   ])
 }
 
+usePageVisible(loadDashboardStats)
 onMounted(() => {
   void refreshBatchImageAccess()
   loadDashboardStats()

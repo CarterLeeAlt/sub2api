@@ -4319,6 +4319,7 @@
 </template>
 
 <script setup lang="ts">
+import { usePageVisible } from "@/composables/usePageVisible";
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useAppStore } from "@/stores/app";
@@ -6967,6 +6968,7 @@ const saveSortOrder = async () => {
   }
 };
 
+usePageVisible(loadGroups);
 onMounted(() => {
   loadGroups();
   if (!authStore.isSimpleMode) {

@@ -82,6 +82,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores'
@@ -117,7 +119,9 @@ const statusFilters = computed(() => [
   { value: 'REFUNDED', label: t('payment.status.refunded') },
 ])
 
+const beginOrderRequest = useLatestRequest()
 async function fetchOrders() {
+  const current = beginOrderRequest()
   loading.value = true
   try {
     const res = await paymentAPI.getMyOrders({
@@ -125,12 +129,14 @@ async function fetchOrders() {
       page_size: pagination.page_size,
       status: currentFilter.value || undefined,
     })
+    if (!current()) return
     orders.value = res.data.items || []
     pagination.total = res.data.total || 0
   } catch (err: unknown) {
+    if (!current()) return
     appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error')))
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 
@@ -185,5 +191,7 @@ async function loadRefundEligibility() {
   } catch { /* ignore — default to hiding refund button */ }
 }
 
-onMounted(() => { fetchOrders(); loadRefundEligibility() })
+function refreshOrdersPage() { void fetchOrders(); void loadRefundEligibility() }
+onMounted(refreshOrdersPage)
+usePageVisible(refreshOrdersPage)
 </script>

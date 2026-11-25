@@ -753,6 +753,8 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
@@ -931,6 +933,10 @@ const promptPopover = reactive({
 })
 let modelRequestSeq = 0
 let pollTimer: ReturnType<typeof setInterval> | null = null
+const beginJobsRequest = useLatestRequest()
+const beginDetailRequest = useLatestRequest()
+const beginItemsRequest = useLatestRequest()
+const beginKeysRequest = useLatestRequest()
 let previewCacheDBPromise: Promise<IDBDatabase | null> | null = null
 let previewCacheCleanupTimer: ReturnType<typeof setInterval> | null = null
 let promptPopoverCloseTimer: ReturnType<typeof setTimeout> | null = null
@@ -1239,9 +1245,11 @@ function readFileAsBase64(file: File): Promise<string> {
 }
 
 async function loadApiKeys() {
+  const current = beginKeysRequest()
   loadingKeys.value = true
   try {
     const response = await keysAPI.list(1, 100, { status: 'active', sort_by: 'created_at', sort_order: 'desc' })
+    if (!current()) return
     apiKeys.value = response.items || []
     if (!selectedApiKey.value && geminiApiKeys.value.length > 0) {
       form.apiKeyId = geminiApiKeys.value[0].id
@@ -1254,9 +1262,10 @@ async function loadApiKeys() {
       form.model = ''
     }
   } catch (error: any) {
+    if (!current()) return
     appStore.showError(batchImageErrorMessage(error, batchImageText('loadKeysFailed')))
   } finally {
-    loadingKeys.value = false
+    if (current()) loadingKeys.value = false
   }
 }
 
@@ -1495,8 +1504,10 @@ function copyPromptPopover() {
 }
 
 async function loadBatchJobs() {
+  const current = beginJobsRequest()
   const keys = filteredApiKeys.value
   if (!keys.length) {
+    loadingJobs.value = false
     batchJobs.value = []
     pagination.has_more = false
     return
@@ -1512,6 +1523,7 @@ async function loadBatchJobs() {
         rows: (result.data || []).map(job => toJobRow(job, key)),
       }
     }))
+    if (!current()) return
     batchJobs.value = applyChildCounts(results
       .flatMap(result => result.rows)
       .sort((a, b) => b.created_at - a.created_at)
@@ -1519,9 +1531,10 @@ async function loadBatchJobs() {
     pagination.has_more = results.some(result => result.hasMore)
     selectedJobIds.value = new Set([...selectedJobIds.value].filter(id => visibleBatchJobs.value.some(job => job.id === id)))
   } catch (error: any) {
+    if (!current()) return
     appStore.showError(batchImageErrorMessage(error, batchImageText('loadJobsFailed')))
   } finally {
-    loadingJobs.value = false
+    if (current()) loadingJobs.value = false
   }
 }
 
@@ -1578,6 +1591,10 @@ function resetCreateDraft() {
 }
 
 function closeDetail() {
+  beginDetailRequest()
+  beginItemsRequest()
+  refreshing.value = false
+  loadingItems.value = false
   closePromptPopover()
   currentJob.value = null
   selectedBatchId.value = ''
@@ -1652,7 +1669,6 @@ async function submitJob() {
 	    resetCreateDraft()
 	    appStore.showSuccess(batchImageText('submitted'))
 	    void loadItems()
-	    startPolling()
   } catch (error: any) {
     appStore.showError(batchImageErrorMessage(error, batchImageText('submitFailed')))
   } finally {
@@ -1661,19 +1677,22 @@ async function submitJob() {
 }
 
 async function refreshSelected() {
-  if (!selectedBatchId.value) return
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  const current = beginDetailRequest()
   const key = keyForSelectedBatch() || requireApiKey()
   if (!key) return
   refreshing.value = true
   try {
-    const job = await getBatchImageJob(key.key, selectedBatchId.value)
+    const job = await getBatchImageJob(key.key, batchId)
+    if (!current() || selectedBatchId.value !== batchId) return
     currentJob.value = job
     upsertJob(job)
-    if (TERMINAL_STATUSES.has(job.status)) stopPolling()
   } catch (error: any) {
+    if (!current() || selectedBatchId.value !== batchId) return
     appStore.showError(batchImageErrorMessage(error, batchImageText('refreshFailed')))
   } finally {
-    refreshing.value = false
+    if (current()) refreshing.value = false
   }
 }
 
@@ -1702,11 +1721,14 @@ function selectJob(batchId: string) {
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
-    if (!currentJob.value || TERMINAL_STATUSES.has(currentJob.value.status)) {
-      stopPolling()
-      return
+    if (document.hidden || showCreateModal.value || cancelling.value) return
+    if (selectedBatchId.value) {
+      if (currentJob.value && !TERMINAL_STATUSES.has(currentJob.value.status) && !refreshing.value && !loadingItems.value) {
+        void refreshDetail()
+      }
+    } else if (!loadingJobs.value && !openMoreJobId.value && batchJobs.value.some(job => !TERMINAL_STATUSES.has(job.status))) {
+      void loadBatchJobs()
     }
-    void refreshSelected()
   }, 8000)
 }
 
@@ -1775,7 +1797,12 @@ async function cancelSelected() {
   cancelling.value = true
   try {
     const job = await cancelBatchImageJob(key.key, currentJob.value.id)
-    currentJob.value = job
+    if (selectedBatchId.value === job.id) {
+      beginDetailRequest()
+      refreshing.value = false
+      currentJob.value = job
+      void loadItems()
+    }
     upsertJob(job)
     appStore.showSuccess(batchImageText('cancelled'))
   } catch (error: any) {
@@ -1834,7 +1861,6 @@ async function retryFailedJob(job: BatchImageJobRow | BatchImageJob) {
     }
     appStore.showSuccess(batchImageText('retrySubmitted'))
     void loadItems()
-    startPolling()
   } catch (error: any) {
     appStore.showError(batchImageErrorMessage(error, batchImageText('retryFailed')))
   } finally {
@@ -2050,7 +2076,7 @@ async function getCachedPreviewBlob(cacheKey: string): Promise<Blob | null> {
   return record.blob
 }
 
-async function hydrateCachedItemPreviews(detailItems: BatchImageDetailItem[]) {
+async function hydrateCachedItemPreviews(detailItems: BatchImageDetailItem[], current: () => boolean) {
   const previewableItems = detailItems.filter(item => canLoadItemPreview(item))
   if (!previewableItems.length || !previewCacheSupported()) return
 
@@ -2059,7 +2085,7 @@ async function hydrateCachedItemPreviews(detailItems: BatchImageDetailItem[]) {
     const previewKey = itemPreviewKey(item)
     if (!batchId || itemPreviewUrls[previewKey] || previewErrorIds.value.has(previewKey)) return
     const cached = await getCachedPreviewBlob(previewCacheKey(batchId, item.custom_id, 0)).catch(() => null)
-    if (!cached || itemPreviewUrls[previewKey]) return
+    if (!current() || !cached || itemPreviewUrls[previewKey]) return
     itemPreviewUrls[previewKey] = URL.createObjectURL(cached)
   }))
 }
@@ -2188,13 +2214,13 @@ async function loadPreviewImageSource(blob: Blob): Promise<{ image: PreviewImage
 }
 
 async function loadItems() {
+  const current = beginItemsRequest()
   const batchId = selectedBatchId.value || currentJob.value?.id || ''
   if (!batchId) return
   const key = keyForSelectedBatch() || requireApiKey()
   if (!key) return
   loadingItems.value = true
   try {
-    clearItemPreviews()
     const jobs = detailJobsForBatch(batchId)
     const results = await Promise.all(jobs.map(async (job) => {
       const result = await listBatchImageItems(key.key, job.id)
@@ -2204,13 +2230,15 @@ async function loadItems() {
         source_task_name: detailSourceName(job, batchId),
       }))
     }))
+    if (!current() || selectedBatchId.value !== batchId) return
     const detailItems = results.flat()
     items.value = detailItems
-    void hydrateCachedItemPreviews(detailItems)
+    void hydrateCachedItemPreviews(detailItems, current)
   } catch (error: any) {
+    if (!current() || selectedBatchId.value !== batchId) return
     appStore.showError(batchImageErrorMessage(error, batchImageText('loadItemsFailed')))
   } finally {
-    loadingItems.value = false
+    if (current()) loadingItems.value = false
   }
 }
 
@@ -2599,7 +2627,13 @@ function defaultTaskName(timestamp?: number) {
   return date.toLocaleString()
 }
 
+usePageVisible(() => {
+  if (showCreateModal.value) return
+  if (selectedBatchId.value) void refreshDetail()
+  else void refreshPage()
+})
 onMounted(() => {
+  startPolling()
   void appStore.fetchPublicSettings()
   void refreshPage()
   void cleanupPreviewCache()

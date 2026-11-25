@@ -465,6 +465,7 @@ import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
 import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
 import { useTableLoader } from '@/composables/useTableLoader'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
@@ -497,7 +498,7 @@ import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { fetchAllAccountIds } from '@/utils/accountSelection'
-import { buildGrokUsageRefreshKey, buildAccountUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { buildAccountUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -1094,7 +1095,9 @@ const selectPage = () => {
   selectCurrentPage()
 }
 
+let listGeneration = 0
 const resetAutoRefreshCache = () => {
+  listGeneration++
   autoRefreshETag.value = null
   upstreamBillingRateETag.value = null
 }
@@ -1335,27 +1338,12 @@ const isAnyModalOpen = computed(() => {
 })
 
 const enterAutoRefreshSilentWindow = () => {
+  resetAutoRefreshCache()
   autoRefreshSilentUntil.value = Date.now() + AUTO_REFRESH_SILENT_WINDOW_MS
 }
 
 const inAutoRefreshSilentWindow = () => {
   return Date.now() < autoRefreshSilentUntil.value
-}
-
-const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
-  return (
-    current.updated_at !== next.updated_at ||
-    current.current_concurrency !== next.current_concurrency ||
-    current.current_window_cost !== next.current_window_cost ||
-    current.active_sessions !== next.active_sessions ||
-    current.schedulable !== next.schedulable ||
-    current.status !== next.status ||
-    current.rate_limit_reset_at !== next.rate_limit_reset_at ||
-    current.overload_until !== next.overload_until ||
-    current.temp_unschedulable_until !== next.temp_unschedulable_until ||
-    buildAccountUsageRefreshKey(current) !== buildAccountUsageRefreshKey(next) ||
-    buildGrokUsageRefreshKey(current) !== buildGrokUsageRefreshKey(next)
-  )
 }
 
 const syncAccountRefs = (nextAccount: Account) => {
@@ -1376,7 +1364,7 @@ const mergeAccountsIncrementally = (nextRows: Account[]) => {
       changed = true
       return nextRow
     }
-    if (shouldReplaceAutoRefreshRow(currentRow, nextRow)) {
+    if (JSON.stringify(toRaw(currentRow)) !== JSON.stringify(nextRow)) {
       changed = true
       syncAccountRefs(nextRow)
       return nextRow
@@ -1399,6 +1387,7 @@ const mergeAccountsIncrementally = (nextRows: Account[]) => {
 const refreshAccountsIncrementally = async () => {
   if (autoRefreshFetching.value) return
   syncAccountListDerivedParams()
+  const generation = listGeneration
   autoRefreshFetching.value = true
   try {
     const result = await adminAPI.accounts.listWithEtag(
@@ -1418,6 +1407,7 @@ const refreshAccountsIncrementally = async () => {
       { etag: autoRefreshETag.value }
     )
 
+    if (generation !== listGeneration) return
     if (result.etag) {
       autoRefreshETag.value = result.etag
     }
@@ -1506,11 +1496,13 @@ const syncPendingListChanges = async () => {
   usageManualRefreshToken.value += 1
 }
 
-useIntervalFn(() => {
+const refreshVisibleAccounts = () => {
   if (document.hidden || loading.value || isAnyModalOpen.value) return
   if (menu.show || showAccountToolsDropdown.value || inAutoRefreshSilentWindow()) return
   void refreshAccountsIncrementally()
-}, 10_000)
+}
+usePageVisible(refreshVisibleAccounts)
+useIntervalFn(refreshVisibleAccounts, 10_000)
 
 const GROK_QUOTA_SIGNAL_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const GROK_QUOTA_SIGNAL_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
