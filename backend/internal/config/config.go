@@ -1025,7 +1025,7 @@ type CircuitBreakerConfig struct {
 }
 
 type ConcurrencyConfig struct {
-	// PingInterval: 并发等待期间的 SSE ping 间隔（秒）
+	// PingInterval: 并发等待期间的 SSE ping 间隔（秒），0 禁用 ping
 	PingInterval int `mapstructure:"ping_interval"`
 }
 
@@ -1656,17 +1656,22 @@ type DatabaseConfig struct {
 }
 
 func (d *DatabaseConfig) DSN() string {
-	// 当密码为空时不包含 password 参数，避免 libpq 解析错误
-	if d.Password == "" {
-		return fmt.Sprintf(
-			"host=%s port=%d user=%s dbname=%s sslmode=%s",
-			d.Host, d.Port, d.User, d.DBName, d.SSLMode,
-		)
-	}
-	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode,
+	dsn := fmt.Sprintf(
+		"host=%s port=%d user=%s dbname=%s sslmode=%s",
+		quotePostgresDSNValue(d.Host), d.Port, quotePostgresDSNValue(d.User),
+		quotePostgresDSNValue(d.DBName), quotePostgresDSNValue(d.SSLMode),
 	)
+	// Omit an unset password so lib/pq can use its environment or passfile.
+	if d.Password != "" {
+		dsn += " password=" + quotePostgresDSNValue(d.Password)
+	}
+	return dsn
+}
+
+// lib/pq keyword values use backslash escapes inside single quotes, unlike SQL literals.
+func quotePostgresDSNValue(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	return "'" + strings.ReplaceAll(value, "'", `\'`) + "'"
 }
 
 // DSNWithTimezone returns DSN with timezone setting
@@ -1674,17 +1679,7 @@ func (d *DatabaseConfig) DSNWithTimezone(tz string) string {
 	if tz == "" {
 		tz = "Asia/Shanghai"
 	}
-	// 当密码为空时不包含 password 参数，避免 libpq 解析错误
-	if d.Password == "" {
-		return fmt.Sprintf(
-			"host=%s port=%d user=%s dbname=%s sslmode=%s TimeZone=%s",
-			d.Host, d.Port, d.User, d.DBName, d.SSLMode, tz,
-		)
-	}
-	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s TimeZone=%s",
-		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode, tz,
-	)
+	return d.DSN() + " TimeZone=" + quotePostgresDSNValue(tz)
 }
 
 // RedisConfig Redis 连接配置
@@ -3891,8 +3886,8 @@ func (c *Config) Validate() error {
 	if c.Ops.Cleanup.Enabled && strings.TrimSpace(c.Ops.Cleanup.Schedule) == "" {
 		return fmt.Errorf("ops.cleanup.schedule is required when ops.cleanup.enabled=true")
 	}
-	if c.Concurrency.PingInterval < 5 || c.Concurrency.PingInterval > 30 {
-		return fmt.Errorf("concurrency.ping_interval must be between 5-30 seconds")
+	if c.Concurrency.PingInterval != 0 && (c.Concurrency.PingInterval < 5 || c.Concurrency.PingInterval > 30) {
+		return fmt.Errorf("concurrency.ping_interval must be 0 (disabled) or between 5-30 seconds")
 	}
 	if c.Gateway.Grok.FreeQuotaSoftGateEnabled {
 		if c.Gateway.Grok.FreeQuotaTokenLimit <= 0 {

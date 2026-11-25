@@ -291,11 +291,29 @@ func TestDatabaseConnectionDSNsUseConfiguredTargetAndLegacyBootstrapDatabase(t *
 	targetDSN := buildPostgresDSN(cfg, cfg.DBName)
 	bootstrapDSN := buildPostgresDSN(cfg, postgresBootstrapDatabase)
 
-	if !strings.Contains(targetDSN, "dbname=sub2api") {
+	if !strings.Contains(targetDSN, "dbname='sub2api'") {
 		t.Fatalf("target DSN = %q, want configured database", targetDSN)
 	}
-	if !strings.Contains(bootstrapDSN, "dbname=postgres") {
+	if !strings.Contains(bootstrapDSN, "dbname='postgres'") {
 		t.Fatalf("bootstrap DSN = %q, want legacy postgres bootstrap database", bootstrapDSN)
+	}
+}
+
+func TestDatabaseConnectionDSNPreservesPasswordAndTarget(t *testing.T) {
+	t.Setenv("PGPASSWORD", "")
+	for _, password := range []string{"", "secret", "with spaces", `quote'and\slash`, `trailing\`, " tab\tline\nbreak ", "secret dbname=postgres user=other"} {
+		t.Run(fmt.Sprintf("password=%q", password), func(t *testing.T) {
+			cfg := &DatabaseConfig{Host: "::1", Port: 5433, User: "installer", Password: password, DBName: "sub2api_test", SSLMode: "require"}
+			for _, database := range []string{cfg.DBName, postgresBootstrapDatabase} {
+				parsed, err := pq.NewConfig(buildPostgresDSN(cfg, database))
+				if err != nil {
+					t.Fatalf("parse DSN: %v", err)
+				}
+				if parsed.Database != database || parsed.Password != password || parsed.User != cfg.User || parsed.Host != cfg.Host || parsed.Port != uint16(cfg.Port) || parsed.SSLMode != pq.SSLModeRequire {
+					t.Fatalf("connection parameters changed: database=%q password=%q user=%q host=%q port=%d sslmode=%q", parsed.Database, parsed.Password, parsed.User, parsed.Host, parsed.Port, parsed.SSLMode)
+				}
+			}
+		})
 	}
 }
 

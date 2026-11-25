@@ -295,6 +295,10 @@ const copyModelId = async (model: string) => {
 const addCustom = () => {
   const model = customModel.value.trim()
   if (!model) return
+  if (model.includes('*')) {
+    appStore.showInfo(t('admin.accounts.modelWildcardNotSupported'))
+    return
+  }
   if (props.modelValue.includes(model)) {
     appStore.showInfo(t('admin.accounts.modelExists'))
     return
@@ -455,9 +459,11 @@ const syncUpstreamModels = async () => {
   }
 }
 
-defineExpose({ syncUpstreamModels, isSyncingUpstream })
+const hasInvalidDraft = computed(() => customModel.value.includes('*'))
+defineExpose({ syncUpstreamModels, isSyncingUpstream, hasInvalidDraft })
 
 const clearAll = () => {
+  customModel.value = ''
   emit('catalog-source', 'custom')
   emit('update:modelValue', [])
 }

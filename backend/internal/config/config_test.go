@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
+	"github.com/lib/pq"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
@@ -1416,7 +1417,7 @@ func TestConfigAddressHelpers(t *testing.T) {
 	}
 
 	dbCfg.Password = "secret"
-	if !strings.Contains(dbCfg.DSN(), "password=secret") {
+	if !strings.Contains(dbCfg.DSN(), "password='secret'") {
 		t.Fatalf("DatabaseConfig.DSN() missing password")
 	}
 
@@ -1425,10 +1426,10 @@ func TestConfigAddressHelpers(t *testing.T) {
 		t.Fatalf("DatabaseConfig.DSNWithTimezone() should omit password when empty")
 	}
 
-	if !strings.Contains(dbCfg.DSNWithTimezone(""), "TimeZone=Asia/Shanghai") {
+	if !strings.Contains(dbCfg.DSNWithTimezone(""), "TimeZone='Asia/Shanghai'") {
 		t.Fatalf("DatabaseConfig.DSNWithTimezone() should use default timezone")
 	}
-	if !strings.Contains(dbCfg.DSNWithTimezone("UTC"), "TimeZone=UTC") {
+	if !strings.Contains(dbCfg.DSNWithTimezone("UTC"), "TimeZone='UTC'") {
 		t.Fatalf("DatabaseConfig.DSNWithTimezone() should use provided timezone")
 	}
 
@@ -1577,18 +1578,20 @@ func TestValidateOpsCleanupScheduleRequired(t *testing.T) {
 
 func TestValidateConcurrencyPingInterval(t *testing.T) {
 	resetViperWithJWTSecret(t)
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	cfg.Concurrency.PingInterval = 3
-	err = cfg.Validate()
-	if err == nil {
-		t.Fatalf("Validate() expected error for concurrency.ping_interval")
-	}
-	if !strings.Contains(err.Error(), "concurrency.ping_interval") {
-		t.Fatalf("Validate() expected concurrency.ping_interval error, got: %v", err)
+	for _, interval := range []int{-1, 0, 1, 3, 4, 5, 10, 30, 31} {
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		cfg.Concurrency.PingInterval = interval
+		err = cfg.Validate()
+		valid := interval == 0 || (interval >= 5 && interval <= 30)
+		if valid && err != nil {
+			t.Errorf("Validate() interval %d: %v", interval, err)
+		}
+		if !valid && (err == nil || !strings.Contains(err.Error(), "concurrency.ping_interval")) {
+			t.Errorf("Validate() interval %d: expected concurrency.ping_interval error, got %v", interval, err)
+		}
 	}
 }
 
@@ -1655,11 +1658,34 @@ func TestDatabaseDSNWithTimezone_WithPassword(t *testing.T) {
 		SSLMode:  "prefer",
 	}
 	got := d.DSNWithTimezone("UTC")
-	if !strings.Contains(got, "password=p") {
+	if !strings.Contains(got, "password='p'") {
 		t.Fatalf("DSNWithTimezone should include password: %q", got)
 	}
-	if !strings.Contains(got, "TimeZone=UTC") {
+	if !strings.Contains(got, "TimeZone='UTC'") {
 		t.Fatalf("DSNWithTimezone should include TimeZone=UTC: %q", got)
+	}
+}
+
+func TestDatabaseDSNPreservesConnectionValues(t *testing.T) {
+	t.Setenv("PGPASSWORD", "")
+	for _, password := range []string{"", "secret", "with spaces", `quote'and\slash`, `trailing\`, " tab\tline\nbreak ", "secret dbname=postgres user=other"} {
+		t.Run(fmt.Sprintf("password=%q", password), func(t *testing.T) {
+			d := &DatabaseConfig{Host: "/tmp/postgres socket", Port: 5433, User: `user'\ name`, Password: password, DBName: `database'\ name`, SSLMode: "require"}
+			for _, timezone := range []string{"", "UTC", "Asia/Shanghai"} {
+				parsed, err := pq.NewConfig(d.DSNWithTimezone(timezone))
+				require.NoError(t, err)
+				require.Equal(t, d.Host, parsed.Host)
+				require.Equal(t, uint16(d.Port), parsed.Port)
+				require.Equal(t, d.User, parsed.User)
+				require.Equal(t, d.Password, parsed.Password)
+				require.Equal(t, d.DBName, parsed.Database)
+				require.Equal(t, pq.SSLModeRequire, parsed.SSLMode)
+				if timezone == "" {
+					timezone = "Asia/Shanghai"
+				}
+				require.Equal(t, timezone, parsed.Runtime["TimeZone"])
+			}
+		})
 	}
 }
 

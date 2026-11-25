@@ -78,7 +78,7 @@ func (c *clineAccountClient) get(ctx context.Context, path string) (gjson.Result
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Accept", "application/json")
-	c.account.ApplyHeaderOverrides(req.Header)
+	c.account.ApplyHeaderOverrides(req.Context(), req.Header)
 
 	resp, err := httpclient.DoRead(req, cnQuotaUpstreamTimeout, cnQuotaMaxBodyBytes, func(r *http.Request) (*http.Response, error) {
 		return c.httpUpstream.Do(r, c.proxyURL, c.account.ID, maxInt(c.account.Concurrency, 1))

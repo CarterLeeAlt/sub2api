@@ -11,8 +11,8 @@
 | 维护分支 | `main` |
 | GitHub Fork 创建时间 | 2026-08-09 17:14:19 UTC（北京时间 2026-08-10 01:14:19） |
 | Fork 创建时的上游节点 | [`48eb3766`](https://github.com/Wei-Shaw/sub2api/commit/48eb3766d2da817b171b45bb3036d42575e42b8f)（`v0.1.173`） |
-| 当前已同步上游节点 | [`10ba8f9b4`](https://github.com/Wei-Shaw/sub2api/commit/10ba8f9b4dc2e6023d4a9879ab77b21841babd10)（稳定标签 `v0.2.21`） |
-| 前一次稳定版同步合并 | [`e2224a9f5`](https://github.com/CarterLeeAlt/sub2api/commit/e2224a9f5)（`v0.2.19`） |
+| 当前已同步上游节点 | [`348997267`](https://github.com/Wei-Shaw/sub2api/commit/348997267d756eab5729bb6b78a275a15d18796a)（稳定标签 `v0.2.25`） |
+| 前一次稳定版同步合并 | [`68086bfdd`](https://github.com/CarterLeeAlt/sub2api/commit/68086bfdd)（`v0.2.21`） |
 
 上游更新使用普通 merge 合入 `main`，保留 merge commit，不采用 squash 或 rebase。这样可以明确区分上游历史与 fork 自有提交，也便于在下一次同步时定位共同祖先。自 2026-10-03 起按项目指令（`AGENTS.md` 分支策略）不再创建 `backup/*` 备份分支，回滚点以合并前提交哈希记录。
 
@@ -25,6 +25,20 @@
 | `retired` | 一次性迁移或临时机制已经完成并删除，不应在后续合并中恢复。 |
 
 ## 当前定制
+
+### 安装与运行使用统一数据库连接串（`active`）
+
+连接检测、建库、迁移、管理员创建及服务运行统一使用 `config.DatabaseConfig.DSN()` 构造 lib/pq 连接串。未设置密码时省略 `password` 参数，保留驱动的环境变量和密码文件支持；字段值使用单引号并转义单引号与反斜杠，空格或类似连接参数的密码内容保持为原值。时区附加到同一连接串，安装阶段和运行阶段连接同一个指定数据库。
+
+主要文件：`backend/internal/config/config.go`、`backend/internal/setup/setup.go`；解析回归覆盖空密码、普通密码、空白字符、引号、反斜杠、参数式内容、维护库和目标库。
+
+### Codex 权威配额窗口显示（`active`）
+
+生产环境以 `/wham/usage` 为窗口存在性的权威来源，写入 `codex_wham_5h_window_present`、`codex_wham_7d_window_present` 和 `codex_wham_presence_schema=wham-usage-v1`。未确认的窗口隐藏，确认不存在的窗口不显示；查询失败保留上一份可靠快照和真实观测时间。`rate_limit` 显式 `null` 表示无窗口，字段完全缺失表示响应不完整。普通响应头不得覆盖权威存在性或恢复调度所用的 WHAM 代际。
+
+主账号使用 global 窗口，Spark 影子账号使用 `codex_bengalfox` 窗口；认证状态归属凭据主账号。仅未接入额度服务的轻量部署可使用原有响应头快照。页面后台读取使用已有快照，强制查询通过明确的刷新动作触发；刷新失败显示旧数据及诊断。
+
+主要文件：`backend/internal/service/account_usage_service.go`、`openai_quota_snapshot_refresh.go`、`frontend/src/components/account/AccountUsageCell.vue`。
 
 ### OpenAI 账号认证与操作诊断（`active`）
 
@@ -448,18 +462,11 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 
 ## 已退役机制
 
-### Codex 5h/7d 动态窗口显隐（`retired`）
+### 基于缺失计数的 Codex 窗口显隐（`retired`）
 
-提交 `2e6b9378` 引入了根据上游 Codex 窗口存在性自动显示或隐藏 5h/7d 用量行的机制，后续由 `d972d6ea`、`a5a8e72a` 和 `c8d37d22` 补充迁移、三次缺失确认及 OAuth/PAT 探测。由于上游响应不能稳定、权威地表示窗口缺失，该机制已整体回退到引入前的固定窗口行为。
+旧的 `codex_5h_window_present`、`codex_7d_window_present` 及连续缺失计数不参与当前窗口判断。不得以普通响应头缺失或多次探测未返回窗口来推断窗口不存在，因为这些信号不能证明配额窗口状态。
 
-回退后：
-
-- 不再写入或读取 `codex_5h_window_present`、`codex_7d_window_present` 及缺失计数；
-- 不再因连续缺失自动删除旧的 5h/7d 快照，也不再为窗口恢复定期探测；
-- 恢复原有的 5h/7d 固定显示与本地用量汇总逻辑，不改变计费窗口的时间起点、重置时间或费用统计语义；
-- 数据库中已有的 presence/missing-count 字段保留为无效兼容数据，无需迁移或清理。
-
-后续上游合并不得恢复该动态显隐机制，除非有单一、稳定且权威的上游配额窗口来源，并重新经过独立评估。
+当前窗口显示使用“Codex 权威配额窗口显示”所列的 WHAM 专用字段和 schema 标记；后续合并须保留这一来源边界。
 
 相关提交：[`2e6b9378`](https://github.com/CarterLeeAlt/sub2api/commit/2e6b937801e84358b63808c74eae41f05d493b6a)、[`d972d6ea`](https://github.com/CarterLeeAlt/sub2api/commit/d972d6ea8129ecddb0dd251a83a567dba5e2d71c)、[`a5a8e72a`](https://github.com/CarterLeeAlt/sub2api/commit/a5a8e72a0cd21954a95fa51f814fc2cde6861301)、[`c8d37d22`](https://github.com/CarterLeeAlt/sub2api/commit/c8d37d2227920072ff2cecde9fd61dca0fcd81ea)。
 
@@ -472,6 +479,21 @@ fork 最初修正了 Codex 调度用量的单位，确保阈值比较使用百�
 相关提交：[`c3031d0e`](https://github.com/CarterLeeAlt/sub2api/commit/c3031d0ef726af217307639afd270df71097ab4d)、[`abd725ec`](https://github.com/CarterLeeAlt/sub2api/commit/abd725ece1170f3acf831be8a8d7af3c0bc55949)、[`5791cb14`](https://github.com/CarterLeeAlt/sub2api/commit/5791cb1449ace7ce136e1fd3192fb9d8294b5585)。
 
 ## 已知上游合并处理
+
+### 2026-11-26：同步稳定版 `v0.2.25`
+
+- 合并前恢复基点为 `3e6beabb7d124224fb7f657ad8d63c790f6b0d17`，共同祖先为 `10ba8f9b4dc2e6023d4a9879ab77b21841babd10`，目标固定为 `348997267d756eab5729bb6b78a275a15d18796a`。普通 `--no-ff --no-commit` merge 涉及上游 344 个提交、594 个文件，138 个文件与 fork 差异重叠；31 个文本冲突均已处理。`VERSION` 对齐为 `0.2.25`。
+- 请求重复字段检查与本地 WebSocket 每轮模型权限检查共存；流式和缓冲输出保留错误脱敏、终态校验、计费观测及客户端模型名还原。Claude 轮换令牌重试的三个入口重新绑定实际发送凭据，重试失败可写入对应认证状态，之后再次轮换的凭据不受迟到错误影响。
+- OpenAI OAuth 新保存入口委托共用凭据身份 CAS，保留并发模型配置、认证诊断清除和匹配暂停恢复。重试持久化比较完整身份，组织或授权身份变化后不重放旧刷新结果。受限管理员读取、WHAM 单调写入、阈值与配额 429 恢复保持本地边界。
+- 账号页面接入上游刷新标识与分组同步，保留每批六个串行用量查询、取消与迟到结果保护、自动模型目录及分项模型配置。批量白名单校验未添加的非法草稿，避免拒绝通配符后误提交空白名单；显式清空会同时清除草稿。
+- 三个新增 SQL 保留上游原文：`251_group_force_openai_ultrafast.sql`、`251_group_usage_rollup_nonblocking_build.sql`、`252_channel_pricing_ultrafast_multiplier.sql`。两个 `251` 以完整文件名分别登记。Wire 按合并后的 provider 图重新生成。
+- 前端验证：冻结锁文件安装、类型检查、生产构建与 lint 通过；390 个测试文件共 3255 项测试通过，生产依赖审计无告警。Chrome 158 隔离 API 验证覆盖账号列表与额度、创建、编辑失败重试、分组同步、批量白名单纠正保存，以及移动端布局、取消与刷新。
+- 数据库升级在工作区 PostgreSQL 15.14 实例中执行：合并前的 303 个迁移升级到 306 个，重复启动仍为 306 个，迁移记录、校验和及执行时间未变，四个新增字段均存在。原生仓储集成测试通过；测试数据使用独立数据库，Redis 使用隔离实例。
+- 后端完整 `unit` 与 `integration` 标签套件通过；集成测试通过临时 Go overlay 将三个测试文件的容器启动替换为原生 PostgreSQL 15.14／Redis 8.10.3，测试正文保持不变，每轮使用新数据库。Windows 服务实测首次安装、登录、管理端访问校验、创建／编辑账号及重启后读取持久数据通过。启动检查使用隔离数据库和仓库自带定价文件。
+- Go 1.27.4 的 `go vet`、模块校验、golangci-lint 2.14.0（0 issues）、Windows/amd64 和 Linux/amd64 嵌入前端构建通过。两个目标的符号级漏洞扫描均无可达漏洞，8 条依赖层告警未命中可达调用。Node 24.22.2、pnpm 12.18.0，工作区工具链、前端锁文件和手动触发工作流配置保持原样。
+- 上游未触及的 335 个 fork 差异路径中，332 个保持原样；其余为本文档、OAuth 新保存入口的数据库回归，以及适配上游签名的 Codex 身份测试。自动用卡、缺失计数窗口推断和滑动选择机制保持退役。
+- 验证边界：本机无 Docker，镜像构建与容器启动未验证；Linux 目标仅交叉构建和扫描。真实上游账号与生产服务未参与测试；初次启动远程定价下载曾超时，本地启动检查采用仓库定价文件。
+- 安装连接串修复：连接检测、迁移和管理员创建共用运行配置的 DSN 构造器，统一转义所有字符串字段；解析回归复现并修复空密码吞掉 `dbname`、反斜杠丢失及密码内容被当作额外连接参数的问题。16 组真实安装组合通过：自动／网页安装覆盖空密码、普通密码、特殊字符密码及目标库存在／缺失；命令行安装覆盖空密码、普通密码及目标库存在／缺失。普通和特殊字符密码使用 SCRAM 认证；网页入口另验证错误密码拒绝和禁止重复安装。全部组合完成登录、账号保存与重启检查，管理员只写入指定库，`postgres` 库保持无业务表。修复后全后端 `unit`、仓储 `integration`、`go vet`、golangci-lint 及 Windows／Linux 嵌入前端构建再次通过。
 
 ### 2026-11-13：同步稳定版 `v0.2.21`
 

@@ -61,10 +61,16 @@ func TestOAuthStatePostgresRotationAndRecovery(t *testing.T) {
 			require.NoError(t, err)
 			rotated := maps.Clone(old.Credentials)
 			rotated["access_token"], rotated["refresh_token"] = "new", "new-refresh"
-			applied, err = repo.UpdateOAuthCredentialsIfUnchanged(ctx, old, rotated)
+			if platform == service.PlatformOpenAI {
+				applied, err = repo.UpdateOpenAIOAuthCredentialsIfUnchanged(ctx, old.ID, old.Credentials, old.ProxyID, rotated)
+			} else {
+				applied, err = repo.UpdateOAuthCredentialsIfUnchanged(ctx, old, rotated)
+			}
 			require.NoError(t, err)
 			require.True(t, applied)
 			require.Nil(t, read().TempUnschedulableUntil)
+			require.Empty(t, read().TempUnschedulableReason)
+			require.NotContains(t, read().Extra, service.OpenAIUpstreamHealthExtraKey)
 			require.Equal(t, "new", read().GetCredential("access_token"))
 			require.Equal(t, "latest", read().GetMappedModel("alias"))
 			state.Kind = "auth_invalid"
@@ -107,7 +113,11 @@ func TestOAuthStatePostgresConcurrentReauthorization(t *testing.T) {
 					var applied bool
 					var err error
 					if operation == "rotate" {
-						applied, err = repo.UpdateOAuthCredentialsIfUnchanged(ctx, old, map[string]any{"access_token": "late", "refresh_token": "late-refresh"})
+						if platform == service.PlatformOpenAI {
+							applied, err = repo.UpdateOpenAIOAuthCredentialsIfUnchanged(ctx, old.ID, old.Credentials, old.ProxyID, map[string]any{"access_token": "late", "refresh_token": "late-refresh"})
+						} else {
+							applied, err = repo.UpdateOAuthCredentialsIfUnchanged(ctx, old, map[string]any{"access_token": "late", "refresh_token": "late-refresh"})
+						}
 					} else if operation == "reset-recovery" {
 						applied, err = repo.RecoverClaudeReset(ctx, old, service.ClaudeResetRecovery{ClearGlobal: true, Cleared: []string{"five_hour", "seven_day"}})
 					} else {
