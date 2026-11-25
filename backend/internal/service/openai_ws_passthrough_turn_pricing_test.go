@@ -276,7 +276,10 @@ func testPassthroughIngressFreezesSubsequentTurnBeforeRequestPolicy(t *testing.T
 	_ = clientConn.CloseNow()
 	cancelControl(context.Canceled)
 	select {
-	case <-serverErr:
+	case err := <-serverErr:
+		if err != nil && !errors.Is(err, context.Canceled) && !isOpenAIWSClientDisconnectError(err) {
+			t.Fatalf("unexpected passthrough exit after closing client: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("passthrough ingress did not exit")
 	}

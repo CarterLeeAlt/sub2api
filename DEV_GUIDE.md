@@ -55,7 +55,7 @@ pwsh -NoProfile -File tools/frontend.ps1 setup
 
 - Go 版本必须是 **1.27.4**：三个 workflow 都用 `go-version-file: backend/go.mod` 取版本，随后硬断言 `go version | grep -q 'go1.27.4'`。升级 Go 时要同时改 `backend/go.mod`、`backend-ci.yml`（两处）、`release.yml`、`security-scan.yml` 里的这句断言，**以及三个 Dockerfile 里的 Go 构建镜像**（`Dockerfile` / `deploy/Dockerfile` 的 `ARG GOLANG_IMAGE`、`backend/Dockerfile` 的 `FROM golang:`）。前者漏了 CI 会在版本校验步骤直接失败；**后者漏了 CI 不会报，而是等到有人用这些 Dockerfile 构建时才失败**（`go.mod requires go >= X (running Y; GOTOOLCHAIN=local)`）。
 - 前端通过 `pwsh -NoProfile -File tools/frontend.ps1 install --frozen-lockfile` 安装，必须提交 `frontend/pnpm-lock.yaml`。
-- 前端 Node.js **24.22.2**、pnpm **12.18.0** 由 `frontend/package.json` 锁定。本地、CI 和 Docker 使用同一个隔离执行器 `tools/frontend.mjs`；原生入口为 `tools/frontend.ps1`，Docker 从指定版本镜像复制 Node 到相同的仓库工具目录。pnpm 使用官方 `@pnpm/exe.<平台>-<架构>` 原生包，Linux 按 glibc/musl 选择对应发行包，并校验下载完整性。
+- 前端 Node.js **24.22.3**、pnpm **12.23.0** 由 `frontend/package.json` 锁定。本地、CI 和 Docker 使用同一个隔离执行器 `tools/frontend.mjs`。原生入口为 `tools/frontend.ps1`，Docker 从指定版本镜像复制 Node 到相同的仓库工具目录。pnpm 使用官方 `@pnpm/exe.<平台>-<架构>` 原生包，Linux 按 glibc/musl 选择对应发行包，并校验下载完整性。
 
 ### 前端强制隔离
 

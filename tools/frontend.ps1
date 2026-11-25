@@ -36,7 +36,8 @@ if (!(Test-Path -LiteralPath $node)) {
     }
     $line = @(Get-Content $sums | Where-Object { $_.EndsWith("  $name.$extension") })
     if ($line.Count -ne 1 -or (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line[0] -split ' ')[0]) { throw 'Node archive checksum mismatch' }
-    & tar -xf $archive -C (Join-Path $root '.toolchains')
+    $tar = if ($IsWindows) { Join-Path $env:SystemRoot 'System32/tar.exe' } else { 'tar' }
+    & $tar -xf $archive -C (Join-Path $root '.toolchains')
     if ($LASTEXITCODE -ne 0) { throw 'Node extraction failed' }
 }
 Assert-ToolPath $node

@@ -141,7 +141,8 @@ function setup(env) {
     if (createHash(algorithm).update(readFileSync(archive)).digest('base64') !== expected) throw new Error('pnpm archive integrity mismatch')
     const destination = assertWorkspacePath(path.resolve(pnpmPath, '../..'))
     mkdirSync(destination, { recursive: true })
-    command('tar', ['-xzf', archive, '-C', destination], { env })
+    const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar'
+    command(tar, ['-xzf', archive, '-C', destination], { env })
   }
   validatePnpm()
   prepareLocations()

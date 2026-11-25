@@ -85,7 +85,7 @@ test('missing tools and incorrect pnpm versions fail without using global tools'
   mkdirSync(path.dirname(fixturePnpm), { recursive: true })
   writeFileSync(fixturePnpm, 'throw new Error("must not execute")')
   writeFileSync(path.join(path.dirname(fixturePnpm), 'package.json'), JSON.stringify({ name: pnpmPackage, version: '99.0.0' }))
-  failure(run(['--version'], clean, path.join(fixture, 'tools/frontend.mjs'), fixtureNode), /Local pnpm must be 12\.18\.0/)
+  failure(run(['--version'], clean, path.join(fixture, 'tools/frontend.mjs'), fixtureNode), new RegExp(`Local pnpm must be ${pnpmVersion.replaceAll('.', '\\.')}`))
   const packageFile = path.join(fixture, 'frontend/package.json')
   const manifest = JSON.parse(readFileSync(packageFile, 'utf8'))
   manifest.engines.node = '0.0.0'

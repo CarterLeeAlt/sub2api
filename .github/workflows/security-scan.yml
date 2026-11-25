@@ -11,9 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: backend/go.mod
           check-latest: false
@@ -53,9 +53,9 @@ jobs:
   frontend-security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Cache isolated frontend tools and dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .toolchains/node-*
