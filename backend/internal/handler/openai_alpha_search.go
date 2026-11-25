@@ -126,6 +126,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var retry openAIHTTPRetry
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -138,7 +139,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 
 	for {
 		selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
+			retry.selectionContext(c.Request.Context()),
 			apiKey.GroupID,
 			"",
 			sessionHash,
@@ -151,6 +152,9 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			false,
 			service.PlatformOpenAI,
 		)
+		if retry.switchAfterMiss(c.Request.Context(), err, h.gatewayService, failedAccountIDs, &switchCount, h.maxAccountSwitches, lastFailoverErr, &oauth429FailoverState) {
+			continue
+		}
 		if err != nil || selection == nil || selection.Account == nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai_alpha_search.account_select_aborted_client_disconnected", zap.Error(err))
@@ -257,6 +261,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 					return
 				case <-time.After(retryDelay):
 				}
+				retry.account, lastFailoverErr = account, failoverErr
 				continue
 			}
 		}

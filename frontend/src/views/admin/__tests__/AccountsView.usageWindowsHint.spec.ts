@@ -334,17 +334,21 @@ describe('admin AccountsView usage windows hint', () => {
     wrapper.unmount()
   })
 
-  it('receives background snapshots with fast auto-refresh off and stops on unmount', async () => {
+  it('refreshes every ten seconds by default and stops on unmount', async () => {
     vi.useFakeTimers()
     listAccounts.mockResolvedValueOnce({ items: [{ id: 1, name: 'quota', platform: 'openai', type: 'oauth', credentials: {}, extra: {}, updated_at: '2026-01-01' }], total: 1, pages: 1 })
     const wrapper = mountView()
     try {
       await flushPromises()
-      await vi.advanceTimersByTimeAsync(60_000)
+      await vi.advanceTimersByTimeAsync(9_999)
+      expect(listWithEtag).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
       expect(listWithEtag).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(listWithEtag).toHaveBeenCalledTimes(2)
       wrapper.unmount()
       await vi.advanceTimersByTimeAsync(60_000)
-      expect(listWithEtag).toHaveBeenCalledTimes(1)
+      expect(listWithEtag).toHaveBeenCalledTimes(2)
     } finally { wrapper.unmount(); vi.useRealTimers() }
   })
 })

@@ -168,22 +168,25 @@ func TestBatchImageSettlementService_UsesSubmittedPricingSnapshot(t *testing.T) 
 	job.BaseUnitPrice = 0.25
 	job.GroupRateMultiplier = 1
 	job.AccountRateMultiplier = 1
-	job.BatchDiscountMultiplier = 1
+	job.BatchDiscountMultiplier = 0.5
 	job.HoldMultiplier = 1.1
-	job.BillableUnitPrice = 0.25
+	job.BillableUnitPrice = 0.125
 	job.HoldUnitPrice = 0.275
 	holdAmount := 0.55
 	job.HoldAmount = &holdAmount
 	job.EstimatedCost = 0.5
 	repo.jobs[job.BatchID] = job
 	billing := &fakeBatchImageBillingRepo{}
-	svc := &BatchImageSettlementService{Repo: repo, BillingRepo: billing, Pricing: &fakeBatchImagePricingResolver{unitPrice: 0.50}}
+	logs := &openAIRecordUsageLogRepoStub{}
+	svc := &BatchImageSettlementService{Repo: repo, BillingRepo: billing, Pricing: &fakeBatchImagePricingResolver{unitPrice: 0.50}, UsageLogRepo: logs}
 
 	result, err := svc.Settle(context.Background(), job.BatchID)
 	require.NoError(t, err)
-	require.InDelta(t, 0.5, result.ActualCost, 1e-12)
+	require.InDelta(t, 0.25, result.ActualCost, 1e-12)
+	require.Equal(t, 0.50, logs.lastLog.TotalCost)
+	require.Equal(t, result.ActualCost, logs.lastLog.ActualCost)
 	require.Len(t, billing.captures, 1)
-	require.InDelta(t, 0.5, billing.captures[0].ActualAmount, 1e-12)
+	require.InDelta(t, 0.25, billing.captures[0].ActualAmount, 1e-12)
 	require.InDelta(t, 0.55, billing.captures[0].HoldAmount, 1e-12)
 }
 

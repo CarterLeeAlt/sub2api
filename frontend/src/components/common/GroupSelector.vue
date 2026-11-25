@@ -63,6 +63,7 @@ import GroupBadge from './GroupBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
 import type { Group, GroupPlatform } from '@/types'
 import { useAuthStore } from '@/stores'
+import { accountGroupOptions } from '@/utils/accountGroupOptions'
 
 const { t } = useI18n()
 const authStore = useAuthStore()
@@ -91,20 +92,7 @@ const isSearchable = computed(() => {
 
 // Filter groups by platform if specified
 const filteredGroups = computed(() => {
-  let result = authStore.isSimpleMode
-    ? props.groups.filter((g) => g.platform !== 'composite')
-    : props.groups
-  if (props.platform) {
-    // antigravity 账户启用混合调度后，可选择 anthropic/gemini 分组
-    if (props.platform === 'antigravity' && props.mixedScheduling) {
-      result = result.filter(
-        (g) => g.platform === 'antigravity' || g.platform === 'anthropic' || g.platform === 'gemini' || g.platform === 'composite'
-      )
-    } else {
-      // 默认：只能选择同 platform 的分组；composite 分组可接收任意具体平台账号
-      result = result.filter((g) => g.platform === props.platform || g.platform === 'composite')
-    }
-  }
+  let result = accountGroupOptions(props.groups, props.platform, !!props.mixedScheduling, authStore.isSimpleMode)
   if (isSearchable.value && searchText.value) {
     const q = searchText.value.toLowerCase()
     result = result.filter(

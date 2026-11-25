@@ -172,7 +172,8 @@ MVP billing rules:
 - Only successful images are charged.
 - Failed items are not charged.
 - Reference images are sent to Gemini as input and can create small upstream input-token and temporary storage cost. They are counted once per expanded output request when `output_count > 1`, but the public MVP billing model does not add a separate reference-image surcharge. User-facing estimated, held, and settled amounts are still based on the output image count and configured batch image unit price.
-- Settlement request id is `batch_image_settlement:{batch_id}`.
+- An optional `Idempotency-Key` identifies one submission per user and API key. Concurrent or delayed retries of the same payload return the existing batch; a different payload returns HTTP 409. An automatically assigned task name is reused on replay.
+- Settlement captures the hold under `batch_image_capture:{batch_id}`. The actual charge and any configured API key quota and rolling usage counters are updated in the same transaction. The usage log reports the base price of successful images separately from the discounted charge.
 - Settlement is idempotent; re-running settlement must not double charge.
 - Settlement billing failures are retried with a bounded retry limit. After the retry limit is reached, the job is failed and the remaining hold is released through the idempotent release path.
 

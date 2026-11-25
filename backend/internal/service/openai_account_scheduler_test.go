@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,6 +24,38 @@ type openAISnapshotCacheStub struct {
 type schedulerTestOpenAIAccountRepo struct {
 	AccountRepository
 	accounts []Account
+}
+
+func TestGrokQuotaTopKAndPinnedRetry(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	group := int64(1)
+	a := Account{ID: 11, GroupIDs: []int64{group}, Platform: PlatformGrok, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Credentials: map[string]any{"subscription_tier": "SuperGrokPro"}}
+	b := a
+	b.ID, b.Priority = 12, 10
+	hold := 60
+	a.Extra = map[string]any{grokQuotaSnapshotExtraKey: &xai.QuotaSnapshot{RetryAfterSeconds: &hold, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}}
+	c := b
+	c.ID, c.Priority = 13, 20
+	svc := newOpenAICompactionSchedulerTestService([]Account{a, b, c}, true)
+	svc.cfg.Gateway.OpenAIWS.LBTopK = 1
+	svc.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Priority = 1
+	for _, tc := range []struct{ pin, want int64 }{{0, b.ID}, {c.ID, c.ID}, {a.ID, 0}} {
+		ctx := context.Background()
+		if tc.pin > 0 {
+			ctx = WithOpenAIRetryAccount(ctx, tc.pin)
+		}
+		selection, _, err := svc.SelectAccountWithSchedulerForCapability(ctx, &group, "", "", "grok-4.3", nil, OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, false, PlatformGrok)
+		if tc.want == 0 {
+			require.ErrorIs(t, err, ErrNoAvailableAccounts)
+			require.Nil(t, selection)
+			continue
+		}
+		require.NoError(t, err)
+		require.Equal(t, tc.want, selection.Account.ID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	}
 }
 
 func (r schedulerTestOpenAIAccountRepo) GetByID(ctx context.Context, id int64) (*Account, error) {

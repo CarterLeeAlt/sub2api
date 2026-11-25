@@ -130,6 +130,37 @@ func TestUsageBillingRepositoryApply_DeduplicatesSubscriptionBilling(t *testing.
 	require.InDelta(t, 2.5, dailyUsage, 0.000001)
 }
 
+func TestBatchImageCaptureAccountsForKeyOnce(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+	u := mustCreateUser(t, client, &service.User{Email: uuid.NewString() + "@example.invalid", PasswordHash: "hash", Balance: 10})
+	k := mustCreateApiKey(t, client, &service.APIKey{UserID: u.ID, Key: "sk-" + uuid.NewString(), Name: "batch", Quota: 0.5})
+	_, err := integrationDB.ExecContext(ctx, "UPDATE api_keys SET rate_limit_5h=5 WHERE id=$1", k.ID)
+	require.NoError(t, err)
+	id := uuid.NewString()
+	hold := service.BatchImageBalanceHoldCommand{UserID: u.ID, APIKeyID: k.ID, BatchID: id, HoldAmount: 1, RequestID: service.BatchImageHoldRequestID(id)}
+	capture := hold
+	capture.RequestID = service.BatchImageCaptureRequestID(id)
+	capture.ActualAmount = 0.5
+	_, err = repo.ReserveBatchImageBalance(ctx, &hold)
+	require.NoError(t, err)
+	for _, applied := range []bool{true, false} {
+		r, err := repo.CaptureBatchImageBalance(ctx, &capture)
+		require.NoError(t, err)
+		require.Equal(t, applied, r.Applied)
+	}
+	var balance, frozen, used, window float64
+	var status string
+	err = integrationDB.QueryRowContext(ctx, `SELECT balance,frozen_balance,quota_used,usage_5h,k.status FROM users u JOIN api_keys k ON k.user_id=u.id WHERE k.id=$1`, k.ID).Scan(&balance, &frozen, &used, &window, &status)
+	require.NoError(t, err)
+	require.Equal(t, 9.5, balance)
+	require.Zero(t, frozen)
+	require.Equal(t, 0.5, used)
+	require.Equal(t, used, window)
+	require.Equal(t, service.StatusAPIKeyQuotaExhausted, status)
+}
+
 func TestUsageBillingRepositoryApply_RequestFingerprintConflict(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)

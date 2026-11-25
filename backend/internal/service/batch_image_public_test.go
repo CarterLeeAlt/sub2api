@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -43,6 +44,41 @@ func TestBatchImagePublicService_SelectAccountPriority(t *testing.T) {
 			require.Equal(t, tt.wantID, account.ID)
 		})
 	}
+}
+
+type batchImageConcurrentWinner struct {
+	BatchImageRepository
+	miss bool
+}
+
+func (r *batchImageConcurrentWinner) GetBatchImageJobByIdempotencyKey(ctx context.Context, uid, keyID int64, key string) (*BatchImageJob, error) {
+	if r.miss {
+		r.miss = false
+		return nil, ErrBatchImageJobNotFound
+	}
+	return r.BatchImageRepository.GetBatchImageJobByIdempotencyKey(ctx, uid, keyID, key)
+}
+func (*batchImageConcurrentWinner) CreateBatchImageJob(context.Context, CreateBatchImageJobParams) (*BatchImageJob, error) {
+	return nil, ErrBatchImageJobExists
+}
+
+func TestBatchImageConcurrentSubmitReplaysWinner(t *testing.T) {
+	svc, repo, _, provider, _ := newTestBatchImagePublicService(true)
+	ctx := context.Background()
+	req := validBatchImageSubmitRequest()
+	first, err := svc.Submit(ctx, testBatchImageOwner(), req, "overlap")
+	require.NoError(t, err)
+	r := &batchImageConcurrentWinner{BatchImageRepository: repo, miss: true}
+	svc.Repo = r
+	second, err := svc.Submit(ctx, testBatchImageOwner(), req, "overlap")
+	require.NoError(t, err)
+	require.Equal(t, first.ID, second.ID)
+	r.miss = true
+	req.Items[0].Prompt = "diff"
+	_, err = svc.Submit(ctx, testBatchImageOwner(), req, "overlap")
+	require.ErrorIs(t, err, ErrBatchImageIdempotencyConflict)
+	require.Len(t, provider.submits, 1)
+	require.Len(t, svc.BillingRepo.(*fakeBatchImageBillingRepo).reserves, 1)
 }
 
 func TestBatchImagePublicService_Submit(t *testing.T) {
@@ -421,20 +457,23 @@ func TestBatchImagePublicService_Submit(t *testing.T) {
 	})
 
 	t.Run("idempotency returns same batch without provider resubmit", func(t *testing.T) {
-		svc, repo, queue, gemini, _ := newTestBatchImagePublicService(true)
-		req := validBatchImageSubmitRequest()
-		req.SessionID = batchImageStringPtr("original-session")
+		synctest.Test(t, func(t *testing.T) {
+			svc, repo, queue, gemini, _ := newTestBatchImagePublicService(true)
+			req := validBatchImageSubmitRequest()
+			req.SessionID = batchImageStringPtr("original-session")
 
-		first, err := svc.Submit(ctx, testBatchImageOwner(), req, "client-key")
-		require.NoError(t, err)
-		req.SessionID = batchImageStringPtr("retry-session")
-		second, err := svc.Submit(ctx, testBatchImageOwner(), req, "client-key")
-		require.NoError(t, err)
+			first, err := svc.Submit(ctx, testBatchImageOwner(), req, "client-key")
+			require.NoError(t, err)
+			time.Sleep(2 * time.Second)
+			req.SessionID = batchImageStringPtr("retry-session")
+			second, err := svc.Submit(ctx, testBatchImageOwner(), req, "client-key")
+			require.NoError(t, err)
 
-		require.Equal(t, first.ID, second.ID)
-		require.Equal(t, "original-session", batchImageDerefString(repo.jobs[first.ID].SessionID))
-		require.Len(t, gemini.submits, 1)
-		require.Equal(t, []string{first.ID}, queue.enqueued)
+			require.Equal(t, first.ID, second.ID)
+			require.Equal(t, "original-session", batchImageDerefString(repo.jobs[first.ID].SessionID))
+			require.Len(t, gemini.submits, 1)
+			require.Equal(t, []string{first.ID}, queue.enqueued)
+		})
 	})
 
 	t.Run("idempotency conflict rejects changed request", func(t *testing.T) {

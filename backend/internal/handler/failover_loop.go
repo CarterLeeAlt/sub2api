@@ -18,6 +18,31 @@ type TempUnscheduler interface {
 	TempUnscheduleRetryableError(ctx context.Context, accountID int64, failoverErr *service.UpstreamFailoverError)
 }
 
+type openAIHTTPRetry struct{ account *service.Account }
+
+func (r *openAIHTTPRetry) selectionContext(ctx context.Context) context.Context {
+	if r.account == nil {
+		return ctx
+	}
+	return service.WithOpenAIRetryAccount(ctx, r.account.ID)
+}
+
+// A pinned account can become ineligible during backoff. Charge a switch before selecting another.
+func (r *openAIHTTPRetry) switchAfterMiss(ctx context.Context, err error, gateway *service.OpenAIGatewayService, excluded map[int64]struct{}, count *int, limit int, failure *service.UpstreamFailoverError, storm *service.OpenAIOAuth429FailoverState) bool {
+	a := r.account
+	r.account = nil
+	if a == nil || err == nil || ctx.Err() != nil {
+		return false
+	}
+	excluded[a.ID] = struct{}{}
+	gateway.RecordOpenAIAccountSwitch()
+	if *count >= limit {
+		return false
+	}
+	*count++
+	return !gateway.ShouldStopOpenAIOAuth429Failover(a, failure.StatusCode, *count, storm)
+}
+
 // FailoverAction 表示 failover 错误处理后的下一步动作
 type FailoverAction int
 

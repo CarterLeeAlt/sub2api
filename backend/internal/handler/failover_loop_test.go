@@ -65,6 +65,21 @@ func TestSameAccountRetryDelayFor(t *testing.T) {
 	})
 }
 
+func TestPinnedHTTPRetrySwitchBudget(t *testing.T) {
+	for _, limit := range []int{0, 1} {
+		ctx := context.Background()
+		r := openAIHTTPRetry{account: &service.Account{ID: 12}}
+		excluded := map[int64]struct{}{}
+		switches := 0
+		failure := &service.UpstreamFailoverError{StatusCode: http.StatusServiceUnavailable}
+		ok := r.switchAfterMiss(ctx, service.ErrNoAvailableAccounts, &service.OpenAIGatewayService{}, excluded, &switches, limit, failure, nil)
+		require.Equal(t, limit > 0, ok)
+		require.Equal(t, limit, switches)
+		require.Contains(t, excluded, int64(12))
+		require.Nil(t, r.account)
+	}
+}
+
 func TestSameAccountRetryAllowedUsesDeadlineInsteadOfPoolCount(t *testing.T) {
 	err := &service.UpstreamFailoverError{
 		RetryableOnSameAccount:   true,

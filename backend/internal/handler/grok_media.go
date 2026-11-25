@@ -209,6 +209,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var retry openAIHTTPRetry
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	mediaEligibilityRejected := false
@@ -245,7 +246,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			)
 		} else {
 			selection, scheduleDecision, err = h.gatewayService.SelectAccountWithSchedulerForCapability(
-				requestCtx,
+				retry.selectionContext(requestCtx),
 				apiKey.GroupID,
 				"",
 				sessionHash,
@@ -260,6 +261,9 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			)
 		}
 		// Own an eagerly acquired slot before any rejection or eligibility probe.
+		if retry.switchAfterMiss(requestCtx, err, h.gatewayService, failedAccountIDs, &switchCount, maxAccountSwitches, lastFailoverErr, &oauth429FailoverState) {
+			continue
+		}
 		// Forwarding takes over the same once-only release after admission.
 		if selection != nil && selection.Acquired {
 			selection.ReleaseFunc = wrapReleaseOnDone(requestCtx, selection.ReleaseFunc)
@@ -446,6 +450,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 							return
 						case <-time.After(retryDelay):
 						}
+						retry.account, lastFailoverErr = account, failoverErr
 						continue
 					}
 				}

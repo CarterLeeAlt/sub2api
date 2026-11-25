@@ -131,6 +131,24 @@ func newOpenAICompactionSchedulerTestService(accounts []Account, advanced bool) 
 	return svc
 }
 
+func TestCompactOnlyReplacementSelectable(t *testing.T) {
+	for _, advanced := range []bool{false, true} {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		a := Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1,
+			Credentials: map[string]any{"compact_model_mapping": map[string]any{"gpt-5.5": "gpt-6.1-sol"}}, Extra: map[string]any{"openai_compact_supported": true}}
+		svc := newOpenAICompactionSchedulerTestService([]Account{a}, advanced)
+		group := int64(1)
+		selection, _, err := svc.SelectAccountWithScheduler(context.Background(), &group, "", "", "gpt-5.5", nil, OpenAIUpstreamTransportAny, true)
+		require.NoError(t, err)
+		require.Equal(t, a.ID, selection.Account.ID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		_, _, err = svc.SelectAccountWithScheduler(context.Background(), &group, "", "", "gpt-5.5", nil, OpenAIUpstreamTransportAny, false)
+		require.Error(t, err)
+	}
+}
+
 func selectOpenAICompactionSchedulerTestAccount(t *testing.T, svc *OpenAIGatewayService, groupID int64, requireCompact bool) (*AccountSelectionResult, error) {
 	t.Helper()
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(

@@ -215,7 +215,6 @@ describe('admin AccountsView lite account list', () => {
     vi.spyOn(window, 'matchMedia').mockImplementation(() => ({
       matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn()
     }) as unknown as MediaQueryList)
-    localStorage.setItem('account-auto-refresh', JSON.stringify({ enabled: true, interval_seconds: 5 }))
     const account = { ...listRow, platform, type }
     listAccounts.mockResolvedValue({ items: [account], total: 1, page: 1, page_size: 20, pages: 1 })
     const wrapper = mountView(true, true)
@@ -228,7 +227,7 @@ describe('admin AccountsView lite account list', () => {
     const next = { ...account, extra: { session_window_utilization: 0.44, passive_usage_7d_utilization: 0.54 }, last_used_at: platform === 'gemini' ? '2026-11-16T10:00:00Z' : null }
     getBatchUsage.mockResolvedValue({ usage: { '42': { five_hour: { utilization: 44 }, seven_day: { utilization: 54 } } }, errors: {} })
     listWithEtag.mockResolvedValue({ notModified: false, etag: 'new', data: { items: [next], total: 1, pages: 1 } })
-    await vi.advanceTimersByTimeAsync(6000)
+    await vi.advanceTimersByTimeAsync(10_000)
     await flushPromises()
     expect(getBatchUsage).toHaveBeenCalledTimes(2)
     expect(getBatchUsage).toHaveBeenLastCalledWith([42], false, expect.any(AbortSignal))
@@ -240,7 +239,7 @@ describe('admin AccountsView lite account list', () => {
     expect(getBatchUsage).toHaveBeenCalledTimes(2)
 
     listWithEtag.mockResolvedValue({ notModified: false, etag: 'unrelated', data: { items: [{ ...next, updated_at: 'new', current_concurrency: 2, extra: { ...next.extra, unrelated: true } }], total: 1, pages: 1 } })
-    await vi.advanceTimersByTimeAsync(6000)
+    await vi.advanceTimersByTimeAsync(10_000)
     await flushPromises()
     expect(getBatchUsage).toHaveBeenCalledTimes(2)
     wrapper.unmount()
@@ -320,11 +319,10 @@ describe('admin AccountsView lite account list', () => {
   it('keeps lite=1 on automatic ETag refreshes', async () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
-    localStorage.setItem('account-auto-refresh', JSON.stringify({ enabled: true, interval_seconds: 5 }))
     const wrapper = mountView()
     await flushPromises()
 
-    await vi.advanceTimersByTimeAsync(6000)
+    await vi.advanceTimersByTimeAsync(10_000)
     await flushPromises()
 
     expect(listWithEtag).toHaveBeenCalledWith(

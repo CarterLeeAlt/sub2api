@@ -65,6 +65,29 @@ func TestBatchImageRepository_InvalidProvider(t *testing.T) {
 	require.True(t, errors.Is(err, service.ErrBatchImageInvalidProvider))
 }
 
+func TestBatchImageRepository_ConcurrentOwnerIdempotency(t *testing.T) {
+	ctx := context.Background()
+	repo := NewBatchImageRepository(integrationDB)
+	key, apiKey := batchImageTestID(t, "owner"), int64(7)
+	params := service.CreateBatchImageJobParams{UserID: 1001, APIKeyID: &apiKey, Provider: service.BatchImageProviderGeminiAPI, Model: "image", ItemCount: 1, IdempotencyKey: &key}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { <-start; _, err := repo.CreateBatchImageJob(ctx, params); results <- err }()
+	}
+	close(start)
+	a, b := <-results, <-results
+	if a != nil {
+		a, b = b, a
+	}
+	require.NoError(t, a)
+	require.ErrorIs(t, b, service.ErrBatchImageJobExists)
+	otherKey := apiKey + 1
+	params.APIKeyID = &otherKey
+	_, err := repo.CreateBatchImageJob(ctx, params)
+	require.NoError(t, err)
+}
+
 func TestBatchImageRepository_TransitionIncrementsVersionAndEvents(t *testing.T) {
 	ctx := context.Background()
 	tx := testTx(t)

@@ -320,6 +320,24 @@ func captureUsageBillingBatchImageBalance(ctx context.Context, tx *sql.Tx, cmd *
 		RETURNING balance, frozen_balance
 	`, cmd.HoldAmount, cmd.ActualAmount, cmd.UserID).Scan(&balance, &frozen)
 	if err == nil {
+		if cmd.ActualAmount > 0 {
+			var quota, windows bool
+			keyErr := tx.QueryRowContext(ctx, `SELECT quota > 0, rate_limit_5h > 0 OR rate_limit_1d > 0 OR rate_limit_7d > 0
+				FROM api_keys WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, cmd.APIKeyID).Scan(&quota, &windows)
+			if keyErr != nil && !errors.Is(keyErr, sql.ErrNoRows) {
+				return nil, keyErr
+			}
+			if quota {
+				if _, err := incrementUsageBillingAPIKeyQuota(ctx, tx, cmd.APIKeyID, cmd.ActualAmount); err != nil {
+					return nil, err
+				}
+			}
+			if windows {
+				if err := incrementUsageBillingAPIKeyRateLimit(ctx, tx, cmd.APIKeyID, cmd.ActualAmount); err != nil {
+					return nil, err
+				}
+			}
+		}
 		return &service.BatchImageBalanceHoldResult{NewBalance: &balance, FrozenBalance: &frozen}, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {

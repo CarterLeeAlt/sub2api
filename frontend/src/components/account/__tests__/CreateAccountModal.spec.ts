@@ -166,6 +166,29 @@ function mountModal(groups: any[] = []) {
 }
 
 describe('CreateAccountModal defaults', () => {
+  it('selects the first platform group on load and switch and keeps manual choices', async () => {
+    const wrapper = mountModal()
+    const selected = () => wrapper.getComponent(GroupSelectorStub).props('modelValue')
+    const groups = [
+      { id: 9, platform: 'composite' }, { id: 4, platform: 'openai' },
+      { id: 2, platform: 'openai' }, { id: 3, platform: 'anthropic' },
+    ] as any[]
+    await wrapper.setProps({ groups })
+    expect(selected()).toEqual([4])
+    wrapper.getComponent(GroupSelectorStub).vm.$emit('update:modelValue', [2])
+    await wrapper.setProps({ groups: [...groups] })
+    expect(selected()).toEqual([2])
+    wrapper.getComponent(GroupSelectorStub).vm.$emit('update:modelValue', [])
+    await wrapper.setProps({ groups: [...groups] })
+    expect(selected()).toEqual([])
+    await selectButtonByText(wrapper, 'Anthropic')
+    expect(selected()).toEqual([3])
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    expect(selected()).toEqual([4])
+    wrapper.unmount()
+  })
+
   it('opens with OpenAI first and OAuth selected by default', () => {
     const wrapper = mountModal()
     const platformButtons = wrapper.find('[data-tour="account-form-platform"]').findAll('button')

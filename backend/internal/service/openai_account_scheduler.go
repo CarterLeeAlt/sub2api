@@ -499,7 +499,8 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	req OpenAIAccountScheduleRequest,
 ) (*AccountSelectionResult, bool, error) {
 	sessionHash := strings.TrimSpace(req.SessionHash)
-	if sessionHash == "" || s == nil || s.service == nil || s.service.cache == nil {
+	fixedAccount := req.PreserveStickyBinding && req.DisableStickyEscape && req.StickyAccountID > 0
+	if s == nil || s.service == nil || (!fixedAccount && (sessionHash == "" || s.service.cache == nil)) {
 		return nil, false, nil
 	}
 
@@ -1204,7 +1205,7 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			continue
 		}
 
-		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, false, req.RequiredCapability)
+		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
 		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
 			release(result)
 			continue
@@ -1213,7 +1214,7 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			release(result)
 			break
 		}
-		fresh = s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, false, req.RequiredCapability)
+		fresh = s.service.recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
 		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
 			release(result)
 			continue
@@ -1705,14 +1706,14 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 					continue
 				}
 			}
-			fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, false, req.RequiredCapability)
+			fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
 			if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
 				continue
 			}
 			if !s.consumeOpenAISelectionDBRecheck(budget) {
 				return nil, candidateCount, topK, loadSkew, noAvailableOpenAISelectionError(req.RequestedModel, compactBlocked, filterStats.summary("selection_order_exhausted"))
 			}
-			fresh = s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, false, req.RequiredCapability)
+			fresh = s.service.recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
 			if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
 				continue
 			}
@@ -1801,6 +1802,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 			reason += "_" + decision.window
 		}
 		return false, reason
+	}
+	if paused, decision := shouldAutoPauseGrokAccountByQuota(account); paused {
+		return false, "quota_auto_pause_" + decision.window
 	}
 	// 母账号健康联动：影子账号的凭据来自母账号，母账号不可调度时影子也不应被选中。
 	// Parent-health gate: shadow borrows the parent's credentials; an unschedulable
@@ -2232,6 +2236,13 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerBySize(
 
 type openAIGroupPrivacyRequirementContextKey struct{}
 
+type openAIRetryAccountKey struct{}
+
+// WithOpenAIRetryAccount restricts one selection attempt to a previously admitted account.
+func WithOpenAIRetryAccount(ctx context.Context, accountID int64) context.Context {
+	return context.WithValue(ctx, openAIRetryAccountKey{}, accountID)
+}
+
 type openAIGroupPrivacyRequirement struct {
 	groupID  int64
 	required bool
@@ -2366,6 +2377,26 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
+	if id, _ := ctx.Value(openAIRetryAccountKey{}).(int64); id > 0 {
+		if _, excluded := excludedIDs[id]; excluded || s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
+			return nil, decision, ErrNoAvailableAccounts
+		}
+		scheduler := defaultOpenAIAccountScheduler{service: s}
+		selected, _, err := scheduler.selectBySessionHash(ctx, OpenAIAccountScheduleRequest{
+			GroupID: groupID, Platform: platform, SessionHash: sessionHash, StickyAccountID: id,
+			PreserveStickyBinding: true, DisableStickyEscape: true, RequestedModel: requestedModel,
+			RequiredTransport: requiredTransport, RequiredCapability: requiredCapability, RequiredImageCapability: requiredImageCapability,
+			RequireCompact: requireCompact, RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		})
+		if err != nil {
+			return nil, decision, err
+		}
+		if selected == nil {
+			return nil, decision, ErrNoAvailableAccounts
+		}
+		decision.Layer, decision.SelectedAccountID, decision.SelectedAccountType = "same_account_retry", id, selected.Account.Type
+		return selected, decision, nil
+	}
 	preserveStickyBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash) || openAIImageSizeSpilloverPass(ctx)
 	guardianParentAccountID := int64(0)
 	if strings.TrimSpace(previousResponseID) == "" {

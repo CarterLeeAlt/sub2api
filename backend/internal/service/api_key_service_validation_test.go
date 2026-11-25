@@ -5,6 +5,7 @@ package service
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +18,10 @@ func TestValidateCreateAPIKeyRequestNumericLimits(t *testing.T) {
 	require.NoError(t, validateCreateAPIKeyRequest(CreateAPIKeyRequest{}))
 
 	invalidExpiry := 0
+	future, past := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
+	require.NoError(t, validateCreateAPIKeyRequest(CreateAPIKeyRequest{ExpiresAt: &future}))
 	tests := []CreateAPIKeyRequest{
+		{ExpiresAt: &past}, {ExpiresAt: &future, ExpiresInDays: &positiveExpiry},
 		{Quota: -1},
 		{Quota: math.NaN()},
 		{Quota: math.Inf(1)},

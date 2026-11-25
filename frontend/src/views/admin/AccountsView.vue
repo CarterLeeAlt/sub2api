@@ -17,51 +17,6 @@
             @create="showCreate = true"
           >
             <template #after>
-              <!-- Auto Refresh Dropdown -->
-              <div class="relative" ref="autoRefreshDropdownRef">
-                <button
-                  @click="
-                    showAutoRefreshDropdown = !showAutoRefreshDropdown;
-                    showAccountToolsDropdown = false
-                  "
-                  class="btn btn-secondary px-2 md:px-3"
-                  :title="t('admin.accounts.autoRefresh')"
-                >
-                  <Icon name="refresh" size="sm" :class="[autoRefreshEnabled ? 'animate-spin' : '']" />
-                  <span class="hidden md:inline">
-                    {{
-                      autoRefreshEnabled
-                        ? t('admin.accounts.autoRefreshCountdown', { seconds: autoRefreshCountdown })
-                        : t('admin.accounts.autoRefresh')
-                    }}
-                  </span>
-                </button>
-                <div
-                  v-if="showAutoRefreshDropdown"
-                  class="absolute right-0 z-50 mt-2 w-56 origin-top-right rounded-lg border border-gray-200 bg-white shadow-lg dark:border-dark-700 dark:bg-dark-800"
-                >
-                  <div class="p-2">
-                    <button
-                      @click="setAutoRefreshEnabled(!autoRefreshEnabled)"
-                      class="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-dark-700"
-                    >
-                      <span>{{ t('admin.accounts.enableAutoRefresh') }}</span>
-                      <Icon v-if="autoRefreshEnabled" name="check" size="sm" class="text-primary-500" />
-                    </button>
-                    <div class="my-1 border-t border-gray-100 dark:border-dark-700"></div>
-                    <button
-                      v-for="sec in autoRefreshIntervals"
-                      :key="sec"
-                      @click="setAutoRefreshInterval(sec)"
-                      class="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-dark-700"
-                    >
-                      <span>{{ autoRefreshIntervalLabel(sec) }}</span>
-                      <Icon v-if="autoRefreshIntervalSeconds === sec" name="check" size="sm" class="text-primary-500" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
               <!-- More Tools Dropdown -->
               <div class="relative" ref="accountToolsDropdownRef">
                 <button
@@ -728,13 +683,6 @@ const loadInitialAccountSortState = (): AccountSortState => {
 const sortState = reactive<AccountSortState>(loadInitialAccountSortState())
 
 // Auto refresh settings
-const showAutoRefreshDropdown = ref(false)
-const autoRefreshDropdownRef = ref<HTMLElement | null>(null)
-const AUTO_REFRESH_STORAGE_KEY = 'account-auto-refresh'
-const autoRefreshIntervals = [5, 10, 15, 30] as const
-const autoRefreshEnabled = ref(false)
-const autoRefreshIntervalSeconds = ref<(typeof autoRefreshIntervals)[number]>(30)
-const autoRefreshCountdown = ref(0)
 const autoRefreshETag = ref<string | null>(null)
 const autoRefreshFetching = ref(false)
 const AUTO_REFRESH_SILENT_WINDOW_MS = 15000
@@ -983,14 +931,6 @@ const refreshTodayStatsBatch = async () => {
   }
 }
 
-const autoRefreshIntervalLabel = (sec: number) => {
-  if (sec === 5) return t('admin.accounts.refreshInterval5s')
-  if (sec === 10) return t('admin.accounts.refreshInterval10s')
-  if (sec === 15) return t('admin.accounts.refreshInterval15s')
-  if (sec === 30) return t('admin.accounts.refreshInterval30s')
-  return `${sec}s`
-}
-
 const formatSchedulerScore = (value: unknown): string => {
   const num = Number(value)
   if (!Number.isFinite(num)) return '-'
@@ -1058,58 +998,8 @@ const saveColumnsToStorage = () => {
   }
 }
 
-const loadSavedAutoRefresh = () => {
-  try {
-    const saved = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY)
-    if (!saved) return
-    const parsed = JSON.parse(saved) as { enabled?: boolean; interval_seconds?: number }
-    autoRefreshEnabled.value = parsed.enabled === true
-    const interval = Number(parsed.interval_seconds)
-    if (autoRefreshIntervals.includes(interval as any)) {
-      autoRefreshIntervalSeconds.value = interval as any
-    }
-  } catch (e) {
-    console.error('Failed to load saved auto refresh settings:', e)
-  }
-}
-
-const saveAutoRefreshToStorage = () => {
-  try {
-    localStorage.setItem(
-      AUTO_REFRESH_STORAGE_KEY,
-      JSON.stringify({
-        enabled: autoRefreshEnabled.value,
-        interval_seconds: autoRefreshIntervalSeconds.value
-      })
-    )
-  } catch (e) {
-    console.error('Failed to save auto refresh settings:', e)
-  }
-}
-
 if (typeof window !== 'undefined') {
   loadSavedColumns()
-  loadSavedAutoRefresh()
-}
-
-const setAutoRefreshEnabled = (enabled: boolean) => {
-  autoRefreshEnabled.value = enabled
-  saveAutoRefreshToStorage()
-  if (enabled) {
-    autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
-    resumeAutoRefresh()
-  } else {
-    pauseAutoRefresh()
-    autoRefreshCountdown.value = 0
-  }
-}
-
-const setAutoRefreshInterval = (seconds: (typeof autoRefreshIntervals)[number]) => {
-  autoRefreshIntervalSeconds.value = seconds
-  saveAutoRefreshToStorage()
-  if (autoRefreshEnabled.value) {
-    autoRefreshCountdown.value = seconds
-  }
 }
 
 const toggleColumn = (key: string) => {
@@ -1310,7 +1200,6 @@ const refreshUpstreamBillingRates = async (force = false) => {
     isAnyModalOpen.value ||
     menu.show ||
     showAccountToolsDropdown.value ||
-    showAutoRefreshDropdown.value ||
     (typeof document !== 'undefined' && document.hidden)
   )) return
 
@@ -1447,7 +1336,6 @@ const isAnyModalOpen = computed(() => {
 
 const enterAutoRefreshSilentWindow = () => {
   autoRefreshSilentUntil.value = Date.now() + AUTO_REFRESH_SILENT_WINDOW_MS
-  autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
 }
 
 const inAutoRefreshSilentWindow = () => {
@@ -1555,15 +1443,6 @@ const handleManualRefresh = async () => {
   usageManualRefreshToken.value += 1
 }
 
-// Background quota writes must reach an open page even when the faster table
-// auto-refresh is off. Provider queries retain their own freshness gate.
-useIntervalFn(() => {
-  if (autoRefreshEnabled.value || document.hidden || loading.value || isAnyModalOpen.value) return
-  if (menu.show || showAccountToolsDropdown.value || showAutoRefreshDropdown.value || inAutoRefreshSilentWindow()) return
-  if (!accounts.value.some(account => account.platform === 'openai' && account.type === 'oauth')) return
-  void refreshAccountsIncrementally()
-}, 60_000)
-
 const loadUpstreamBillingProbeGlobalState = async () => {
   try {
     const settings = await adminAPI.accounts.getUpstreamBillingProbeSettings()
@@ -1591,7 +1470,6 @@ const updateAccountToolsDropdownPosition = () => {
 
 const toggleAccountToolsDropdown = () => {
   const nextVisible = !showAccountToolsDropdown.value
-  showAutoRefreshDropdown.value = false
   if (nextVisible) updateAccountToolsDropdownPosition()
   showAccountToolsDropdown.value = nextVisible
 }
@@ -1628,32 +1506,11 @@ const syncPendingListChanges = async () => {
   usageManualRefreshToken.value += 1
 }
 
-const { pause: pauseAutoRefresh, resume: resumeAutoRefresh } = useIntervalFn(
-  async () => {
-    if (!autoRefreshEnabled.value) return
-    if (document.hidden) return
-    if (loading.value || autoRefreshFetching.value) return
-    if (isAnyModalOpen.value) return
-    if (menu.show || showAccountToolsDropdown.value || showAutoRefreshDropdown.value) return
-    if (inAutoRefreshSilentWindow()) {
-      autoRefreshCountdown.value = Math.max(
-        0,
-        Math.ceil((autoRefreshSilentUntil.value - Date.now()) / 1000)
-      )
-      return
-    }
-
-    if (autoRefreshCountdown.value <= 0) {
-      autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
-      await refreshAccountsIncrementally()
-      return
-    }
-
-    autoRefreshCountdown.value -= 1
-  },
-  1000,
-  { immediate: false }
-)
+useIntervalFn(() => {
+  if (document.hidden || loading.value || isAnyModalOpen.value) return
+  if (menu.show || showAccountToolsDropdown.value || inAutoRefreshSilentWindow()) return
+  void refreshAccountsIncrementally()
+}, 10_000)
 
 const GROK_QUOTA_SIGNAL_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const GROK_QUOTA_SIGNAL_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
@@ -2637,9 +2494,6 @@ const handleClickOutside = (event: MouseEvent) => {
   if (accountToolsDropdownRef.value && !accountToolsDropdownRef.value.contains(target)) {
     showAccountToolsDropdown.value = false
   }
-  if (autoRefreshDropdownRef.value && !autoRefreshDropdownRef.value.contains(target)) {
-    showAutoRefreshDropdown.value = false
-  }
 }
 
 onMounted(async () => {
@@ -2675,13 +2529,6 @@ onMounted(async () => {
   window.addEventListener('scroll', handleScroll, true)
   window.addEventListener('resize', handleViewportResize)
   document.addEventListener('click', handleClickOutside)
-
-  if (autoRefreshEnabled.value) {
-    autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
-    resumeAutoRefresh()
-  } else {
-    pauseAutoRefresh()
-  }
 })
 
 onUnmounted(() => {

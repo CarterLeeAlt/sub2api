@@ -65,6 +65,7 @@ type BatchImageSettlementService struct {
 	UsageLogRepo UsageLogRepository
 	Pricing      BatchImagePricingResolver
 	AuthCache    APIKeyAuthCacheInvalidator
+	BillingCache *BillingCacheService
 	Config       *config.Config
 }
 
@@ -162,6 +163,11 @@ func (s *BatchImageSettlementService) Settle(ctx context.Context, batchID string
 		return nil, err
 	}
 	s.invalidateAuthCache(ctx, job.UserID)
+	if s.BillingCache != nil {
+		if err := s.BillingCache.InvalidateAPIKeyRateLimit(ctx, *job.APIKeyID); err != nil {
+			return nil, err
+		}
+	}
 
 	now := time.Now()
 	outputExpiresAt := now.Add(s.outputRetentionAfterTerminal())
@@ -263,6 +269,10 @@ func (s *BatchImageSettlementService) recordUsageLog(ctx context.Context, job *B
 	inboundEndpoint := "/v1/images/batches"
 	upstreamEndpoint := "vertex:batchPredictionJobs"
 	imageSize := "1K"
+	totalCost := actualCost
+	if job.PricingSnapshotVersion >= 1 {
+		totalCost = float64(job.SuccessCount) * job.BaseUnitPrice
+	}
 	usageLog := &UsageLog{
 		UserID:                job.UserID,
 		APIKeyID:              *job.APIKeyID,
@@ -273,8 +283,8 @@ func (s *BatchImageSettlementService) recordUsageLog(ctx context.Context, job *B
 		InboundEndpoint:       &inboundEndpoint,
 		UpstreamEndpoint:      &upstreamEndpoint,
 		ImageCount:            job.SuccessCount,
-		ImageOutputCost:       actualCost,
-		TotalCost:             actualCost,
+		ImageOutputCost:       totalCost,
+		TotalCost:             totalCost,
 		ActualCost:            actualCost,
 		RateMultiplier:        job.GroupRateMultiplier * job.BatchDiscountMultiplier,
 		AccountRateMultiplier: &accountRateMultiplier,

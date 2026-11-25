@@ -29,6 +29,7 @@ func ProvideBatchImageWorkerRuntime(
 	usageLogRepo UsageLogRepository,
 	pricing *BatchImageModelPricingResolver,
 	authCache APIKeyAuthCacheInvalidator,
+	billingCache *BillingCacheService,
 	cfg *config.Config,
 ) *BatchImageWorkerRuntime {
 	processor := &BatchImagePipelineProcessor{
@@ -44,6 +45,7 @@ func ProvideBatchImageWorkerRuntime(
 			BillingRepo:  billingRepo,
 			UsageLogRepo: usageLogRepo,
 			Pricing:      pricing,
+			BillingCache: billingCache,
 			AuthCache:    authCache,
 			Config:       cfg,
 		},

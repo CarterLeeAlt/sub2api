@@ -617,6 +617,19 @@ describe('user KeysView column settings', () => {
       expect(vi.mocked(keysAPI.create).mock.calls[0].slice(0, 2)).toEqual(['My key', 5])
     })
 
+    it('submits the precise custom expiration on creation', async () => {
+      const wrapper = await openCreate()
+      await wrapper.get('[data-tour="key-form-name"]').setValue('Temporary')
+      await groupSelect(wrapper).vm.$emit('update:modelValue', 1)
+      const toggle = wrapper.findAll('label').find(el => el.text() === 'keys.expiration')!.element.nextElementSibling as HTMLButtonElement
+      toggle.click()
+      await nextTick()
+      const local = '2040-05-09T11:23'
+      await wrapper.get('input[type="datetime-local"]').setValue(local)
+      await wrapper.get('#key-form').trigger('submit')
+      expect(vi.mocked(keysAPI.create).mock.calls[0][6]).toBe(new Date(local).toISOString())
+    })
+
     it('defaults to a provider with available groups and disables empty categories', async () => {
       getAvailableGroups.mockResolvedValue([availableGroups[5]])
       const wrapper = await openCreate()

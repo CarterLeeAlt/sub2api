@@ -3797,7 +3797,8 @@
 
         <!-- Group Selection - 仅标准模式显示 -->
         <GroupSelector
-          v-model="form.group_ids"
+          :model-value="form.group_ids"
+          @update:model-value="selectGroups"
           :groups="groups"
           :platform="form.platform"
           :mixed-scheduling="mixedScheduling"
@@ -4162,6 +4163,8 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
+import { accountGroupOptions } from '@/utils/accountGroupOptions'
 
 import {
   getPresetMappingsByPlatform,
@@ -5126,6 +5129,30 @@ const form = reactive({
   group_ids: [] as number[],
   expires_at: null as number | null
 })
+
+const authStore = useAuthStore()
+const eligibleGroups = computed(() => accountGroupOptions(props.groups, form.platform, mixedScheduling.value, authStore.isSimpleMode))
+let groupsChosenManually = false
+function selectGroups(ids: number[]) {
+  groupsChosenManually = true
+  form.group_ids = ids
+}
+
+watch([() => props.show, () => form.platform, eligibleGroups], ([show, platform, groups], [wasOpen, previousPlatform]) => {
+  if (!show) return
+  if (!wasOpen || platform !== previousPlatform) groupsChosenManually = false
+  if (groupsChosenManually) {
+    if (form.group_ids.length === 0) return
+    const valid = form.group_ids.filter(id => groups.some(group => group.id === id))
+    if (valid.length > 0) {
+      if (valid.length !== form.group_ids.length) form.group_ids = valid
+      return
+    }
+    groupsChosenManually = false
+  }
+  const first = groups.find(group => group.platform === platform) ?? groups[0]
+  form.group_ids = first ? [first.id] : []
+}, { immediate: true })
 
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {

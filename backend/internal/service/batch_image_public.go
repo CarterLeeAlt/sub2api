@@ -210,21 +210,28 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 	if err := s.ensureGroupAllowsBatchImage(ctx, owner.GroupID); err != nil {
 		return nil, err
 	}
-	requestHash := HashBatchImageSubmitRequest(normalized)
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	replay := func(existing *BatchImageJob) (*BatchImagePublicBatch, error) {
+		candidate := normalized
+		// A generated display name belongs to the winning job, including on a concurrent retry.
+		if strings.TrimSpace(req.TaskName) == "" {
+			candidate.TaskName = existing.TaskName
+		}
+		if batchImageDerefString(existing.RequestHash) != HashBatchImageSubmitRequest(candidate) {
+			return nil, ErrBatchImageIdempotencyConflict
+		}
+		if existing.Status == BatchImageJobStatusSubmitted && s.Queue != nil {
+			if err := s.Queue.Enqueue(ctx, existing.BatchID); err != nil && !errors.Is(err, ErrBatchImageAlreadyQueued) {
+				_ = s.Repo.RecordBatchImageJobSubmitFailure(ctx, existing.BatchID, "QUEUE_FAILED", sanitizeBatchImagePublicMessage(err.Error()), false)
+				return nil, ErrBatchImageQueueFailed
+			}
+		}
+		return BatchImageJobToPublic(existing), nil
+	}
 	if idempotencyKey != "" {
 		existing, err := s.Repo.GetBatchImageJobByIdempotencyKey(ctx, owner.UserID, owner.APIKeyID, idempotencyKey)
 		if err == nil {
-			if batchImageDerefString(existing.RequestHash) != requestHash {
-				return nil, ErrBatchImageIdempotencyConflict
-			}
-			if existing.Status == BatchImageJobStatusSubmitted && s.Queue != nil {
-				if enqueueErr := s.Queue.Enqueue(ctx, existing.BatchID); enqueueErr != nil && !errors.Is(enqueueErr, ErrBatchImageAlreadyQueued) {
-					_ = s.Repo.RecordBatchImageJobSubmitFailure(ctx, existing.BatchID, "QUEUE_FAILED", sanitizeBatchImagePublicMessage(enqueueErr.Error()), false)
-					return nil, ErrBatchImageQueueFailed
-				}
-			}
-			return BatchImageJobToPublic(existing), nil
+			return replay(existing)
 		}
 		if !errors.Is(err, ErrBatchImageJobNotFound) {
 			return nil, err
@@ -257,6 +264,10 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 	accountID := account.ID
 	holdID := BatchImageHoldRequestID(batchID)
 	holdAmount := pricingSnapshot.HoldAmount
+	if normalized.TaskName == "" {
+		normalized.TaskName = defaultBatchImageTaskName(time.Now())
+	}
+	requestHash := HashBatchImageSubmitRequest(normalized)
 	job, err := s.Repo.CreateBatchImageJob(ctx, CreateBatchImageJobParams{
 		BatchID:                 batchID,
 		UserID:                  owner.UserID,
@@ -285,6 +296,15 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 		SessionID:               normalized.SessionID,
 	})
 	if err != nil {
+		if idempotencyKey != "" && errors.Is(err, ErrBatchImageJobExists) {
+			existing, lookupErr := s.Repo.GetBatchImageJobByIdempotencyKey(ctx, owner.UserID, owner.APIKeyID, idempotencyKey)
+			if lookupErr == nil {
+				return replay(existing)
+			}
+			if !errors.Is(lookupErr, ErrBatchImageJobNotFound) {
+				return nil, lookupErr
+			}
+		}
 		return nil, err
 	}
 	if err := reserveBatchImageBalanceHold(ctx, s.BillingRepo, job, requestHash); err != nil {
@@ -779,9 +799,6 @@ func (s *BatchImagePublicService) validateSubmitRequest(req BatchImageSubmitRequ
 	req.ImageSize = strings.TrimSpace(req.ImageSize)
 	if req.Model == "" {
 		return req, ErrBatchImageInvalidModel
-	}
-	if req.TaskName == "" {
-		req.TaskName = defaultBatchImageTaskName(time.Now())
 	}
 	if len(req.TaskName) > 255 {
 		req.TaskName = truncateBatchImageMessage(req.TaskName, 255)
