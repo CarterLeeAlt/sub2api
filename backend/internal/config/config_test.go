@@ -1668,22 +1668,34 @@ func TestDatabaseDSNWithTimezone_WithPassword(t *testing.T) {
 
 func TestDatabaseDSNPreservesConnectionValues(t *testing.T) {
 	t.Setenv("PGPASSWORD", "")
-	for _, password := range []string{"", "secret", "with spaces", `quote'and\slash`, `trailing\`, " tab\tline\nbreak ", "secret dbname=postgres user=other"} {
-		t.Run(fmt.Sprintf("password=%q", password), func(t *testing.T) {
-			d := &DatabaseConfig{Host: "/tmp/postgres socket", Port: 5433, User: `user'\ name`, Password: password, DBName: `database'\ name`, SSLMode: "require"}
-			for _, timezone := range []string{"", "UTC", "Asia/Shanghai"} {
-				parsed, err := pq.NewConfig(d.DSNWithTimezone(timezone))
-				require.NoError(t, err)
-				require.Equal(t, d.Host, parsed.Host)
-				require.Equal(t, uint16(d.Port), parsed.Port)
-				require.Equal(t, d.User, parsed.User)
-				require.Equal(t, d.Password, parsed.Password)
-				require.Equal(t, d.DBName, parsed.Database)
-				require.Equal(t, pq.SSLModeRequire, parsed.SSLMode)
-				if timezone == "" {
-					timezone = "Asia/Shanghai"
-				}
-				require.Equal(t, timezone, parsed.Runtime["TimeZone"])
+	for _, connection := range []struct {
+		name    string
+		host    string
+		sslMode pq.SSLMode
+	}{
+		{name: "tcp", host: "db.example.com", sslMode: pq.SSLModeRequire},
+		// lib/pq disables TLS for sockets; use a native absolute path on every OS.
+		{name: "unix socket", host: filepath.Join(t.TempDir(), "postgres socket"), sslMode: pq.SSLModeDisable},
+	} {
+		t.Run(connection.name, func(t *testing.T) {
+			for _, password := range []string{"", "secret", "with spaces", `quote'and\slash`, `trailing\`, " tab\tline\nbreak ", "secret dbname=postgres user=other"} {
+				t.Run(fmt.Sprintf("password=%q", password), func(t *testing.T) {
+					d := &DatabaseConfig{Host: connection.host, Port: 5433, User: `user'\ name`, Password: password, DBName: `database'\ name`, SSLMode: "require"}
+					for _, timezone := range []string{"", "UTC", "Asia/Shanghai"} {
+						parsed, err := pq.NewConfig(d.DSNWithTimezone(timezone))
+						require.NoError(t, err)
+						require.Equal(t, d.Host, parsed.Host)
+						require.Equal(t, uint16(d.Port), parsed.Port)
+						require.Equal(t, d.User, parsed.User)
+						require.Equal(t, d.Password, parsed.Password)
+						require.Equal(t, d.DBName, parsed.Database)
+						require.Equal(t, connection.sslMode, parsed.SSLMode)
+						if timezone == "" {
+							timezone = "Asia/Shanghai"
+						}
+						require.Equal(t, timezone, parsed.Runtime["TimeZone"])
+					}
+				})
 			}
 		})
 	}
