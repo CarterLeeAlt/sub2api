@@ -243,6 +243,9 @@ const canSyncUpstream = computed(() => {
 })
 
 const availableOptions = computed(() => {
+  if (props.automaticCatalog && props.catalogSource === 'upstream') {
+    return props.modelValue.map(value => ({ value, label: value }))
+  }
   if (normalizedPlatforms.value.length === 0) {
     return allModels
   }

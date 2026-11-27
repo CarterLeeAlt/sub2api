@@ -242,6 +242,7 @@ func ProvideOpenAIModelCatalogRefreshService(repo AccountRepository, adminRepo A
 		return nil, fmt.Errorf("account repository does not support model catalog refresh")
 	}
 	svc := NewOpenAIModelCatalogRefreshService(store, reader, locks)
+	svc.settings = reader.settingService.settingRepo
 	store.SetModelCatalogWake(svc.Wake)
 	adminStore, ok := adminRepo.(AccountModelCatalogRepository)
 	if !ok {

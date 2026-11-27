@@ -155,7 +155,7 @@ func TestOpenAIGatewayServiceForwardImages_TextFallbackDoesNotCoolImageCapabilit
 		ID:       205,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -182,9 +182,7 @@ func TestOpenAIGatewayServiceForwardImages_StructuredUnavailableCoolsImageCapabi
 	stubOpenAIImagesModelsManifest(t)
 	repo := &modelNotFoundAccountRepoStub{}
 	body := []byte(`{"model":"gpt-image-1","prompt":"draw a cat"}`)
-	upstreamSSE := "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"error\":" +
-		"{\"type\":\"upstream_error\",\"code\":\"image_generation_unavailable\"," +
-		"\"message\":\"image generation tool is not available for this account\"}}}\n\n"
+	upstreamJSON := `{"error":{"type":"upstream_error","code":"image_generation_unavailable","message":"image generation tool is not available for this account"}}`
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -197,8 +195,8 @@ func TestOpenAIGatewayServiceForwardImages_StructuredUnavailableCoolsImageCapabi
 		httpUpstream: &httpUpstreamRecorder{
 			resp: &http.Response{
 				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-				Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(upstreamJSON)),
 			},
 		},
 	}

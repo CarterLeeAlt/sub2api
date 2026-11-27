@@ -93,7 +93,9 @@ func TestCodexImagesLunaErrorDoesNotCoolImageAccount(t *testing.T) {
 			svc := newOpenAIImagesTestService(upstream)
 			parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 			require.NoError(t, err)
-			result, err := svc.ForwardImages(context.Background(), c, directImagesTestAccount(), body, parsed, "")
+			account := directImagesTestAccount()
+			account.Type = AccountTypeSetupToken
+			result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
 			require.Nil(t, result)
 			var upstreamErr *OpenAIImagesUpstreamError
 			require.ErrorAs(t, err, &upstreamErr)

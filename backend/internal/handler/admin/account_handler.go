@@ -2939,14 +2939,18 @@ func (h *AccountHandler) respondAvailableModels(c *gin.Context, account *service
 		}
 
 		mapping := account.GetModelMapping()
-		if len(mapping) == 0 {
+		automaticImages := account.IsOpenAIOAuth() && account.ModelCatalog().Source == "upstream"
+		if len(mapping) == 0 && !automaticImages {
 			response.Success(c, openai.DefaultModels)
 			return
 		}
 
 		// Return mapped models
-		var models []openai.Model
+		models := make([]openai.Model, 0, len(mapping))
 		for requestedModel := range mapping {
+			if automaticImages && service.IsGPTImageGenerationModel(requestedModel) && !account.IsModelSupported(requestedModel) {
+				continue
+			}
 			var found bool
 			for _, dm := range openai.DefaultModels {
 				if dm.ID == requestedModel {

@@ -28,14 +28,16 @@ type upstreamModelCatalogReader interface {
 // OpenAIModelCatalogRefreshService owns one serial worker. The database holds due
 // times so restarts and notifications do not reset the upstream request cadence.
 type OpenAIModelCatalogRefreshService struct {
-	repo   AccountModelCatalogRepository
-	reader upstreamModelCatalogReader
-	locks  LeaderLockCache
-	owner  string
-	ctx    context.Context
-	cancel context.CancelFunc
-	wake   chan struct{}
-	wg     sync.WaitGroup
+	repo               AccountModelCatalogRepository
+	reader             upstreamModelCatalogReader
+	locks              LeaderLockCache
+	owner              string
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wake               chan struct{}
+	wg                 sync.WaitGroup
+	settings           SettingRepository
+	nextImageSpecFetch time.Time
 }
 
 func NewOpenAIModelCatalogRefreshService(repo AccountModelCatalogRepository, reader upstreamModelCatalogReader, locks LeaderLockCache) *OpenAIModelCatalogRefreshService {
@@ -50,6 +52,24 @@ func (s *OpenAIModelCatalogRefreshService) Wake() {
 	}
 }
 func (s *OpenAIModelCatalogRefreshService) Start() {
+	if s.settings != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				if err := s.refreshImageSpec(s.ctx); err != nil && s.ctx.Err() == nil {
+					slog.Warn("openai_image_catalog_refresh_failed", "error", err)
+				}
+				select {
+				case <-s.ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()

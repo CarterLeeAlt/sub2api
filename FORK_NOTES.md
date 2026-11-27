@@ -57,7 +57,7 @@ OpenAI OAuth 账户从 Codex models manifest 获取实时模型清单，而不�
 - 排除 `supported_in_api=false` 的模型；
 - 对模型 ID 去重并排序；
 - 将上游清单作为权威来源，替换旧白名单，而不是只追加新模型；
-- 账户满足套餐和图像能力条件时，补充虚拟模型 `gpt-image-2`，供现有生图入口使用；
+- 保留账号清单声明的模型；对具备生图条件的订阅账号，直接合并 OpenAI 官方目录中的生成型号，跳过该账号上游明确排除的型号；
 - 前端账户模型白名单选择器允许展示和保存同步结果。
 
 OpenAI OAuth 主账号支持手动授权、RT、Mobile RT、Codex auth.json／AT 导入、Agent Identity 和 PAT 的自动模型目录；这些授权方式统一归入 `oauth` 账号类型，并复用各自的 Codex 目录认证路径。新建后默认使用上游来源，由服务端立即安排首次同步，首次成功前独立阻止调度；用户关闭的调度开关保持关闭。排除透传、Spark 影子、Setup Token、API Key 和其他平台。已有账号保持配置，可在编辑页或批量编辑中选用上游后保存加入自动维护。
@@ -70,7 +70,7 @@ OpenAI OAuth 主账号支持手动授权、RT、Mobile RT、Codex auth.json／AT
 
 批量写入以单个账号为事务边界，字段、分组及影子账号代理传播共同提交；成功数量以实际更新行为准。部分失败保留账号 ID 和原因，重试只针对失败账号；关闭弹窗后，旧请求返回不会覆盖新批次。负载系数和 RPM 缓冲的清除使用显式零值；App-server 子设置可单独提交，由后端校验各账号的有效 Codex CLI 父设置。OpenAI API Key 批量能力包含聊天、嵌入和 Seedance。
 
-按钮顺序为“同步上游模型 → 使用内置模型 → 清空白名单”。内置模型替换白名单，手动增删或清空转为自定义；人工别名映射始终保留且优先。映射与白名单都为空时沿用平台默认规则。界面显示来源、维护方式、最近成功时间及同步失败／等待状态。
+全站约每小时按 ETag 检查 OpenAI 发布的 `openapi.json`，下载失败保留上次目录。“同步上游模型”和后台刷新都直接更新白名单，不发送生图请求。内置模型替换白名单，手动增删或清空转为自定义。界面显示来源、维护方式、最近成功时间及同步失败／等待状态。
 
 主要文件：
 
@@ -84,16 +84,9 @@ OpenAI OAuth 主账号支持手动授权、RT、Mobile RT、Codex auth.json／AT
 
 相关提交：[`e7773796`](https://github.com/CarterLeeAlt/sub2api/commit/e77737963b3f66a961dcb9ebd2dc428023fe5143)、[`ec4e3bc9`](https://github.com/CarterLeeAlt/sub2api/commit/ec4e3bc9cb4075b40b4c21a5b5b48538cc03a22f)、[`12d73937`](https://github.com/CarterLeeAlt/sub2api/commit/12d7393714d5750f13114e5b150173400abdf7bf)、[`bf11d250`](https://github.com/CarterLeeAlt/sub2api/commit/bf11d250908d1308bea8a10c8f323927c7b02da1)。
 
-### CUSTOM-002：OpenAI OAuth 动态生图主模型（`active`）
+### CUSTOM-002：OpenAI OAuth 生图模型直调（`active`）
 
-生图能力不绑定固定主模型。系统根据 Codex manifest 为当前 OAuth 账户选择支持图像输入的 Responses 主模型（历史演进：`gpt-5.4-mini` → 现默认 `gpt-5.6-luna`，常量 `openAIImagesResponsesMainModel`，可被 env `SUB2API_IMAGES_MAIN_MODEL` 覆盖）：
-
-- manifest 中存在默认主模型（当前为 `gpt-5.6-luna`）且可用时仍优先选择它；
-- 否则按 manifest 的 `priority` 选择可用模型，并用模型名保证同优先级下结果稳定；
-- 缺少 `input_modalities` 时沿用 Codex 的兼容语义，视为支持文本和图像；
-- `free` 或无法确定套餐的账户不暴露 `gpt-image-2`；
-- manifest 临时获取或解析失败时回退到历史主模型，明确确认没有可用图像模型时返回错误；
-- `gpt-image-2` 仍是对外工具模型，动态选择的是调用 `image_generation` 工具的顶层 Responses 模型。
+OpenAI OAuth 的 Images 请求按用户指定的图像型号发送。普通响应和流式图片事件保留上游回报的型号，即使名称不同也正常返回图片。上游未回报时，客户端收到 `unknown`。用量记录分别保存请求型号和上游回报型号，后者缺失时留空。
 
 主要文件：
 

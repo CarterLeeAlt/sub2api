@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +108,7 @@ const (
 
 // isOpenAIImageModel checks if the model is an OpenAI image generation model (e.g. gpt-image-2).
 func isOpenAIImageModel(model string) bool {
-	return strings.HasPrefix(strings.ToLower(model), "gpt-image-")
+	return IsGPTImageGenerationModel(model)
 }
 
 func isGrokVideoGenerationModel(model string) bool {
@@ -212,6 +213,24 @@ func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, accou
 		}
 		if strings.TrimSpace(model.Type) == "" {
 			model.Type = "model"
+		}
+	}
+	if account.IsOpenAIOAuth() {
+		state := account.ModelCatalog()
+		if state.Source == "upstream" {
+			payload.Data = slices.DeleteFunc(payload.Data, func(model openai.Model) bool {
+				return IsGPTImageGenerationModel(model.ID) && !account.IsModelSupported(model.ID)
+			})
+			seen := make(map[string]bool, len(payload.Data))
+			for _, model := range payload.Data {
+				seen[model.ID] = true
+			}
+			for id := range account.GetModelMapping() {
+				if !seen[id] && !strings.Contains(id, "*") && IsGPTImageGenerationModel(id) {
+					payload.Data = append(payload.Data, openai.Model{ID: id, Object: "model", Type: "model", OwnedBy: "openai", DisplayName: openaiCodexDisplayName(id)})
+				}
+			}
+			return payload.Data, nil
 		}
 	}
 	// Codex discovery lists Responses drivers, not image_generation tool models.
@@ -820,7 +839,9 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	// account model mapping. Native remote compaction v2 rides the ordinary
 	// /responses wire and does NOT apply the legacy compact-only mapping
 	// (post-#5641 semantics: compact_model_mapping is /responses/compact-only).
-	testModelID = account.GetMappedModel(testModelID)
+	if account.Type != AccountTypeOAuth || !isOpenAIImageModel(testModelID) {
+		testModelID = account.GetMappedModel(testModelID)
+	}
 	if mode == AccountTestModeCompact {
 		return s.testOpenAICompactConnection(c, account, testModelID)
 	}
@@ -3179,27 +3200,46 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	applyOpenAIImagesDefaults(parsed)
 
 	upstreamModel := account.GetMappedModel(parsed.Model)
-	responsesBody, targetURL, err := buildOpenAIImagesOAuthPayload(parsed, upstreamModel)
-	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to build image request: %s", err.Error()))
+	if account.Type == AccountTypeOAuth {
+		upstreamModel = parsed.Model
+		parsed.exactModel = parsed.Model
 	}
-
-	direct := usesCodexDirectImages(upstreamModel)
+	direct := parsed.exactModel != "" || usesCodexDirectImages(upstreamModel)
 	if direct {
 		s.sendEvent(c, TestEvent{Type: "content", Text: fmt.Sprintf("Calling Codex /images/generations; image model: %s\n", upstreamModel)})
 	} else {
 		s.sendEvent(c, TestEvent{Type: "content", Text: fmt.Sprintf("Calling Codex /responses image tool; driver: %s; image model: %s\n", openAIImagesResponsesMainModelValue(), upstreamModel)})
 	}
+	results, err := s.runOAuthImageTest(ctx, account, credentialAccount, authToken, parsed, upstreamModel, direct)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	for _, item := range results {
+		if item.RevisedPrompt != "" {
+			s.sendEvent(c, TestEvent{Type: "content", Text: item.RevisedPrompt})
+		}
+		mimeType := openAIImageOutputMIMEType(item.OutputFormat)
+		s.sendEvent(c, TestEvent{Type: "image", Model: firstNonEmpty(item.Model, unknownImageResponseModel), ImageURL: "data:" + mimeType + ";base64," + item.Result, MimeType: mimeType})
+	}
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
+func (s *AccountTestService) runOAuthImageTest(ctx context.Context, account, credentialAccount *Account, authToken string, parsed *OpenAIImagesRequest, upstreamModel string, direct bool) ([]openAIResponsesImageResult, error) {
+	responsesBody, targetURL, err := buildOpenAIImagesOAuthPayload(parsed, upstreamModel)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(responsesBody))
 	if err != nil {
-		return s.sendErrorAndEnd(c, "Failed to create request")
+		return nil, err
 	}
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 	req.Host = "chatgpt.com"
 	if credentialAccount.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount)
 		if authErr != nil {
-			return s.sendErrorAndEnd(c, "Failed to build Agent Identity authentication")
+			return nil, errors.New("Failed to build Agent Identity authentication")
 		}
 		for key, values := range authHeaders {
 			for _, value := range values {
@@ -3234,7 +3274,7 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	}
 	resp, err := s.doOpenAIAccountTestUpstream(req, proxyURL, account, false)
 	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Image upstream request failed: %s", err.Error()))
+		return nil, fmt.Errorf("image upstream request failed: %w", err)
 	}
 	defer func() {
 		if resp != nil && resp.Body != nil {
@@ -3249,12 +3289,16 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 		if message == "" {
 			message = fmt.Sprintf("Image upstream returned %d", resp.StatusCode)
 		}
-		return s.sendErrorAndEnd(c, message)
+		return nil, errors.New(message)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	const maxImageTestBody = 64 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxImageTestBody+1))
 	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read image response: %s", err.Error()))
+		return nil, fmt.Errorf("failed to read image response: %w", err)
+	}
+	if len(body) > maxImageTestBody {
+		return nil, errors.New("image test response too large")
 	}
 	body = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, credentialAccount, body)
 
@@ -3263,37 +3307,24 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 		results, err = parseCodexDirectImagesResponse(body)
 	} else {
 		if upstreamErr := extractOpenAIImagesUpstreamError(body); upstreamErr != nil {
-			return s.sendErrorAndEnd(c, upstreamErr.clientMessage())
+			return nil, errors.New(upstreamErr.clientMessage())
 		}
 		results, _, _, _, _, err = collectOpenAIImagesFromResponsesBody(body)
 	}
 	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to parse image response: %s", err.Error()))
+		return nil, fmt.Errorf("failed to parse image response: %w", err)
 	}
 	if len(results) == 0 {
 		if textErr := openAIImagesTextFallbackError(body); textErr != nil {
-			return s.sendErrorAndEnd(c, textErr.clientMessage())
+			return nil, errors.New(textErr.clientMessage())
 		}
 		if direct {
-			return s.sendErrorAndEnd(c, "No images returned from Codex Images API")
+			return nil, errors.New("No images returned from Codex Images API")
 		}
-		return s.sendErrorAndEnd(c, "No images returned from Codex Responses API")
+		return nil, errors.New("No images returned from Codex Responses API")
 	}
 
-	for _, item := range results {
-		if item.RevisedPrompt != "" {
-			s.sendEvent(c, TestEvent{Type: "content", Text: item.RevisedPrompt})
-		}
-		mimeType := openAIImageOutputMIMEType(item.OutputFormat)
-		s.sendEvent(c, TestEvent{
-			Type:     "image",
-			ImageURL: "data:" + mimeType + ";base64," + item.Result,
-			MimeType: mimeType,
-		})
-	}
-
-	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-	return nil
+	return results, nil
 }
 
 func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {

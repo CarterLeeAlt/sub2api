@@ -821,9 +821,9 @@ func TestOpenAIGatewayServiceForwardImages_OAuthPassesNAndReturnsAllImages(t *te
 
 	account := &Account{
 		ID:       1,
-		Name:     "openai-oauth",
+		Name:     "responses-image-bridge",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token":       "token-123",
 			"chatgpt_account_id": "acct-123",
@@ -976,9 +976,9 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUpstreamHTTPErrorSurfacesRealErr
 
 	account := &Account{
 		ID:       1,
-		Name:     "openai-oauth",
+		Name:     "responses-image-bridge",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -1034,9 +1034,9 @@ func TestOpenAIGatewayServiceForwardImages_OAuthNonStreamModerationBlockedReturn
 
 	account := &Account{
 		ID:       1,
-		Name:     "openai-oauth",
+		Name:     "responses-image-bridge",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -1086,7 +1086,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthNonStreamServerErrorReturnsFailo
 		ID:       21,
 		Name:     "openai-oauth-server-error",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -1135,7 +1135,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuth429CarriesSameAccountRetryWindow
 	}}}
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
-	account := &Account{ID: 22, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "token-123"}}
+	account := &Account{ID: 22, Platform: PlatformOpenAI, Type: AccountTypeSetupToken, Credentials: map[string]any{"access_token": "token-123"}}
 	startedAt := time.Now()
 
 	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
@@ -1284,7 +1284,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamServerErrorAfterFlushDoesN
 		ID:       22,
 		Name:     "openai-oauth-partial-server-error",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -1741,7 +1741,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingTransformsEvents(t *tes
 		ID:       2,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -1895,7 +1895,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthEditsMultipartUsesResponsesAPI(t
 		ID:       3,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -1958,7 +1958,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthEditsStreamingTransformsEvents(t
 		ID:       4,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -2150,7 +2150,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingHandlesOutputItemDoneFa
 		ID:       5,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -2206,7 +2206,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingHandlesMultilineSSE(t *
 		ID:       11,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},
@@ -2270,7 +2270,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingDrainsAfterClientDiscon
 		ID:       9,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},

@@ -13,6 +13,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const unknownImageResponseModel = "unknown"
+
 type openAIImagesForceResponsesContextKey struct{}
 
 func withOpenAIImagesForceResponses(ctx context.Context) context.Context {
@@ -56,7 +58,7 @@ func buildOpenAIImagesOAuthPayload(parsed *OpenAIImagesRequest, model string) ([
 	if parsed == nil {
 		return nil, "", fmt.Errorf("parsed images request is required")
 	}
-	if !usesCodexDirectImages(model) {
+	if parsed.exactModel == "" && !usesCodexDirectImages(model) {
 		body, err := buildOpenAIImagesResponsesRequest(parsed, model)
 		return body, chatgptCodexURL, err
 	}
@@ -177,7 +179,7 @@ func parseCodexDirectImagesResponse(body []byte) ([]openAIResponsesImageResult, 
 			continue
 		}
 		meta := func(key string) string {
-			if value := item.Get(key).String(); value != "" {
+			if value := strings.TrimSpace(item.Get(key).String()); value != "" {
 				return value
 			}
 			return root.Get(key).String()
@@ -265,25 +267,29 @@ func (s *OpenAIGatewayService) handleCodexDirectImagesNonStreamingResponse(resp 
 		return OpenAIUsage{}, 0, nil, err
 	}
 	usage, _ := codexDirectImagesUsage(body)
+	rootModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	if observer := upstreamResponseModelObserverFromContext(c); observer != nil {
-		observer.Observe(gjson.GetBytes(body, "model").String(), true)
+		observer.Observe(rootModel, true)
 		for _, result := range results {
 			observer.Observe(result.Model, true)
 		}
 	}
-	clientModel := strings.TrimSpace(parsed.Model)
-	if clientModel != "" {
-		for i := range gjson.GetBytes(body, "data").Array() {
-			body, _ = sjson.SetBytes(body, fmt.Sprintf("data.%d.model", i), clientModel)
-		}
-	}
+	hasReportedModel := rootModel != ""
 	for i, item := range gjson.GetBytes(body, "data").Array() {
+		if strings.TrimSpace(item.Get("model").String()) != "" {
+			hasReportedModel = true
+		} else if rootModel == "" && item.Get("b64_json").String() != "" {
+			body, _ = sjson.SetBytes(body, fmt.Sprintf("data.%d.model", i), unknownImageResponseModel)
+		}
 		if actualSize := detectOpenAIImageResultSize(item.Get("b64_json").String()); actualSize != "" {
 			body, _ = sjson.SetBytes(body, fmt.Sprintf("data.%d.size", i), actualSize)
 			if i == 0 {
 				body, _ = sjson.SetBytes(body, "size", actualSize)
 			}
 		}
+	}
+	if !hasReportedModel {
+		body, _ = sjson.SetBytes(body, "model", unknownImageResponseModel)
 	}
 	if parsed.ResponseFormat == "url" {
 		for i, item := range gjson.GetBytes(body, "data").Array() {

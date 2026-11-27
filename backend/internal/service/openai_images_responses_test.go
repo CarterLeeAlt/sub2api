@@ -16,7 +16,7 @@ import (
 // main-model resolution into an account-level failover signal. A plain error
 // would bypass both OpenAIImagesUpstreamError and UpstreamFailoverError
 // handling in the handler and surface a hard 502 without switching accounts.
-func TestForwardOpenAIImagesOAuthNoImageMainModelReturnsFailoverError(t *testing.T) {
+func TestOAuthImagesDoNotRequireResponsesMainModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	// Manifest parses fine but exposes no API-supported image-capable model,
@@ -31,7 +31,8 @@ func TestForwardOpenAIImagesOAuthNoImageMainModelReturnsFailoverError(t *testing
 	chatgptCodexModelsURL = server.URL
 	defer func() { chatgptCodexModelsURL = originalURL }()
 
-	svc := &OpenAIGatewayService{}
+	upstream := &httpUpstreamRecorder{resp: openAIImagesJSONResponse()}
+	svc := newOpenAIImagesTestService(upstream)
 	account := &Account{
 		ID:       771001,
 		Platform: PlatformOpenAI,
@@ -45,22 +46,16 @@ func TestForwardOpenAIImagesOAuthNoImageMainModelReturnsFailoverError(t *testing
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 
-	// gpt-image-1 passes validateOpenAIImagesModel but is not a direct-images
-	// model, so the request takes the Responses main-model branch.
+	// Exact image requests do not depend on the manifest containing a text driver.
 	result, err := svc.forwardOpenAIImagesOAuth(context.Background(), c, account, &OpenAIImagesRequest{
 		Endpoint: "/v1/images/generations",
 		Model:    "gpt-image-1",
 		Prompt:   "draw a cat",
 		N:        1,
 	}, "")
-	require.Nil(t, result)
-	require.Error(t, err)
-
-	var failoverErr *UpstreamFailoverError
-	require.ErrorAs(t, err, &failoverErr, "a missing image main model must fail over to another account")
-	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
-	require.JSONEq(t, string(openAIImagesNoMainModelFailoverBody), string(failoverErr.ResponseBody))
-	require.True(t, failoverErr.ShouldRetryNextAccount())
+	require.NoError(t, err)
+	require.Equal(t, "gpt-image-1", result.UpstreamModel)
+	require.Equal(t, "/backend-api/codex/images/generations", upstream.lastReq.URL.Path)
 }
 
 // The response.completed frame's tool_usage.image_gen block carries only the

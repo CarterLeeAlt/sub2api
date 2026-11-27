@@ -245,7 +245,7 @@ func TestOpenAIImagesJSONKeepalive_HeartbeatBeforeForwardStillFailsOver(t *testi
 		ID:       22,
 		Name:     "openai-oauth-heartbeat-failover",
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		Type:     AccountTypeSetupToken,
 		Credentials: map[string]any{
 			"access_token": "token-123",
 		},

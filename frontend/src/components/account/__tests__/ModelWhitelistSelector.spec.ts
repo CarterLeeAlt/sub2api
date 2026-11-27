@@ -100,6 +100,15 @@ function findModelRow(wrapper: ReturnType<typeof mountSelector>, modelId: string
 }
 
 describe('ModelWhitelistSelector', () => {
+  it('adds image IDs from the ordinary upstream sync', async () => {
+    syncUpstreamModels.mockResolvedValueOnce({ models: ['driver', 'fixture-painter'] })
+    const wrapper = mountSelector({ accountId: 57, automaticCatalog: true, catalogSource: 'upstream', modelValue: ['driver'] })
+    await syncButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([['driver', 'fixture-painter']])
+    expect(syncUpstreamModels).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
   it('replaces the whitelist with built-in models and switches to manual maintenance', async () => {
     const wrapper = mountSelector({ modelValue: ['obsolete-model'], automaticCatalog: true, catalogSource: 'upstream', modelMappings: [{ from: 'alias', to: 'target' }] })
     const buttons = wrapper.findAll('button')

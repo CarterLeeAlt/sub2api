@@ -1878,7 +1878,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 ) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
 	requestModel := strings.TrimSpace(parsed.Model)
-	if mapped := strings.TrimSpace(channelMappedModel); mapped != "" {
+	if mapped := strings.TrimSpace(channelMappedModel); !account.IsOpenAIOAuth() && mapped != "" {
 		requestModel = mapped
 	}
 	if requestModel == "" {
@@ -1891,7 +1891,31 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	if err := validateOpenAIImagesModel(upstreamModel); err != nil {
 		return nil, err
 	}
-	direct := usesCodexDirectImages(upstreamModel) && !isOpenAIImagesForceResponses(ctx)
+	if account.IsOpenAIOAuth() {
+		if public, ok := RequestedPublicModelFromContext(ctx); ok && IsGPTImageGenerationModel(public) && public != requestModel {
+			return nil, fmt.Errorf("OAuth image model %q cannot be routed as %q", public, requestModel)
+		}
+		upstreamModel = requestModel
+		state := account.ModelCatalog()
+		if state.Source == "upstream" && !account.IsModelSupported(upstreamModel) {
+			return nil, fmt.Errorf("image model %q is not in the account's model list", upstreamModel)
+		}
+		key := getAPIKeyFromContext(c)
+		if state.Source == "upstream" && key != nil && s.billingService != nil && !imageCountBillingEnabled(key) && !apiKeyHasConfiguredImagePrice(key, parsed.SizeTier) {
+			if identified, _ := s.hasIdentifiedOpenAIResponsePricing(ctx, upstreamModel, key); !identified {
+				return nil, fmt.Errorf("configure image pricing for %q before forwarding requests", upstreamModel)
+			}
+		}
+		if spec := officialImageModels.Load(); spec != nil {
+			if support, ok := spec.Models[upstreamModel]; ok && ((parsed.IsEdits() && !support.Edit) || (!parsed.IsEdits() && !support.Generate)) {
+				return nil, fmt.Errorf("image model %q does not support %s", upstreamModel, parsed.Endpoint)
+			}
+		}
+		copy := *parsed
+		copy.exactModel = upstreamModel
+		parsed = &copy
+	}
+	direct := parsed.exactModel != "" || (usesCodexDirectImages(upstreamModel) && !isOpenAIImagesForceResponses(ctx))
 	beginUpstreamResponseModelObservation(c)
 	SetOpsUpstreamModel(c, upstreamModel)
 	uploadParts := make([]string, 0, len(parsed.Uploads))
@@ -1996,7 +2020,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		respBody := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		respBody = s.redactAgentIdentitySensitiveBody(upstreamCtx, account, respBody)
-		if direct && !requiresCodexDirectImages(upstreamModel) && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
+		if parsed.exactModel == "" && direct && !requiresCodexDirectImages(upstreamModel) && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
 			return s.forwardOpenAIImagesOAuth(withOpenAIImagesForceResponses(ctx), c, account, parsed, channelMappedModel)
 		}
 		if !agentIdentityTaskRecoveryWasTried(ctx) && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
@@ -2053,9 +2077,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		if direct {
 			usage, imageCount, imageOutputSizes, firstTokenMs, err = s.handleOpenAIImagesStreamingResponse(resp, c, startTime, parsed)
 		} else {
-			// fallbackModel is the client-facing response meta fallback: use
-			// requestModel (the same contract as the non-streaming branch and
-			// the direct path), not the channel-mapped upstreamModel.
+			// The Responses bridge uses its public request name as a fallback.
 			usage, imageCount, imageOutputSizes, firstTokenMs, err = s.handleOpenAIImagesOAuthStreamingResponse(resp, c, startTime, parsed.ResponseFormat, openAIImagesStreamPrefix(parsed), requestModel)
 		}
 		if err != nil {

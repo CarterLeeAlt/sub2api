@@ -73,6 +73,7 @@ type OpenAIImagesUpload struct {
 }
 
 type OpenAIImagesRequest struct {
+	exactModel         string
 	Endpoint           string
 	ContentType        string
 	Multipart          bool
@@ -559,6 +560,11 @@ func isOpenAIImageGenerationModel(model string) bool {
 
 // IsGPTImageGenerationModel identifies the GPT native image-generation model family.
 func IsGPTImageGenerationModel(model string) bool {
+	if spec := officialImageModels.Load(); spec != nil {
+		if _, ok := spec.Models[model]; ok {
+			return true
+		}
+	}
 	model = strings.ToLower(strings.TrimSpace(model))
 	return strings.HasPrefix(model, "gpt-image-")
 }
@@ -1169,8 +1175,8 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 			return
 		}
 		eventType := gjson.GetBytes(dataBytes, "type").String()
-		if direct != nil && strings.TrimSpace(direct.Model) != "" {
-			dataBytes, _ = sjson.SetBytes(dataBytes, "model", strings.TrimSpace(direct.Model))
+		if strings.TrimSpace(gjson.GetBytes(dataBytes, "model").String()) == "" && (gjson.GetBytes(dataBytes, "b64_json").Exists() || gjson.GetBytes(dataBytes, "url").Exists()) {
+			dataBytes, _ = sjson.SetBytes(dataBytes, "model", unknownImageResponseModel)
 		}
 		// 原生编辑事件可能仍使用 image_generation 前缀；对外维持既有编辑事件名。
 		if strings.HasPrefix(eventType, "image_generation.") && direct.IsEdits() {
@@ -1250,6 +1256,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 			if err != nil {
 				streamErr = err
 				return
+			}
+			if observer := upstreamResponseModelObserverFromContext(c); observer != nil {
+				observer.Observe(gjson.GetBytes(body, "model").String(), true)
 			}
 			createdAt := gjson.GetBytes(body, "created").Int()
 			usageRaw := []byte(gjson.GetBytes(body, "usage").Raw)

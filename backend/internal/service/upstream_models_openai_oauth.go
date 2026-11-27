@@ -14,8 +14,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
-const openAICodexImageGenerationModel = "gpt-image-2"
-
 type openAICodexManifestModel struct {
 	Slug            string   `json:"slug"`
 	SupportedInAPI  *bool    `json:"supported_in_api"`
@@ -128,14 +126,53 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 		return nil, nil, newUpstreamModelSyncUpstreamError("OpenAI Codex model list response was not valid JSON", err)
 	}
 	models := openAICodexManifestModelIDs(manifestModels)
-	if openAICodexImageGenerationEligible(credentialAccount, manifestModels) {
-		models = append(models, openAICodexImageGenerationModel)
-		models = dedupeAndSortModelIDs(models)
-	}
 	if len(models) == 0 {
 		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
+	if openAICodexImageGenerationEligible(credentialAccount, manifestModels) {
+		spec := officialImageModels.Load()
+		if spec == nil {
+			// Keep a saved automatic whitelist intact while the shared catalog loads.
+			if account.ModelCatalog().Ready {
+				return nil, nil, newUpstreamModelSyncUpstreamError("OpenAI image catalog is not available yet", nil)
+			}
+			return models, body, nil
+		}
+		excluded := make(map[string]bool)
+		for _, entry := range manifestModels {
+			if entry.SupportedInAPI != nil && !*entry.SupportedInAPI {
+				excluded[strings.TrimSpace(entry.Slug)] = true
+			}
+		}
+		for id, endpoints := range spec.Models {
+			if endpoints.Generate && !excluded[id] {
+				models = append(models, id)
+			}
+		}
+		models = dedupeAndSortModelIDs(models)
+	}
 	return models, body, nil
+}
+
+func openAICodexImageGenerationEligible(account *Account, manifestModels []openAICodexManifestModel) bool {
+	if account == nil || !account.IsOpenAIOAuth() {
+		return false
+	}
+	plan := openAICodexPlanType(account)
+	return plan != "" && !strings.EqualFold(plan, "free") && selectOpenAICodexImageMainModel(manifestModels) != ""
+}
+
+func openAICodexPlanType(account *Account) string {
+	if plan := strings.TrimSpace(account.GetCredential("plan_type")); plan != "" {
+		return plan
+	}
+	for _, key := range []string{"id_token", "access_token"} {
+		claims, err := openai.DecodeIDToken(account.GetCredential(key))
+		if err == nil && claims.OpenAIAuth != nil && strings.TrimSpace(claims.OpenAIAuth.ChatGPTPlanType) != "" {
+			return strings.TrimSpace(claims.OpenAIAuth.ChatGPTPlanType)
+		}
+	}
+	return ""
 }
 
 func parseOpenAICodexManifestModels(body []byte) ([]openAICodexManifestModel, error) {
@@ -234,51 +271,4 @@ func selectOpenAICodexImageMainModel(manifestModels []openAICodexManifestModel) 
 		}
 	}
 	return selected
-}
-
-// openAICodexImageGenerationEligible mirrors the account/model gates used by
-// the official Codex client for exposing image generation, while remaining
-// conservative when the account plan cannot be determined. The provider/auth
-// gates are already established by a successful authenticated Codex manifest
-// request on an OpenAI OAuth account.
-func openAICodexImageGenerationEligible(account *Account, manifestModels []openAICodexManifestModel) bool {
-	if account == nil || !account.IsOpenAIOAuth() {
-		return false
-	}
-
-	planType := openAICodexPlanType(account)
-	if planType == "" || strings.EqualFold(planType, "free") {
-		return false
-	}
-	return selectOpenAICodexImageMainModel(manifestModels) != ""
-}
-
-func openAICodexPlanType(account *Account) string {
-	if account == nil {
-		return ""
-	}
-	if planType := strings.TrimSpace(account.GetCredential("plan_type")); planType != "" {
-		return strings.ToLower(planType)
-	}
-
-	// Older/imported accounts may have the canonical plan claim in a JWT but no
-	// persisted plan_type field. Decode only as a best-effort metadata fallback;
-	// this is not used to authenticate the request.
-	for _, token := range []string{
-		account.GetCredential("id_token"),
-		account.GetCredential("access_token"),
-	} {
-		token = strings.TrimSpace(token)
-		if token == "" {
-			continue
-		}
-		claims, err := openai.DecodeIDToken(token)
-		if err != nil || claims.OpenAIAuth == nil {
-			continue
-		}
-		if planType := strings.TrimSpace(claims.OpenAIAuth.ChatGPTPlanType); planType != "" {
-			return strings.ToLower(planType)
-		}
-	}
-	return ""
 }
