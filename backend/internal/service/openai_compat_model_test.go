@@ -781,6 +781,39 @@ func TestForwardAsAnthropic_AttachesPreviousResponseIDForCompatContinuation(t *t
 	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
 	require.Contains(t, gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
 	require.Equal(t, "second", gjson.GetBytes(upstream.lastBody, "input.1.content.0.text").String())
+	for _, tc := range []struct {
+		name, old, new, check, model string
+		accountID                    int64
+	}{
+		{"edited assistant", `"ok"`, `"different answer"`, "different answer", "gpt-5.3-codex", 1},
+		{"edited user", `"first"`, `"corrected question"`, "corrected question", "gpt-5.3-codex", 1},
+		{"changed system", `"messages":`, `"system":"reply in French","messages":`, "reply in French", "gpt-5.3-codex", 1},
+		{"changed model", `"first"`, `"first"`, "first", "gpt-5.5", 1},
+		{"changed account", `"first"`, `"first"`, "first", "gpt-5.3-codex", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			edited := bytes.Replace(secondBody, []byte(tc.old), []byte(tc.new), 1)
+			upstream.resp = openAICompatSSECompletedResponse("resp_fork", tc.model)
+			branch, _ := gin.CreateTestContext(httptest.NewRecorder())
+			branch.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(edited))
+			selected := *account
+			selected.ID = tc.accountID
+			_, err := svc.ForwardAsAnthropic(t.Context(), branch, &selected, edited, "stable-cache-key", tc.model)
+			require.NoError(t, err)
+			require.False(t, gjson.GetBytes(upstream.lastBody, "previous_response_id").Exists())
+			require.Contains(t, string(upstream.lastBody), tc.check)
+			require.Contains(t, string(upstream.lastBody), `"role":"assistant"`)
+		})
+	}
+}
+
+func seedAnthropicParent(t *testing.T, svc *OpenAIGatewayService, account *Account, session, id, model string, body []byte) {
+	t.Helper()
+	var req apicompat.AnthropicRequest
+	require.NoError(t, json.Unmarshal(body, &req))
+	key := anthropicParentKey(&req, model, session)
+	require.NotEmpty(t, key)
+	svc.bindOpenAICompatSessionResponseID(t.Context(), nil, account, key, id)
 }
 
 func TestForwardAsAnthropic_PreviousResponseIDKeepsMultiToolCallContext(t *testing.T) {
@@ -804,8 +837,9 @@ func TestForwardAsAnthropic_PreviousResponseIDKeepsMultiToolCallContext(t *testi
 		},
 	}
 
-	firstBody := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"inspect files"}],"stream":false}`)
+	firstBody := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"inspect files"}],"tools":[{"name":"Read","description":"read a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}],"stream":false}`)
 	upstream.resp = openAICompatSSECompletedResponse("resp_first_tools", "gpt-5.3-codex")
+	upstream.resp.Body = io.NopCloser(strings.NewReader(`data: {"type":"response.completed","response":{"id":"resp_first_tools","status":"completed","output":[{"type":"function_call","call_id":"call_one","name":"Read","arguments":"{\"file_path\":\"a.go\"}"},{"type":"function_call","call_id":"call_two","name":"Read","arguments":"{\"file_path\":\"b.go\"}"}]}}` + "\n\n"))
 	firstRec := httptest.NewRecorder()
 	firstCtx, _ := gin.CreateTestContext(firstRec)
 	firstCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(firstBody))
@@ -859,8 +893,8 @@ func TestForwardAsAnthropic_ReplaysFullToolHistoryWhenPreviousResponseUnavailabl
 		},
 	}
 
-	svc.bindOpenAICompatSessionResponseID(context.Background(), nil, account, "stable-cache-key", "resp_missing")
 	secondBody := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":"first"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"found"},{"type":"text","text":"second"}]}],"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"stream":false}`)
+	seedAnthropicParent(t, svc, account, "stable-cache-key", "resp_missing", "gpt-5.3-codex", secondBody)
 	upstream.responses = []*http.Response{
 		{
 			StatusCode: http.StatusBadRequest,
@@ -920,8 +954,8 @@ func TestForwardAsAnthropic_PreviousResponseUnavailableRetryFailureDoesNotLoop(t
 		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
 	}
 	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "sk-test", "base_url": "https://api.openai.com/v1"}}
-	svc.bindOpenAICompatSessionResponseID(context.Background(), nil, account, "stable-cache-key", "resp_missing")
-	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"ok"},{"role":"user","content":"hello"}],"stream":false}`)
+	seedAnthropicParent(t, svc, account, "stable-cache-key", "resp_missing", "gpt-5.3-codex", body)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
@@ -953,8 +987,8 @@ func TestForwardAsAnthropic_DisablesAPIKeyContinuationWhenUpstreamRequiresWebSoc
 		},
 	}
 
-	svc.bindOpenAICompatSessionResponseID(context.Background(), nil, account, "stable-cache-key", "resp_http_unsupported")
 	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"ok"},{"role":"user","content":"second"}],"stream":false}`)
+	seedAnthropicParent(t, svc, account, "stable-cache-key", "resp_http_unsupported", "gpt-5.5", body)
 	upstream.responses = []*http.Response{
 		{
 			StatusCode: http.StatusBadRequest,
@@ -2315,8 +2349,8 @@ func TestForwardAsAnthropic_AstraContinuationRestoresHistoryAndDisablesUnsupport
 			}}
 			svc := &OpenAIGatewayService{httpUpstream: upstream, cfg: &config.Config{}}
 			account := rawGPT56ResponsesAPIKeyAccount("gpt-6-astra", "gpt-6-astra")
-			svc.bindOpenAICompatSessionResponseID(context.Background(), nil, account, "astra-session", "resp_old")
 			body := []byte(`{"model":"gpt-6-astra","max_tokens":16,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"ok"},{"role":"user","content":"second"}]}`)
+			seedAnthropicParent(t, svc, account, "astra-session", "resp_old", "gpt-6-astra", body)
 			for i := 0; i < 2; i++ {
 				c, _ := gin.CreateTestContext(httptest.NewRecorder())
 				c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))

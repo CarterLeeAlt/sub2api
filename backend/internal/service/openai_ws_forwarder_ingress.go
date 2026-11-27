@@ -332,11 +332,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			)
 		}
 		// 归属校验（turn>1；首包已在 handler 校验过）：不归属的 previous_response_id
-		// 剥离后以本轮 input 重建上下文，防止同分组跨租户凭他人 resp id 续链。
+		// 无法确认归属时请客户端重发完整历史。
 		if turn > 1 && previousResponseID != "" && s.stripOpenAIWSUnownedPreviousResponseID(ctx, c, previousResponseID) {
-			normalized = RemovePreviousResponseIDFromBody(normalized)
-			previousResponseID = ""
-			logOpenAIWSModeInfo("ingress_ws_previous_response_id_stripped_not_owned turn=%d", turn)
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, OpenAIContinuationHistoryUnavailable, nil)
 		}
 		if turnMetadata := strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)); turnMetadata != "" {
 			next, setErr := applyPayloadMutation(normalized, "client_metadata."+openAIWSTurnMetadataHeader, turnMetadata)
@@ -623,8 +621,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		grokCacheSeedPayload := firstPayload.payloadRaw
 		var bridgeReplayInput []json.RawMessage
 		bridgeReplayInputExists := false
-		var bridgeAccountFailoverInput []json.RawMessage
-		bridgeAccountFailoverInputExists := false
+		lastBridgeResponseID := ""
 		for turn := 1; ; turn++ {
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
 				if err := hooks.BeforeRequest(turn, currentBridgePayload.rawForHash, currentBridgePayload.originalModel); err != nil {
@@ -655,16 +652,16 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				if bridgeReplayInputExists {
 					bridgeReplayInput, _ = stripOpenAIInvalidEncryptedContentFromReplayItems(bridgeReplayInput, invalidDigests)
 				}
-				if bridgeAccountFailoverInputExists {
-					bridgeAccountFailoverInput, _ = stripOpenAIInvalidEncryptedContentFromReplayItems(bridgeAccountFailoverInput, invalidDigests)
-				}
 			}
 			bridgePayloadRaw := currentBridgePayload.payloadRaw
 			bridgePayloadBytes := currentBridgePayload.payloadBytes
 			toolOutputCoverage := AnalyzeToolCallOutputContextCoverageBytes(currentBridgePayload.payloadRaw)
+			if parent := currentBridgePayload.previousResponseID; parent != "" && parent != lastBridgeResponseID {
+				return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, OpenAIContinuationHistoryUnavailable, nil)
+			}
 			needsBridgeReplay := currentBridgePayload.previousResponseID != "" ||
 				(toolOutputCoverage.HasFunctionCallOutput && !toolOutputCoverage.ContextCoversAllCallIDs)
-			// 一次解析当前 input，正常 replay 与 account-failover 两份序列共享同一批正文。
+			// Same-account continuation and account replacement need the same history.
 			bridgeCurrentItems, bridgeCurrentItemsExist, extractErr := openAIWSExtractNormalizedInputSequence(
 				currentBridgePayload.payloadRaw,
 			)
@@ -674,13 +671,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			turnReplayInput, turnReplayInputExists := buildOpenAIWSReplayInputSequenceFromItems(
 				bridgeReplayInput,
 				bridgeReplayInputExists,
-				bridgeCurrentItems,
-				bridgeCurrentItemsExist,
-				needsBridgeReplay,
-			)
-			turnAccountFailoverInput, turnAccountFailoverInputExists := buildOpenAIWSReplayInputSequenceFromItems(
-				bridgeAccountFailoverInput,
-				bridgeAccountFailoverInputExists,
 				bridgeCurrentItems,
 				bridgeCurrentItemsExist,
 				needsBridgeReplay,
@@ -695,6 +685,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					return fmt.Errorf("set websocket http bridge replay input: %w", setInputErr)
 				}
 				bridgePayloadRaw = updatedPayload
+				if toolOutputCoverage.HasFunctionCallOutput && !AnalyzeToolCallOutputContextCoverageBytes(updatedPayload).ContextCoversAllCallIDs {
+					return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, OpenAIContinuationHistoryUnavailable, nil)
+				}
 				bridgePayloadBytes = len(updatedPayload)
 				logOpenAIWSModeInfo(
 					"ingress_ws_http_bridge_replay_input account_id=%d turn=%d input_items=%d previous_response_id_present=%v has_tool_output=%v",
@@ -767,8 +760,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				if turn > 1 && errors.As(bridgeErr, &failoverErr) && failoverErr != nil {
 					retryPayload, retrySafe, retryPayloadErr := buildOpenAIWSCurrentTurnRetryPayload(
 						currentBridgePayload.accountIdentitySourceRaw,
-						turnAccountFailoverInput,
-						turnAccountFailoverInputExists,
+						turnReplayInput,
+						turnReplayInputExists,
 						currentBridgePayload.originalModel,
 					)
 					if retryPayloadErr != nil {
@@ -784,22 +777,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if result == nil {
 				return errors.New("websocket http bridge turn result is nil")
 			}
-			// turnReplayInput/turnAccountFailoverInput 可能共享同一头数组（转移自
-			// bridgeCurrentItems），保存历史必须经 combine 新建头，禁止就地 append。
 			bridgeReplayInput = turnReplayInput
 			bridgeReplayInputExists = turnReplayInputExists
 			if result.wsReplayInputExists {
 				bridgeReplayInput = combineOpenAIWSReplayItems(bridgeReplayInput, result.wsReplayInput)
 				bridgeReplayInputExists = true
-			}
-			bridgeAccountFailoverInput = turnAccountFailoverInput
-			bridgeAccountFailoverInputExists = turnAccountFailoverInputExists
-			if len(result.wsAccountFailoverReplayInput) > 0 {
-				bridgeAccountFailoverInput = combineOpenAIWSReplayItems(
-					bridgeAccountFailoverInput,
-					result.wsAccountFailoverReplayInput,
-				)
-				bridgeAccountFailoverInputExists = true
 			}
 			if bridgeTurnState := strings.TrimSpace(result.ResponseHeaders.Get(openAIWSTurnStateHeader)); bridgeTurnState != "" {
 				// Follow-up turns on this bridge retain their own upstream state;
@@ -807,6 +789,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				turnState = bridgeTurnState
 			}
 			responseID := strings.TrimSpace(result.RequestID)
+			lastBridgeResponseID = ""
+			if result.wsReplayInputExists {
+				lastBridgeResponseID = responseID
+			}
 			if responseID != "" && stateStore != nil {
 				ttl := s.openAIWSResponseStickyTTL()
 				logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))

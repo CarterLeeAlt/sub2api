@@ -331,12 +331,13 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
+	upstreamFailed := false
 
 	writeLine := func(line string) {
 		if clientDisconnected {
 			return
 		}
-		if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
+		if !clientOutputStarted && !upstreamFailed && !refusalDetector.ShouldReleaseClientOutput() {
 			pendingLines = append(pendingLines, line)
 			return
 		}
@@ -369,6 +370,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		refusalDetector.ObserveSSELine(line)
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
+			if item := gjson.Get(payload, "error"); item.Exists() && item.Type != gjson.Null {
+				upstreamFailed = true
+			}
 			terminal.ObserveDataLine(trimmedPayload)
 			if trimmedPayload != "[DONE]" {
 				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
@@ -387,6 +391,11 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 
 		line = s.replaceModelInSSELine(line, upstreamModel, originalModel)
 		writeLine(line)
+		if upstreamFailed {
+			writeLine("")
+			flushPending = true
+			break
+		}
 		// 不逐行 flush：scanner 下次向上游读取前统一 flush（见 flushBeforeUpstreamRead）。
 		flushPending = true
 	}
@@ -412,6 +421,10 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	scanErr := scanner.Err()
+	if upstreamFailed {
+		MarkResponseCommitted(c)
+		return resultWithUsage(), errCCUpstreamResponse
+	}
 	if scanErr != nil && !errors.Is(scanErr, context.Canceled) && !errors.Is(scanErr, context.DeadlineExceeded) {
 		logger.L().Warn("openai chat_completions raw: stream read error",
 			zap.Error(scanErr),
@@ -443,6 +456,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		)
 		if !clientOutputStarted {
 			// 响应头尚未提交：可以透明换号重试，客户端不会看到半截流。
+			if pluginRequestAlreadySent(cause) {
+				return nil, newOpenAIUpstreamStreamReadError(cause)
+			}
 			return nil, newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
 		}
 		// 已写出语义字节：无法再 failover，改为带类型的上游错误。handler 会据此

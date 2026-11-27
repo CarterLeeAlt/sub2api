@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -35,6 +37,44 @@ func openAICompatContinuationEnabled(account *Account, model string) bool {
 		return false
 	}
 	return shouldAutoInjectPromptCacheKeyForCompat(model)
+}
+
+// A cache key identifies a session, not a parent turn. Bind the response ID to
+// the conversation actually sent and the assistant content returned to the client.
+func anthropicHistoryKey(req *apicompat.AnthropicRequest, upstreamModel, session string, history []apicompat.AnthropicMessage, assistant string) string {
+	if assistant == "" || session == "" {
+		return ""
+	}
+	h := sha256.New()
+	if err := json.NewEncoder(h).Encode([]any{session, req.Model, upstreamModel, req.System, req.Tools, history, assistant}); err != nil {
+		return ""
+	}
+	return "messages-history:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func anthropicReplyDigest(content json.RawMessage) string {
+	// Clients may send a single text block back as its equivalent string.
+	value := gjson.ParseBytes(content)
+	if value.IsArray() && value.Get("#").Int() == 1 && value.Get("0.type").String() == "text" {
+		value = value.Get("0.text")
+	}
+	if !value.Exists() || value.Type == gjson.Null {
+		return ""
+	}
+	raw, err := json.Marshal(json.RawMessage(value.Raw))
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func anthropicParentKey(req *apicompat.AnthropicRequest, upstreamModel, session string) string {
+	msgs := req.Messages
+	if len(msgs) < 3 || msgs[len(msgs)-1].Role != "user" || msgs[len(msgs)-2].Role != "assistant" {
+		return ""
+	}
+	return anthropicHistoryKey(req, upstreamModel, session, msgs[:len(msgs)-2], anthropicReplyDigest(msgs[len(msgs)-2].Content))
 }
 
 func trimAnthropicCompatResponsesInputToLatestTurn(req *apicompat.ResponsesRequest) {

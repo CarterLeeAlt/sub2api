@@ -5,16 +5,19 @@ package handler
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/model"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -38,15 +41,18 @@ type preContentFailoverUpstream struct {
 	service.HTTPUpstream
 	mu      sync.Mutex
 	hits    []int64
+	bodies  []string
 	respond func(call int) (*http.Response, error)
 }
 
 func (u *preContentFailoverUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	var body []byte
 	if req.Body != nil {
-		_, _ = io.Copy(io.Discard, req.Body)
+		body, _ = io.ReadAll(req.Body)
 	}
 	u.mu.Lock()
 	u.hits = append(u.hits, accountID)
+	u.bodies = append(u.bodies, string(body))
 	call := len(u.hits)
 	u.mu.Unlock()
 	return u.respond(call)
@@ -80,10 +86,14 @@ type unexpectedEOFReader struct{}
 func (unexpectedEOFReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
 type preContentFailoverScenario struct {
-	accounts    []service.Account
-	respond     func(call int) (*http.Response, error)
-	passthrough *service.ErrorPassthroughService
-	requestBody string
+	ownedResponse string
+	endpoint      string
+	usageLogs     service.UsageLogRepository
+	billing       *compatStreamUsageBillingRepo
+	accounts      []service.Account
+	respond       func(call int) (*http.Response, error)
+	passthrough   *service.ErrorPassthroughService
+	requestBody   string
 }
 
 func preContentAccounts(count int) []service.Account {
@@ -118,13 +128,20 @@ func serveMessagesScenario(t *testing.T, sc preContentFailoverScenario) (*httpte
 	repo := &grokCredentialHandlerRepo{accounts: sc.accounts, missingOnGet: map[int64]bool{}}
 	upstream := &preContentFailoverUpstream{respond: sc.respond}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
+	var billingRepo service.UsageBillingRepository
+	if sc.billing != nil {
+		billingRepo = sc.billing
+		cfg.RunMode = config.RunModeStandard
+	}
 	cfg.Gateway.MaxAccountSwitches = 3
 	cfg.Gateway.StreamKeepaliveInterval = 1
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
-	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	cacheBalance := &wsTurnBillingCache{}
+	cacheBalance.balance.Store(100)
+	billingCache := service.NewBillingCacheService(cacheBalance, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billingCache.Stop)
 	gateway := service.NewOpenAIGatewayService(
-		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		repo, sc.usageLogs, billingRepo, nil, nil, nil, nil, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCache, upstream,
 		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
 	)
@@ -134,9 +151,12 @@ func serveMessagesScenario(t *testing.T, sc preContentFailoverScenario) (*httpte
 	}
 	h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(cache), billingCache, &service.APIKeyService{}, nil, sc.passthrough, nil, nil, cfg)
 	apiKey := &service.APIKey{
-		ID: 9102, GroupID: &groupID,
+		ID: 9102, UserID: 9103, GroupID: &groupID,
 		User:  &service.User{ID: 9103, Status: service.StatusActive},
-		Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, AllowMessagesDispatch: true},
+		Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, AllowMessagesDispatch: true, RateMultiplier: 1},
+	}
+	if sc.ownedResponse != "" {
+		require.NoError(t, gateway.BindOpenAIHTTPResponseOwner(t.Context(), groupID, sc.ownedResponse, apiKey.User.ID, apiKey.ID))
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -146,16 +166,107 @@ func serveMessagesScenario(t *testing.T, sc preContentFailoverScenario) (*httpte
 		c.Next()
 	})
 	router.POST("/v1/messages", h.Messages)
+	router.POST("/v1/responses", h.Responses)
+	router.POST("/v1/chat/completions", h.ChatCompletions)
 
 	rec := httptest.NewRecorder()
 	requestBody := sc.requestBody
 	if requestBody == "" {
 		requestBody = `{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":true}`
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(requestBody))
+	endpoint := sc.endpoint
+	if endpoint == "" {
+		endpoint = "/v1/messages"
+	}
+	req := httptest.NewRequest(http.MethodPost, endpoint, bytes.NewBufferString(requestBody))
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(rec, req)
 	return rec, upstream
+}
+
+func TestOpenAIInterruptedResponsesBilling(t *testing.T) {
+	for _, mode := range []string{"native", "passthrough"} {
+		for _, report := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reported=%t", mode, report), func(t *testing.T) {
+				accounts := preContentAccounts(2)
+				if mode == "passthrough" {
+					for i := range accounts {
+						accounts[i].Extra = map[string]any{"openai_passthrough": true}
+					}
+				}
+				logs := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 3)}
+				billing := &compatStreamUsageBillingRepo{}
+				usage := ""
+				if report {
+					usage = `,"usage":{"input_tokens":7,"output_tokens":2}`
+				}
+				stream := preContentHandlerCreated + `data: {"type":"response.output_text.delta","delta":"partial answer"}` + "\n\n" + `data: {"type":"response.failed","response":{"id":"resp_pc","status":"failed","error":{"code":"server_error","message":"interrupted"}` + usage + `}}` + "\n\n"
+				rec, upstream := serveMessagesScenario(t, preContentFailoverScenario{accounts: accounts, endpoint: "/v1/responses", requestBody: `{"model":"gpt-5.4","input":"hello","stream":true}`, usageLogs: logs, billing: billing, respond: func(int) (*http.Response, error) {
+					return preContentSSEResponse(io.NopCloser(strings.NewReader(stream))), nil
+				}})
+				require.Contains(t, rec.Body.String(), "partial answer")
+				require.Contains(t, rec.Body.String(), "response.failed")
+				require.NotContains(t, rec.Body.String(), "response.completed")
+				require.Equal(t, 1, upstream.calls())
+				if report {
+					require.Len(t, logs.created, 1)
+					row := <-logs.created
+					require.Equal(t, 7, row.InputTokens)
+					require.Equal(t, 2, row.OutputTokens)
+					require.Len(t, billing.commands, 1)
+					require.Positive(t, row.ActualCost)
+				} else {
+					require.Empty(t, billing.commands)
+					require.Empty(t, logs.created)
+				}
+			})
+		}
+	}
+}
+
+func TestHTTPContinuationSkipsChatOnlyAccount(t *testing.T) {
+	for _, count := range []int{1, 2} {
+		t.Run(fmt.Sprintf("accounts=%d", count), func(t *testing.T) {
+			accounts := preContentAccounts(count)
+			accounts[0].Extra = map[string]any{openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceChatCompletions)}
+			rec, up := serveMessagesScenario(t, preContentFailoverScenario{accounts: accounts, endpoint: "/v1/responses", ownedResponse: "resp_parent", requestBody: `{"model":"gpt-5.4","input":"what was the number?","previous_response_id":"resp_parent","stream":true}`, respond: func(int) (*http.Response, error) {
+				return preContentSSEResponse(io.NopCloser(strings.NewReader(preContentHandlerSuccess))), nil
+			}})
+			if count == 1 {
+				require.Zero(t, up.calls())
+				require.Equal(t, 400, rec.Code)
+				require.Contains(t, rec.Body.String(), "resend the full conversation")
+				return
+			}
+			require.Equal(t, []int64{accounts[1].ID}, up.hits)
+			require.Equal(t, "resp_parent", gjson.Get(up.bodies[0], "previous_response_id").String())
+			require.Contains(t, rec.Body.String(), "answer from second account")
+		})
+	}
+}
+
+func TestOpenAIPluginReadErrorRetryCount(t *testing.T) {
+	for _, sent := range []bool{true, false} {
+		t.Run(fmt.Sprintf("sent=%t", sent), func(t *testing.T) {
+			rec, upstream := serveMessagesScenario(t, preContentFailoverScenario{accounts: preContentAccounts(2), endpoint: "/v1/chat/completions", requestBody: `{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`, respond: func(call int) (*http.Response, error) {
+				if call == 1 {
+					err := &service.PluginTransportError{RequestSent: sent, Code: "read_failed", Message: "interrupted"}
+					if !sent {
+						return nil, err
+					}
+					return preContentSSEResponse(io.NopCloser(iotest.ErrReader(err))), nil
+				}
+				return preContentSSEResponse(io.NopCloser(strings.NewReader(preContentHandlerSuccess))), nil
+			}})
+			if sent {
+				require.Equal(t, 1, upstream.calls())
+				require.GreaterOrEqual(t, rec.Code, 400)
+			} else {
+				require.Equal(t, 2, upstream.calls())
+				require.Equal(t, 200, rec.Code)
+			}
+		})
+	}
 }
 
 // requireEndsWithSSEError checks that a response already committed as SSE ends

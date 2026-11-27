@@ -47,6 +47,9 @@ func newOpenAIUpstreamStreamReadError(err error) error {
 // shouldClassifyOpenAIUpstreamStreamReadError excludes cancellation and
 // response-size enforcement from upstream retry.
 func shouldClassifyOpenAIUpstreamStreamReadError(err error, contexts ...context.Context) bool {
+	if pluginRequestAlreadySent(err) {
+		return false
+	}
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
 		return false
 	}

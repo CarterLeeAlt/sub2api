@@ -362,6 +362,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	var resp *http.Response
 	var usage *OpenAIUsage
+	var terminalErr error
 	var firstTokenMs *int
 	responseID := ""
 	imageCount := 0
@@ -470,8 +471,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 					}
 					return nil, s.handleErrorResponsePassthrough(ctx, compactResp, c, account, body, compactBody)
 				}
-				_ = resp.Body.Close()
-				return nil, handleErr
+				if result == nil || !recordInterruptedResponsesUsage(c, handleErr, result.usage, result.imageCount, 0) {
+					_ = resp.Body.Close()
+					return nil, handleErr
+				}
+				terminalErr = handleErr
 			}
 			usage = result.usage
 			firstTokenMs = result.firstTokenMs
@@ -509,7 +513,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 	defer func() { _ = resp.Body.Close() }()
 	serviceTier := extractOpenAIServiceTierFromBody(body)
-	s.bindHTTPResponseAccount(ctx, c, account, responseID)
+	if terminalErr == nil {
+		s.bindHTTPResponseAccount(ctx, c, account, responseID)
+	}
 
 	// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 	if !account.IsShadow() {
@@ -546,7 +552,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		forwardResult.ImageOutputSizes = imageOutputSizes
 		forwardResult.BillingModel = imageBillingModel
 	}
-	return forwardResult, nil
+	return forwardResult, terminalErr
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
@@ -2558,6 +2564,14 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	// stopKeepalive 幂等且建立 happens-before，对已停拍路径零影响。
 	stopKeepalive()
 	ensureResponseFailedTerminal()
+	writeInterrupted := func() {
+		if !clientDisconnected {
+			_, _ = fmt.Fprint(w, "\n", buildOpenAIResponseFailedSSE(responseID, originalModel, createdAtTracker.Value(), nil, "Upstream response stream was interrupted"))
+			flushPending = true
+			flushPendingOutput()
+			MarkResponseCommitted(c)
+		}
+	}
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
 			s.clearOpenAIProxyStreamDisconnect(account)
@@ -2575,6 +2589,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 		if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
 			msg := "OpenAI stream disconnected before completion"
+			if pluginRequestAlreadySent(err) {
+				return resultWithUsage(), newOpenAIUpstreamStreamReadError(err)
+			}
 			if errText := strings.TrimSpace(err.Error()); errText != "" {
 				msg += ": " + errText
 			}
@@ -2585,6 +2602,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete after disconnect: %w", err)
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, err, upstreamRequestID)
+		writeInterrupted()
 		logger.LegacyPrintf("service.openai_gateway",
 			"[OpenAI passthrough] 流读取异常中断: account=%d request_id=%s err=%v",
 			account.ID,
@@ -2607,6 +2625,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended before a terminal event")
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
+		writeInterrupted()
 		return resultWithUsage(), errors.New("stream usage incomplete: missing terminal event")
 	}
 	if (sawDone || sawTerminalEvent) && !sawFailedEvent {

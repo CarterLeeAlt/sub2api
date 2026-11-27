@@ -246,6 +246,17 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	})
 
 	if scan.Err != nil {
+		code, message := scan.clientError()
+		if !clientDisconnected {
+			if c.Writer.Written() {
+				writeEvents([]apicompat.ResponsesStreamEvent{{
+					Type: "response.failed", SequenceNumber: state.SequenceNumber,
+					Response: &apicompat.ResponsesResponse{ID: state.ResponseID, Object: "response", Model: originalModel, Status: "failed", Error: &apicompat.ResponsesError{Code: code, Message: message}},
+				}})
+			} else {
+				writeOpenAIResponsesFallbackError(c, http.StatusBadGateway, code, message)
+			}
+		}
 		return &OpenAIForwardResult{
 			RequestID:                     requestID,
 			UpstreamHeaders:               resp.Header,

@@ -1049,11 +1049,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					payload = normalized
 				}
 				// 归属校验（首包已在 handler 校验，此处覆盖后续 turn 的续链帧）：
-				// 不归属的 previous_response_id 剥离，以本轮 input 重建上下文，
-				// 防止同分组跨租户凭他人 resp id 续链。
+				// 不归属的父轮无法安全重放。
 				if prevID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()); prevID != "" && s.stripOpenAIWSUnownedPreviousResponseID(ctx, c, prevID) {
-					payload = RemovePreviousResponseIDFromBody(payload)
-					logOpenAIWSModeInfo("ingress_ws_passthrough_previous_response_id_stripped_not_owned")
+					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, OpenAIContinuationHistoryUnavailable, nil)
 				}
 			}
 			if account.IsOpenAIOAuthLike() && (isResponseCreate || eventType == "session.update") {

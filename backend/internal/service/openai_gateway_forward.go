@@ -1273,6 +1273,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 		// Handle normal response
 		var usage *OpenAIUsage
+		var terminalErr error
 		var firstTokenMs *int
 		responseID := ""
 		imageCount := 0
@@ -1317,7 +1318,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					}
 					return s.handleErrorResponse(ctx, compactResp, c, account, body, resolveOpenAIErrorSchedulingModel(billingModel, upstreamModel))
 				}
-				return nil, err
+				if streamResult == nil || !recordInterruptedResponsesUsage(c, err, streamResult.usage, streamResult.imageCount, streamResult.searchCount) {
+					return nil, err
+				}
+				terminalErr = err
 			}
 			usage = streamResult.usage
 			firstTokenMs = streamResult.firstTokenMs
@@ -1349,7 +1353,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			imageOutputSizes = nonStreamResult.imageOutputSizes
 			searchCount = nonStreamResult.searchCount
 		}
-		s.bindHTTPResponseAccount(ctx, c, account, responseID)
+		if terminalErr == nil {
+			s.bindHTTPResponseAccount(ctx, c, account, responseID)
+		}
 
 		// Extract and save Codex usage snapshot from response headers (for OAuth accounts).
 		// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
@@ -1395,8 +1401,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			forwardResult.SearchCount = searchCount
 		}
 		stampOpenAIResponsesUpstreamEndpoint(c, forwardResult)
-		return forwardResult, nil
+		return forwardResult, terminalErr
 	}
+}
+
+// A retry has no committed result. Policy blocks are accounted by their own handler.
+func recordInterruptedResponsesUsage(c *gin.Context, err error, usage *OpenAIUsage, images, searches int) bool {
+	var failover *UpstreamFailoverError
+	return GetOpsCyberPolicy(c) == nil && !errors.As(err, &failover) && (openAIUsageHasTokens(usage) || images > 0 || searches > 0)
 }
 
 func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {

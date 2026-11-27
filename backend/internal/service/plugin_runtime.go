@@ -360,6 +360,11 @@ type PluginTransportError struct {
 	RequestSent bool
 }
 
+func pluginRequestAlreadySent(err error) bool {
+	var transportErr *PluginTransportError
+	return errors.As(err, &transportErr) && transportErr.RequestSent
+}
+
 func (e *PluginTransportError) Error() string {
 	if e == nil {
 		return "插件传输失败"
@@ -418,6 +423,7 @@ func receivePluginResponseBody(stream pluginv1.TransportPlugin_ForwardClient, wr
 	for {
 		frame, err := stream.Recv()
 		if err == io.EOF {
+			_ = writer.CloseWithError(normalizePluginRPCError(stream.Context(), "接收插件响应结束帧", io.ErrUnexpectedEOF, true))
 			return
 		}
 		if err != nil {
@@ -441,7 +447,7 @@ func receivePluginResponseBody(stream pluginv1.TransportPlugin_ForwardClient, wr
 			return
 		}
 		if frameError := frame.GetError(); frameError != nil {
-			_ = writer.CloseWithError(&PluginTransportError{Code: frameError.Code, Message: frameError.Message, RequestSent: frameError.RequestSent})
+			_ = writer.CloseWithError(&PluginTransportError{Code: frameError.Code, Message: frameError.Message, RequestSent: true})
 			return
 		}
 	}

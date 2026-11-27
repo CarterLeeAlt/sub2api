@@ -16,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -290,6 +291,15 @@ type ccStreamScanState struct {
 	Err error
 }
 
+var errCCUpstreamResponse = errors.New("upstream returned a Chat Completions error")
+
+func (st ccStreamScanState) clientError() (string, string) {
+	if errors.Is(st.Err, errCCUpstreamResponse) {
+		return "upstream_error", "Upstream returned an error before completing the response"
+	}
+	return classifyOpenAIUpstreamStreamReadError(st.Err)
+}
+
 // scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
 // 哨兵处停止、保留最新 usage、记录首 token 时延，并把每个解析成功的 chunk 交给
 // emit 回调做各自的协议转换与写出。读错误按既有约定过滤 context 取消类噪声后
@@ -303,6 +313,7 @@ func (s *OpenAIGatewayService) scanCCStream(
 	emit func(*apicompat.ChatCompletionsChunk),
 ) ccStreamScanState {
 	var st ccStreamScanState
+	var terminal openAIRawStreamTerminalState
 
 	scanner := s.newUpstreamSSEScanner(resp.Body)
 	for scanner.Scan() {
@@ -316,6 +327,7 @@ func (s *OpenAIGatewayService) scanCCStream(
 			continue
 		}
 		if payload == "[DONE]" {
+			terminal.ObserveDataLine(payload)
 			st.SawDone = true
 			break
 		}
@@ -328,6 +340,10 @@ func (s *OpenAIGatewayService) scanCCStream(
 
 		if u := extractCCStreamUsage(payload); u != nil {
 			st.Usage = *u
+		}
+		if item := gjson.Get(payload, "error"); item.Exists() && item.Type != gjson.Null {
+			st.Err = errCCUpstreamResponse
+			return st
 		}
 
 		var chunk apicompat.ChatCompletionsChunk
@@ -342,6 +358,7 @@ func (s *OpenAIGatewayService) scanCCStream(
 			ms := int(time.Since(startTime).Milliseconds())
 			st.FirstTokenMs = &ms
 		}
+		terminal.ObserveDataLine(payload)
 		emit(&chunk)
 	}
 
@@ -353,6 +370,8 @@ func (s *OpenAIGatewayService) scanCCStream(
 			)
 		}
 		st.Err = err
+	} else if !terminal.Terminated() {
+		st.Err = ErrOpenAIUpstreamStreamTruncated
 	}
 	return st
 }
@@ -380,6 +399,10 @@ func (s *OpenAIGatewayService) readCCUpstreamJSONResponse(
 	}
 
 	var ccResp apicompat.ChatCompletionsResponse
+	if item := gjson.GetBytes(respBody, "error"); item.Exists() && item.Type != gjson.Null {
+		writeError(c, http.StatusBadGateway, "upstream_error", "Upstream returned a Chat Completions error")
+		return nil, OpenAIUsage{}, errCCUpstreamResponse
+	}
 	if err := json.Unmarshal(respBody, &ccResp); err != nil {
 		writeError(c, http.StatusBadGateway, "api_error", "Failed to parse upstream response")
 		return nil, OpenAIUsage{}, fmt.Errorf("parse chat completions response: %w", err)

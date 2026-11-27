@@ -1904,6 +1904,7 @@ func TestProxyResponsesWebSocketFromClientForGrokUsesXAIHTTPBridgeAndPreservesMa
 	require.Equal(t, grokCLIVersion, upstream.lastReq.Header.Get("X-Grok-Client-Version"))
 	require.Equal(t, "grok-4.6", gjson.GetBytes(upstream.bodies[0], "model").String())
 	require.Equal(t, "grok-4.3", gjson.GetBytes(upstream.bodies[1], "model").String())
+	require.Equal(t, "ok", gjson.GetBytes(upstream.bodies[1], `input.#(role=="assistant").content`).String())
 	require.Equal(t, "grok-4.3", gjson.GetBytes(upstream.bodies[2], "model").String())
 	require.NotEmpty(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String(), upstream.lastReq.Header.Get(grokConversationIDHeader))
@@ -2097,7 +2098,7 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 	gin.SetMode(gin.TestMode)
 
 	firstSSEBody := strings.Join([]string{
-		`data: {"type":"response.completed","response":{"id":"resp_bridge_first","model":"gpt-5.1","output":[{"type":"function_call","id":"fc_bridge_1","call_id":"call_bridge_1","name":"shell","arguments":"{}"}],"usage":{"input_tokens":9,"output_tokens":1}}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_bridge_first","model":"gpt-5.1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Your reference is 7219"}]},{"type":"function_call","id":"fc_bridge_1","call_id":"call_bridge_1","name":"shell","arguments":"{}"}],"usage":{"input_tokens":9,"output_tokens":1}}}`,
 		"",
 	}, "\n")
 	secondSSEBody := strings.Join([]string{
@@ -2225,7 +2226,7 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 		return event
 	}
 
-	writeMessage(`{"type":"response.create","model":"gpt-5.1","stream":true,"reasoning":{"effort":"high"},"input":"first"}`)
+	writeMessage(`{"type":"response.create","model":"gpt-5.1","stream":true,"reasoning":{"effort":"high"},"input":[{"role":"system","content":"Keep the reference verbatim"},{"role":"user","content":"first"}]}`)
 	firstTurnEvent := readMessage()
 	require.Equal(t, "response.completed", gjson.GetBytes(firstTurnEvent, "type").String())
 	require.Equal(t, "resp_bridge_first", gjson.GetBytes(firstTurnEvent, "response.id").String())
@@ -2235,10 +2236,10 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 	require.Equal(t, "response.completed", gjson.GetBytes(secondTurnEvent, "type").String())
 	require.Equal(t, "resp_bridge_second", gjson.GetBytes(secondTurnEvent, "response.id").String())
 
-	require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+	writeMessage(`{"type":"response.create","model":"gpt-5.1","previous_response_id":"resp_other_branch","input":"repeat the number"}`)
 	select {
 	case proxyErr := <-errCh:
-		require.NoError(t, proxyErr)
+		require.ErrorContains(t, proxyErr, OpenAIContinuationHistoryUnavailable)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for websocket bridge proxy to finish")
 	}
@@ -2247,12 +2248,16 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 	require.False(t, gjson.GetBytes(upstream.bodies[0], "previous_response_id").Exists())
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "previous_response_id").Exists())
 	secondInput := gjson.GetBytes(upstream.bodies[1], "input").Array()
-	require.Len(t, secondInput, 3)
-	require.Equal(t, "first", secondInput[0].String())
-	require.Equal(t, "function_call", secondInput[1].Get("type").String())
-	require.Equal(t, "call_bridge_1", secondInput[1].Get("call_id").String())
-	require.Equal(t, "function_call_output", secondInput[2].Get("type").String())
-	require.Equal(t, "call_bridge_1", secondInput[2].Get("call_id").String())
+	require.Len(t, secondInput, 5)
+	require.Equal(t, "system", secondInput[0].Get("role").String())
+	require.Equal(t, "Keep the reference verbatim", secondInput[0].Get("content").String())
+	require.Equal(t, "first", secondInput[1].Get("content").String())
+	require.Equal(t, "assistant", secondInput[2].Get("role").String())
+	require.Equal(t, "Your reference is 7219", secondInput[2].Get("content.0.text").String())
+	require.Equal(t, "function_call", secondInput[3].Get("type").String())
+	require.Equal(t, "call_bridge_1", secondInput[3].Get("call_id").String())
+	require.Equal(t, "function_call_output", secondInput[4].Get("type").String())
+	require.Equal(t, "call_bridge_1", secondInput[4].Get("call_id").String())
 	// The bridge sends capped efforts while usage records each turn's own inbound selection.
 	for _, body := range upstream.bodies {
 		require.Equal(t, "medium", gjson.GetBytes(body, "reasoning.effort").String())

@@ -259,26 +259,61 @@ func prepareOpenAIWSHTTPBridgeBody(account *Account, payload []byte) ([]byte, er
 }
 
 type openAIWSToolCallReplayCollector struct {
-	items    []json.RawMessage
-	seen     map[string]struct{}
-	allItems []json.RawMessage
-	allSeen  map[string]struct{}
+	slots     openAICompatOutputSlots
+	doneItems map[*openAICompatOutputSlot]json.RawMessage
+	items     []json.RawMessage
+	seen      map[string]struct{}
+	allItems  []json.RawMessage
+	allSeen   map[string]struct{}
 }
 
 func (c *openAIWSToolCallReplayCollector) AddEvent(eventType string, message []byte) {
+	slot := c.slots.Observe(message)
 	switch strings.TrimSpace(eventType) {
 	case "response.output_item.done":
 		item := gjson.GetBytes(message, "item")
+		if slot != nil {
+			if c.doneItems == nil {
+				c.doneItems = make(map[*openAICompatOutputSlot]json.RawMessage)
+			}
+			c.doneItems[slot] = json.RawMessage(item.Raw)
+		}
 		c.addAllItem(item)
 		c.addItem(item)
-	case "response.completed", "response.done":
+	case "response.completed", "response.done", "response.incomplete":
 		output := gjson.GetBytes(message, "response.output")
-		if !output.IsArray() {
+		terminalItems := output.Array()
+		if len(terminalItems) == 0 {
+			// Some upstreams deliver text exclusively in deltas. Recover the ordered
+			// items while preserving the original JSON for completed tools and reasoning.
+			c.allItems, c.allSeen, c.items, c.seen = nil, nil, nil, nil
+			for _, slot := range c.slots.orderedSlots() {
+				raw := c.doneItems[slot]
+				if raw == nil {
+					item, ok := slot.build()
+					if !ok {
+						continue
+					}
+					raw, _ = json.Marshal(item)
+				}
+				value := gjson.ParseBytes(raw)
+				c.addAllItem(value)
+				c.addItem(value)
+			}
 			return
 		}
-		for _, item := range output.Array() {
+		// The terminal array gives the output order even when a tool's done
+		// event arrived before the terminal's first message.
+		previous := c.allItems
+		c.allItems, c.allSeen, c.items, c.seen = nil, nil, nil, nil
+		for _, item := range terminalItems {
 			c.addAllItem(item)
 			c.addItem(item)
+		}
+		for _, raw := range previous {
+			value := gjson.ParseBytes(raw)
+			c.addAllItem(value)
+			c.addItem(value)
 		}
 	}
 }
@@ -704,11 +739,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			Duration:                      time.Since(turnStart),
 			FirstTokenMs:                  firstTokenMs,
 		}
-		if replayInput := replayCollector.Items(); len(replayInput) > 0 {
+		if replayInput := replayCollector.AllItems(); len(replayInput) > 0 {
 			result.wsReplayInput = replayInput
 			result.wsReplayInputExists = true
 		}
-		result.wsAccountFailoverReplayInput = replayCollector.AllItems()
 		if imageCount > 0 {
 			result.ImageCount = imageCount
 			result.ImageSize = imageSizeTier

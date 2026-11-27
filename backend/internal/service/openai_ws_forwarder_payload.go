@@ -741,6 +741,9 @@ func openAIWSRawPayloadHasToolCallOutput(payload []byte) bool {
 	return false
 }
 
+// A lone follow-up or tool result cannot replace the conversation identified by a missing parent.
+const OpenAIContinuationHistoryUnavailable = "Previous response history is unavailable; resend the full conversation without previous_response_id"
+
 // buildOpenAIWSReplayInputSequenceFromItems 基于已解析的当前 turn input 构建
 // replay 序列。返回序列的正文与 previousFullInput/currentItems 共享所有权
 // （见 combineOpenAIWSReplayItems 上方的所有权不变式），头数组可能直接转移自

@@ -89,9 +89,11 @@ func openAICompatIsToolCallType(itemType string) bool {
 	return itemType == "function_call" || itemType == "custom_tool_call"
 }
 
-func (o *openAICompatOutputSlots) Observe(payload []byte) {
+// Observe returns the completed slot for output_item.done so replay callers can
+// retain the exact wire representation, including provider-specific fields.
+func (o *openAICompatOutputSlots) Observe(payload []byte) *openAICompatOutputSlot {
 	if o == nil {
-		return
+		return nil
 	}
 	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
 	case "response.output_item.added":
@@ -103,6 +105,7 @@ func (o *openAICompatOutputSlots) Observe(payload []byte) {
 		if item, ok := openAICompatEventItem(payload); ok {
 			slot := o.slot(payload, item.Type, item.ID, item.CallID, true, true)
 			slot.done = &item
+			return slot
 		}
 	case "response.output_text.delta":
 		if delta := gjson.GetBytes(payload, "delta").String(); delta != "" {
@@ -143,6 +146,7 @@ func (o *openAICompatOutputSlots) Observe(payload []byte) {
 			}
 		}
 	}
+	return nil
 }
 
 func openAICompatEventItem(payload []byte) (apicompat.ResponsesOutput, bool) {
@@ -277,15 +281,7 @@ func (o *openAICompatOutputSlots) fillTerminalOutput(eventType string, response 
 	if o == nil || response == nil || len(response.Output) > 0 {
 		return
 	}
-	slots := append([]*openAICompatOutputSlot(nil), o.slots...)
-	sort.SliceStable(slots, func(i, j int) bool {
-		a, b := slots[i], slots[j]
-		if a.indexed != b.indexed {
-			return a.indexed
-		}
-		return a.indexed && a.index < b.index
-	})
-	for _, slot := range slots {
+	for _, slot := range o.orderedSlots() {
 		if item, ok := slot.build(); ok {
 			// The streaming converters render a web search only once it is completed.
 			if item.Type == "web_search_call" && item.Status != "completed" {
@@ -298,6 +294,18 @@ func (o *openAICompatOutputSlots) fillTerminalOutput(eventType string, response 
 			}
 		}
 	}
+}
+
+func (o *openAICompatOutputSlots) orderedSlots() []*openAICompatOutputSlot {
+	slots := append([]*openAICompatOutputSlot(nil), o.slots...)
+	sort.SliceStable(slots, func(i, j int) bool {
+		a, b := slots[i], slots[j]
+		if a.indexed != b.indexed {
+			return a.indexed
+		}
+		return a.indexed && a.index < b.index
+	})
+	return slots
 }
 
 func (s *openAICompatOutputSlot) build() (apicompat.ResponsesOutput, bool) {

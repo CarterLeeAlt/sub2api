@@ -1018,7 +1018,7 @@ func TestOpenAIResponses_FunctionCallOutputHTTPGuidanceDoesNotSuggestPreviousRes
 	h.Responses(c)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	require.Contains(t, w.Body.String(), "Responses WebSocket v2")
+	require.Contains(t, w.Body.String(), "call_id")
 	require.NotContains(t, w.Body.String(), "reuse previous_response_id")
 }
 
@@ -1226,7 +1226,7 @@ func TestOpenAIResponsesWebSocket_RejectsMessageIDAsPreviousResponseID(t *testin
 	require.Contains(t, strings.ToLower(closeErr.Reason), "previous_response_id")
 }
 
-func TestOpenAIResponsesWebSocket_PreviousResponseIDKindLoggedBeforeAcquireFailure(t *testing.T) {
+func TestOpenAIResponsesWebSocket_RejectsUnknownParentBeforeAcquiringSlot(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cache := &concurrencyCacheMock{
@@ -1259,8 +1259,8 @@ func TestOpenAIResponsesWebSocket_PreviousResponseIDKindLoggedBeforeAcquireFailu
 	require.Error(t, err)
 	var closeErr coderws.CloseError
 	require.ErrorAs(t, err, &closeErr)
-	require.Equal(t, coderws.StatusInternalError, closeErr.Code)
-	require.Contains(t, strings.ToLower(closeErr.Reason), "failed to acquire user concurrency slot")
+	require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
+	require.Equal(t, service.OpenAIContinuationHistoryUnavailable, closeErr.Reason)
 }
 
 type contentModerationHandlerSettingRepo struct {

@@ -239,8 +239,9 @@ type OpenAIUsage struct {
 
 // OpenAIForwardResult represents the result of forwarding
 type OpenAIForwardResult struct {
-	RequestID  string
-	ResponseID string
+	anthropicReplyDigest string
+	RequestID            string
+	ResponseID           string
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
 	Usage           OpenAIUsage
@@ -305,9 +306,13 @@ type OpenAIForwardResult struct {
 	// AudioUsage carries Voice billing units when present.
 	AudioUsage *AudioUsage
 
-	wsReplayInput                []json.RawMessage
-	wsReplayInputExists          bool
-	wsAccountFailoverReplayInput []json.RawMessage
+	wsReplayInput       []json.RawMessage
+	wsReplayInputExists bool
+}
+
+// HasReportedUsage identifies billable units already observed before an interrupted turn.
+func (r *OpenAIForwardResult) HasReportedUsage() bool {
+	return r != nil && (openAIUsageHasTokens(&r.Usage) || r.ImageCount > 0 || r.SearchCount > 0 || r.WebSearchCalls > 0 || r.VideoCount > 0 || r.AudioUsage != nil)
 }
 
 // SucceededForScheduling reports whether this result is an upstream success

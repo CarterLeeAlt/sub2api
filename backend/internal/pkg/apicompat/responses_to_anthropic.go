@@ -133,6 +133,9 @@ func anthropicUsageFromResponsesUsage(usage *ResponsesUsage) AnthropicUsage {
 func responsesStatusToAnthropicStopReason(status string, details *ResponsesIncompleteDetails, blocks []AnthropicContentBlock) string {
 	switch status {
 	case "incomplete":
+		if details != nil && details.Reason == "content_filter" {
+			return "refusal"
+		}
 		if details != nil && details.Reason == "max_output_tokens" {
 			return "max_tokens"
 		}
@@ -801,9 +804,7 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 		}
 		switch evt.Response.Status {
 		case "incomplete":
-			if evt.Response.IncompleteDetails != nil && evt.Response.IncompleteDetails.Reason == "max_output_tokens" {
-				stopReason = "max_tokens"
-			}
+			stopReason = responsesStatusToAnthropicStopReason("incomplete", evt.Response.IncompleteDetails, nil)
 		case "completed":
 			if state.HasToolCall {
 				stopReason = "tool_use"

@@ -327,7 +327,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			clientDisconnected = true
 			return
 		}
-		if _, err := writePendingString("event: error\ndata: " + payload + "\n\n"); err != nil {
+		if _, err := writePendingString("\nevent: error\ndata: " + payload + "\n\n"); err != nil {
 			clientDisconnected = true
 			return
 		}
@@ -408,6 +408,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if !sawTerminalEvent {
 			if openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
+				sendErrorEvent(OpenAIUpstreamStreamTruncatedCode, "Upstream response stream ended before completion")
 			}
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: missing terminal event")
 		}
@@ -469,7 +470,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			sendErrorEvent("response_too_large", "Upstream response exceeded the size limit")
 			return resultWithUsage(), scanErr, true
 		}
-		if !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+		if !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush && !pluginRequestAlreadySent(scanErr) {
 			msg := "OpenAI stream disconnected before completion"
 			if errText := strings.TrimSpace(scanErr.Error()); errText != "" {
 				msg += ": " + errText
@@ -1639,8 +1640,7 @@ func (s *OpenAIGatewayService) bindOpenAIWSResponseOwner(ctx context.Context, c 
 
 // stripOpenAIWSUnownedPreviousResponseID 校验 WS turn 携带的 previous_response_id 归属。
 // 不归属（含查无记录、查找失败——与 HTTP 校验一致的 fail-closed 口径）时返回 true，
-// 调用方从 payload 中删除该字段，以本轮 input 重建上下文；首次跨升级边界的存量会话
-// 续链会因此丢失一次上游上下文，属 fail-closed 的已知代价。
+// 调用方拒绝此续轮，并提示客户端重发完整对话。
 func (s *OpenAIGatewayService) stripOpenAIWSUnownedPreviousResponseID(ctx context.Context, c *gin.Context, previousResponseID string) bool {
 	previousResponseID = strings.TrimSpace(previousResponseID)
 	if previousResponseID == "" {

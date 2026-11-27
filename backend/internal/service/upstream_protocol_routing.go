@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -115,6 +116,11 @@ func upstreamRoutingModel(account *Account, body []byte, defaultMappedModel stri
 		return ""
 	}
 	return resolveMappedUpstreamModel(account, body, defaultMappedModel)
+}
+
+// SupportsHTTPContinuation uses the outbound protocol selected for this request.
+func (s *OpenAIGatewayService) SupportsHTTPContinuation(ctx context.Context, account *Account, body []byte) bool {
+	return account.IsOpenAIApiKey() && s.resolveUpstreamProtocolFor(ctx, account, APIProtocolResponses, upstreamRoutingModel(account, body, "")) == APIProtocolResponses
 }
 
 // convertResponsesShapedChatBody 把发到 /v1/chat/completions 的 Responses 形状

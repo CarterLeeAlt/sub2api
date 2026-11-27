@@ -497,22 +497,10 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 //
 //	"length"     → "max_tokens"
 //	"tool_calls" → "tool_use"
+//	"content_filter" → "refusal"
 //	other        → "end_turn" (or "tool_use" if tool_use blocks present)
-//
-// "stop", "content_filter", and unknown reasons all map to a completed response
-// in the double-conversion path, which then derives stop_reason from the blocks.
 func chatFinishReasonToAnthropicStopReason(reason string, blocks []AnthropicContentBlock) string {
-	switch reason {
-	case "length":
-		return "max_tokens"
-	case "tool_calls":
-		return "tool_use"
-	default:
-		if containsAnthropicToolUseBlock(blocks) {
-			return "tool_use"
-		}
-		return "end_turn"
-	}
+	return ccFinishReasonToAnthropicStopReason(reason, containsAnthropicToolUseBlock(blocks))
 }
 
 // chatUsageToAnthropicUsage converts Chat Completions token usage to Anthropic
@@ -954,6 +942,8 @@ func closeCCAnthropicBlock(state *ChatCompletionsToAnthropicStreamState) []Anthr
 // (captured during streaming) to an Anthropic stop_reason for message_delta.
 func ccFinishReasonToAnthropicStopReason(reason string, hasToolCall bool) string {
 	switch reason {
+	case "content_filter":
+		return "refusal"
 	case "length":
 		return "max_tokens"
 	case "tool_calls":

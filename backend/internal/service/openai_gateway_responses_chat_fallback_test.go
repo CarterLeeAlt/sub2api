@@ -48,6 +48,68 @@ func TestForwardResponses_ChatFallbackPreservesProvidedStartTime(t *testing.T) {
 	}
 }
 
+func TestChatFallbackTerminalSignals(t *testing.T) {
+	const delta = `data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"
+	for _, tc := range []struct {
+		name, tail, responses, messages string
+		failed                          bool
+	}{
+		{"truncated", "", "upstream_stream_truncated", "ended before completion", true},
+		{"reported error", `data: {"error":{"code":"server_error"},"usage":{"prompt_tokens":7,"completion_tokens":2}}`, "upstream_error", "Upstream returned an error", true},
+		{"length", `data: {"choices":[{"finish_reason":"length"}]}`, "max_output_tokens", "max_tokens", false},
+		{"filtered", `data: {"choices":[{"finish_reason":"content_filter"}]}`, "content_filter", "refusal", false},
+		{"usage only", `data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}`, "response.completed", "end_turn", false},
+	} {
+		for _, endpoint := range []string{"responses", "messages"} {
+			t.Run(endpoint+"/"+tc.name, func(t *testing.T) {
+				up := &httpUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(delta + tc.tail + "\n\n"))}}
+				svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: up}
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				body := []byte(`{"model":"gpt-5.4","stream":true,"input":"hello"}`)
+				if endpoint == "messages" {
+					body = []byte(`{"model":"gpt-5.4","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`)
+				}
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/"+endpoint, bytes.NewReader(body))
+				var result *OpenAIForwardResult
+				var err error
+				if endpoint == "responses" {
+					result, err = svc.Forward(t.Context(), c, forceChatResponsesFallbackAccount(), body)
+				} else {
+					result, err = svc.ForwardAsAnthropic(t.Context(), c, forceChatMessagesFallbackAccount(), body, "", "")
+				}
+				out := rec.Body.String()
+				require.Contains(t, out, "partial")
+				require.NotNil(t, result)
+				if tc.failed {
+					require.Error(t, err)
+					require.NotContains(t, out, "event: response.completed")
+					require.NotContains(t, out, "event: message_stop")
+					require.NotContains(t, out, "[DONE]")
+				} else {
+					require.NoError(t, err)
+				}
+				if endpoint == "messages" {
+					require.Contains(t, out, tc.messages)
+				} else {
+					require.Contains(t, out, tc.responses)
+					if tc.name == "length" || tc.name == "filtered" {
+						require.Contains(t, out, "event: response.incomplete")
+						require.NotContains(t, out, "event: response.completed")
+					}
+				}
+				if tc.name == "reported error" || tc.name == "usage only" {
+					require.Equal(t, 7, result.Usage.InputTokens)
+					require.Equal(t, 2, result.Usage.OutputTokens)
+				} else {
+					require.Zero(t, result.Usage.InputTokens)
+					require.Zero(t, result.Usage.OutputTokens)
+				}
+			})
+		}
+	}
+}
+
 func TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

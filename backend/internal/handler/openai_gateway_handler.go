@@ -776,7 +776,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
-		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !account.IsOpenAIApiKey() {
+		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !h.gatewayService.SupportsHTTPContinuation(c.Request.Context(), account, forwardBody) {
 			// The public Responses HTTP API supports previous_response_id on API-key
 			// accounts. OAuth/SetupToken upstreams do not, so keep searching instead
 			// of silently deleting continuation state from a mixed account pool.
@@ -791,7 +791,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				Scope:            service.GatewayFailureScopeRequest,
 				Reason:           service.OpenAIHTTPContinuationUnsupportedReason,
 				ClientStatusCode: http.StatusBadRequest,
-				ClientMessage:    "previous_response_id requires an OpenAI API-key account for HTTP requests",
+				ClientMessage:    "previous_response_id requires an OpenAI API-key account with a native Responses endpoint; otherwise resend the full conversation",
 			}
 			reqLog.Debug("openai.account_skipped_http_continuation_unsupported",
 				zap.Int64("account_id", account.ID),
@@ -856,7 +856,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// #5148 对齐：错误返回携带的部分 result（流中断前上游已计量的 usage）照常
 		// 入账；failover 错误恒定 result=nil，不会重复计费。
 		submitResponsesUsage := func(res *service.OpenAIForwardResult) {
-			if res == nil {
+			if res == nil || (err != nil && !res.HasReportedUsage()) {
 				return
 			}
 			stampOpenAIRequestedReasoningEffort(res, c)
@@ -1470,7 +1470,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		// usage 照常入账，避免上游已产生消耗的请求完全漏记（#5148，对齐 anthropic
 		// 网关同名修复）。failover 错误恒定 result=nil，不会重复计费。
 		submitMessagesUsage := func(res *service.OpenAIForwardResult) {
-			if res == nil {
+			if res == nil || (err != nil && !res.HasReportedUsage()) {
 				return
 			}
 			stampOpenAIRequestedReasoningEffort(res, c)
@@ -1738,7 +1738,7 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 		reqLog.Warn("openai.request_validation_failed",
 			zap.String("reason", "function_call_output_missing_call_id"),
 		)
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires call_id on HTTP requests; continuation via previous_response_id is only supported on Responses WebSocket v2")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires call_id matching the original tool call")
 		return false
 	}
 	if validation.HasItemReferenceForAllCallIDs {
@@ -1748,7 +1748,7 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 	reqLog.Warn("openai.request_validation_failed",
 		zap.String("reason", "function_call_output_missing_item_reference"),
 	)
-	h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires item_reference ids matching each call_id on HTTP requests; continuation via previous_response_id is only supported on Responses WebSocket v2")
+	h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires item_reference ids matching each call_id or a valid previous_response_id")
 	return false
 }
 
@@ -2679,9 +2679,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	// previous_response_id 归属校验（与 HTTP /v1/responses 同一存储、同一放行规则：
-	// 同 user 跨 key 互通；查无记录/查找失败按不归属处理，fail-closed）。不归属时
-	// 剥离续链字段并以首包 input 重建上下文——与跨组剥离同款处理，防止同分组
-	// 跨租户凭他人 resp id 续链对话；后续 turn 由 WS 转发层按同口径校验。
+	// 同 user 跨 key 互通；查无记录或查找失败时，客户端须显式重发完整历史）。
 	if previousResponseID != "" {
 		wsOwnerGroupID := int64(0)
 		if apiKey.GroupID != nil {
@@ -2693,15 +2691,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			owned = false
 		}
 		if !owned {
-			firstMessage = service.RemovePreviousResponseIDFromBody(firstMessage)
-			reqLog.Warn("openai.ws_previous_response_id_stripped_not_owned",
-				zap.String("previous_response_id_kind", previousResponseIDKind),
-			)
-			previousResponseID = ""
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, service.OpenAIContinuationHistoryUnavailable)
+			return
 		}
 	}
-	firstMessageToolCoverage := service.AnalyzeToolCallOutputContextCoverageBytes(firstMessage)
-	previousResponseCanMove := !firstMessageToolCoverage.HasFunctionCallOutput || firstMessageToolCoverage.ContextCoversAllCallIDs
 	reqLog = reqLog.With(
 		zap.Bool("ws_ingress", true),
 		zap.String("session_initial_model", reqModel),
@@ -2947,7 +2940,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			requiredTransport,
 			requiredCapability,
 			false,
-			previousResponseCanMove,
+			previousResponseID == "",
 			!imageIntent,
 			requestPlatform,
 		)
@@ -3416,17 +3409,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 
 		wsFirstMessage := wsAttemptMessage
-		// 切组/会话失配防护：previous_response_id 未在当前分组命中粘连账号（StickyPreviousHit=false），
-		// 说明该会话链不属于本次调度到的账号，原样转发会触发上游会话链鉴权失败（“鉴权失败，请检查 API Key”）。
-		// 故剥离首包里的 previous_response_id，改用首包内 input 重建上下文；带 function_call_output 的
-		// 工具续链无法重建，保持原样。仅作用于首轮首包，后续 turn 的续链由 WS 转发层既有逻辑处理。
-		if previousResponseID != "" && !scheduleDecision.StickyPreviousHit && previousResponseCanMove {
-			wsFirstMessage = service.RemovePreviousResponseIDFromBody(wsFirstMessage)
-			reqLog.Debug("openai.websocket_previous_response_id_stripped_cross_group",
-				zap.Int64("account_id", account.ID),
-				zap.String("schedule_layer", scheduleDecision.Layer),
-			)
-		}
+		// Preserve the parent when contacting the upstream; a replacement attempt
+		// without that ID must carry the full replay built by the forwarding layer.
 
 		// WebSocket 首包可能很大，hash 必须在 hooks 外算成字符串，避免 AfterTurn 闭包保活请求体。
 		setTurnPayloadHash(1, wsFirstMessage)

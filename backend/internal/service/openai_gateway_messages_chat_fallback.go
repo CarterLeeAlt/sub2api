@@ -238,6 +238,15 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	usage := scan.Usage
 
 	if scan.Err != nil {
+		_, message := scan.clientError()
+		if !clientDisconnected {
+			if c.Writer.Written() {
+				_, _ = fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE("api_error", message))
+				c.Writer.Flush()
+			} else {
+				writeAnthropicError(c, http.StatusBadGateway, "api_error", message)
+			}
+		}
 		// Broken upstream read: skip finalization so no synthetic message_stop
 		// masks the truncation, and surface the error to flag usage incomplete
 		// (mirrors forwardResponsesViaRawChatCompletions).

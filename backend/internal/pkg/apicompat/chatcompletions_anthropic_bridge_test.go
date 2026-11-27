@@ -1120,8 +1120,7 @@ func TestDirectBridge_NonStreamingMatchesDoubleConversion_EmptyChoices(t *testin
 }
 
 func TestChatCompletionsResponseToAnthropic_ContentFilterWithToolUse(t *testing.T) {
-	// content_filter (and unknown finish reasons) derive stop_reason from the
-	// blocks, like the double-conversion path.
+	// A filtered reply must not instruct the client to run a partial tool call.
 	resp := &ChatCompletionsResponse{
 		ID:    "chatcmpl-cf",
 		Model: "deepseek-v4-pro",
@@ -1140,5 +1139,5 @@ func TestChatCompletionsResponseToAnthropic_ContentFilterWithToolUse(t *testing.
 	}
 
 	out := ChatCompletionsResponseToAnthropic(resp, "claude-sonnet-4-20250514")
-	require.Equal(t, "tool_use", AnthropicStopReasonString(out.StopReason))
+	require.Equal(t, "refusal", AnthropicStopReasonString(out.StopReason))
 }
