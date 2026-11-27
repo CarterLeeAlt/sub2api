@@ -56,10 +56,14 @@ func (s *OpenAIModelCatalogRefreshService) Start() {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			client := &http.Client{Timeout: 25 * time.Second}
+			fetch := func(ctx context.Context, previous imageSpecSnapshot, now time.Time) (imageSpecSnapshot, error) {
+				return fetchOfficialImageCatalog(ctx, client, officialImageSpecURL, officialModelDocsURL, previous, now)
+			}
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()
 			for {
-				if err := s.refreshImageSpec(s.ctx); err != nil && s.ctx.Err() == nil {
+				if err := s.refreshImageSpec(s.ctx, fetch); err != nil && s.ctx.Err() == nil {
 					slog.Warn("openai_image_catalog_refresh_failed", "error", err)
 				}
 				select {

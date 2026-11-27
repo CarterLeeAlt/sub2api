@@ -26,8 +26,9 @@ type imageSpecSnapshot struct {
 	Models    map[string]imageEndpointSupport `json:"models"`
 	Lifecycle *imageModelLifecycle            `json:"lifecycle,omitempty"`
 	ETag      string                          `json:"etag"`
-	Checked   time.Time                       `json:"checked"`
-	Updated   time.Time                       `json:"updated"`
+	// A spec-only cache has no timestamp for a lifecycle refresh attempt.
+	Checked time.Time `json:"lifecycle_checked_at"`
+	Updated time.Time `json:"updated"`
 }
 
 // Immutable snapshots are shared by parsing, routing and account discovery.
@@ -115,7 +116,7 @@ func fetchOfficialImageSpec(ctx context.Context, client *http.Client, url string
 
 // Only the image catalog leader contacts OpenAI. Other instances load the
 // compact snapshot from settings so request handling never downloads the spec.
-func (s *OpenAIModelCatalogRefreshService) refreshImageSpec(ctx context.Context) error {
+func (s *OpenAIModelCatalogRefreshService) refreshImageSpec(ctx context.Context, fetch func(context.Context, imageSpecSnapshot, time.Time) (imageSpecSnapshot, error)) error {
 	const lockKey = "openai:image-catalog:refresh"
 	locked, err := s.locks.TryAcquireLeaderLock(ctx, lockKey, s.owner, time.Minute)
 	if err != nil {
@@ -142,16 +143,19 @@ func (s *OpenAIModelCatalogRefreshService) refreshImageSpec(ctx context.Context)
 			officialImageModels.Store(&copy)
 		}
 	}
-	if !locked || time.Since(snapshot.Checked) < time.Hour || time.Now().Before(s.nextImageSpecFetch) {
+	now := time.Now().UTC()
+	interval := time.Hour
+	if snapshot.Lifecycle == nil {
+		interval = time.Minute
+	}
+	if !locked || now.Before(snapshot.Checked.Add(interval)) || now.Before(s.nextImageSpecFetch) {
 		return nil
 	}
-	now := time.Now().UTC()
-	s.nextImageSpecFetch = now.Add(time.Hour)
+	s.nextImageSpecFetch = now.Add(interval)
 	fetchCtx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
-	updated, fetchErr := fetchOfficialImageCatalog(fetchCtx, &http.Client{Timeout: 25 * time.Second}, officialImageSpecURL, officialModelDocsURL, snapshot, now)
-	// Persist failed checks too. A change of leader must not start a second
-	// download within the hour or replace the last usable catalog.
+	updated, fetchErr := fetch(fetchCtx, snapshot, now)
+	// The next leader observes the same retry interval after a failed check.
 	updated.Checked = now
 	encoded, err := json.Marshal(updated)
 	if err != nil {

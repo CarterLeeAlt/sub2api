@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,7 +34,7 @@ func TestOfficialImageCatalogSharedHourlyCheck(t *testing.T) {
 	previous := officialImageModels.Swap(nil)
 	defer officialImageModels.Store(previous)
 	now := time.Now().UTC()
-	cache, err := json.Marshal(imageSpecSnapshot{Models: map[string]imageEndpointSupport{"fixture-painter": {Generate: true}}, Checked: now.Add(-59 * time.Minute), Updated: now.Add(-24 * time.Hour)})
+	cache, err := json.Marshal(imageSpecSnapshot{Models: map[string]imageEndpointSupport{"fixture-painter": {Generate: true}}, Lifecycle: &imageModelLifecycle{}, Checked: now.Add(-59 * time.Minute), Updated: now.Add(-24 * time.Hour)})
 	require.NoError(t, err)
 	settings := newCodexVersionSyncSettingRepoStub(map[string]string{imageSpecSetting: string(cache)})
 	for _, leader := range []bool{false, true, true} {
@@ -41,11 +43,27 @@ func TestOfficialImageCatalogSharedHourlyCheck(t *testing.T) {
 			_, _ = locks.TryAcquireLeaderLock(t.Context(), "openai:image-catalog:refresh", "other", time.Minute)
 		}
 		worker := OpenAIModelCatalogRefreshService{settings: settings, locks: locks, owner: "local"}
-		require.NoError(t, worker.refreshImageSpec(t.Context()))
+		require.NoError(t, worker.refreshImageSpec(t.Context(), nil))
 		require.Empty(t, settings.syncedWrites())
 		require.Zero(t, worker.nextImageSpecFetch)
 		require.True(t, officialImageModels.Load().Models["fixture-painter"].Generate)
 	}
+}
+
+func TestOfficialImageCatalogInitialFetchFailureSharesRetryInterval(t *testing.T) {
+	previous := officialImageModels.Swap(nil)
+	defer officialImageModels.Store(previous)
+	settings := newCodexVersionSyncSettingRepoStub(nil)
+	unavailable := errors.New("fixture source unavailable")
+	fetch := func(_ context.Context, previous imageSpecSnapshot, _ time.Time) (imageSpecSnapshot, error) {
+		return previous, unavailable
+	}
+	first := OpenAIModelCatalogRefreshService{settings: settings, locks: &fakeLeaderLockCache{}, owner: "first"}
+	require.ErrorIs(t, first.refreshImageSpec(t.Context(), fetch), unavailable)
+	second := OpenAIModelCatalogRefreshService{settings: settings, locks: &fakeLeaderLockCache{}, owner: "second"}
+	require.NoError(t, second.refreshImageSpec(t.Context(), nil))
+	require.Len(t, settings.syncedWrites(), 1)
+	require.Nil(t, officialImageModels.Load())
 }
 
 func TestOfficialImageCatalogHTTP(t *testing.T) {
@@ -111,13 +129,24 @@ func TestOAuthImageSyncFiltersDeprecationsAndDefaultSnapshots(t *testing.T) {
 	defer server.Close()
 
 	now := time.Now().UTC()
-	base := imageSpecSnapshot{}
-	first, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, base, now)
+	previous := officialImageModels.Swap(nil)
+	defer officialImageModels.Store(previous)
+	oldModels, err := parseOfficialImageModels([]byte(spec))
 	require.NoError(t, err)
+	// The previous release wrote a fresh spec-only snapshot without lifecycle data.
+	oldCache, err := json.Marshal(map[string]any{"models": oldModels, "etag": `"spec"`, "checked": now.Add(-20 * time.Minute), "updated": now.Add(-time.Hour)})
+	require.NoError(t, err)
+	settings := newCodexVersionSyncSettingRepoStub(map[string]string{imageSpecSetting: string(oldCache)})
+	loader := OpenAIModelCatalogRefreshService{settings: settings, locks: &fakeLeaderLockCache{}, owner: "upgrade"}
+	require.NoError(t, loader.refreshImageSpec(t.Context(), func(ctx context.Context, previous imageSpecSnapshot, now time.Time) (imageSpecSnapshot, error) {
+		return fetchOfficialImageCatalog(ctx, server.Client(), server.URL+"/openapi.json", server.URL, previous, now)
+	}))
+	first := officialImageModels.Load()
+	require.NotNil(t, first)
+	require.NotNil(t, first.Lifecycle)
+	require.Len(t, settings.syncedWrites(), 1)
 	require.Equal(t, active, first.Lifecycle.filterModelIDs(imageIDs))
 
-	previous := officialImageModels.Swap(&first)
-	defer officialImageModels.Store(previous)
 	account := directImagesTestAccount()
 	account.Credentials["plan_type"] = "team"
 	SetAccountModelCatalog(account, AccountModelCatalog{Source: "upstream", Revision: "initial", Ready: true})
@@ -146,20 +175,20 @@ func TestOAuthImageSyncFiltersDeprecationsAndDefaultSnapshots(t *testing.T) {
 
 	// A newer default does not make the previous snapshot a duplicate.
 	flareSnapshot = "gpt-image-2.5-flare-2026-12-01"
-	next, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, first, now.Add(time.Hour))
+	next, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, *first, now.Add(time.Hour))
 	require.NoError(t, err)
 	require.Contains(t, next.Lifecycle.filterModelIDs(imageIDs), "gpt-image-2.5-flare-2026-09-08")
 	require.Equal(t, []string{"gpt-image-2.5-sunburst-2026-09-08"}, first.Lifecycle.filterModelIDs([]string{"gpt-image-2.5-sunburst-2026-09-08"}))
 
 	deprecations = strings.ReplaceAll(fixtureImageDeprecations, "Affected model", "Rearranged column")
-	retained, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, first, now.Add(time.Hour))
+	retained, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, *first, now.Add(time.Hour))
 	require.Error(t, err)
-	require.Equal(t, first, retained)
+	require.Equal(t, *first, retained)
 	deprecations = fixtureImageDeprecations
 	flareSnapshot = ""
-	retained, err = fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, first, now.Add(time.Hour))
+	retained, err = fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, *first, now.Add(time.Hour))
 	require.Error(t, err)
-	require.Equal(t, first, retained)
+	require.Equal(t, *first, retained)
 
 	officialImageModels.Store(&imageSpecSnapshot{Models: first.Models})
 	_, err = tester.SyncUpstreamModelCatalog(t.Context(), account)
