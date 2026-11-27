@@ -155,6 +155,90 @@ func TestOpenAIUsageTransientFailureUsesShortRetryCooldown(t *testing.T) {
 	require.EqualValues(t, 3, calls.Load())
 }
 
+func TestOpenAIUsageBatchKeepsWeeklyQuotaAfterResponseHeaders(t *testing.T) {
+	observed := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	weeklyReset := 5*24*time.Hour + 2*time.Hour
+	account := Account{ID: 731, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account.Extra = buildCodexWhamWindowExtraUpdates(&OpenAIQuotaUsage{RateLimit: &OpenAIRateLimit{
+		PrimaryWindow: &OpenAIRateLimitWindow{UsedPercent: 53, LimitWindowSeconds: 604800, ResetAfterSeconds: int64(weeklyReset.Seconds())},
+	}}, observed, false)
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "5")
+	headers.Set("x-codex-primary-reset-after-seconds", "84300")
+	headers.Set("x-codex-primary-window-minutes", "1440")
+	snapshot := ParseCodexRateLimitHeaders(headers)
+	mergeAccountExtra(&account, buildCodexUsageExtraUpdates(snapshot, time.Now()))
+
+	logs := &windowCostRepo{}
+	svc := &AccountUsageService{accountRepo: &stubOpenAIAccountRepo{accounts: []Account{account}},
+		usageLogRepo: logs, cache: NewUsageCache(), openAIQuotaService: &OpenAIQuotaService{}}
+	svc.cache.openAIProbeCache.Store(account.ID, observed.Add(openAIProbeCacheTTL))
+	batch, failures, _, err := svc.GetUsageBatch(t.Context(), []int64{account.ID}, false)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+	usage := batch[account.ID]
+	require.Equal(t, "passive", usage.Source)
+	require.Nil(t, usage.FiveHour)
+	require.NotNil(t, usage.SevenDay)
+	require.Equal(t, 53.0, usage.SevenDay.Utilization)
+	require.Equal(t, observed.Add(weeklyReset), *usage.SevenDay.ResetsAt)
+	require.Equal(t, observed, *usage.UpdatedAt)
+	require.Equal(t, []time.Time{observed.Add(weeklyReset - 7*24*time.Hour)}, logs.starts)
+}
+
+func TestOpenAIUsageRefreshTracksWeeklyQuotaChanges(t *testing.T) {
+	account := &Account{ID: 732, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "workspace"},
+		Extra: map[string]any{
+			codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
+			codexWhamUsageUpdatedAtKey:  formatCodexWhamSnapshotGeneration(time.Now()),
+			codexWham5hWindowPresentKey: true,
+			codexWham7dWindowPresentKey: true,
+			"codex_5h_used_percent":     5.0,
+			"codex_7d_used_percent":     5.0,
+		},
+	}
+	// The account starts with a pre-upgrade cache. Then the upstream changes
+	// its weekly allowance in both directions and adds/removes a 5h window.
+	responses := []string{
+		`{"rate_limit":{"primary_window":{"used_percent":53,"limit_window_seconds":604800,"reset_after_seconds":420000}}}`,
+		`{"rate_limit":{"primary_window":{"used_percent":8,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":5,"limit_window_seconds":604800,"reset_after_seconds":84000}}}`,
+		`{"rate_limit":{"primary_window":{"used_percent":64,"limit_window_seconds":604800,"reset_after_seconds":432000}}}`,
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		index := int(calls.Add(1)) - 1
+		if index >= len(responses) {
+			http.Error(w, "unexpected quota probe", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responses[index]))
+	}))
+	defer server.Close()
+	repo := &sparkShadowUsageTestRepo{accounts: map[int64]*Account{account.ID: account}}
+	tokens := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(account): "token"}}
+	svc := &AccountUsageService{accountRepo: repo, cache: NewUsageCache(),
+		openAIQuotaService: NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokens, nil), newQuotaRedirectingFactory(server), nil)}
+	for i, want := range []float64{53, 5, 64} {
+		usage, err := svc.GetUsage(t.Context(), account.ID, i > 0)
+		require.NoError(t, err)
+		require.Empty(t, usage.Error)
+		require.Equal(t, "active", usage.Source)
+		require.NotNil(t, usage.SevenDay)
+		require.Equal(t, want, usage.SevenDay.Utilization)
+		require.Equal(t, i == 1, usage.FiveHour != nil)
+		cached, err := svc.GetUsage(t.Context(), account.ID)
+		require.NoError(t, err)
+		require.Equal(t, "passive", cached.Source)
+		require.Equal(t, usage.UpdatedAt, cached.UpdatedAt)
+		require.Equal(t, usage.SevenDay.Utilization, cached.SevenDay.Utilization)
+		require.Equal(t, usage.SevenDay.ResetsAt, cached.SevenDay.ResetsAt)
+		require.Equal(t, i == 1, cached.FiveHour != nil)
+	}
+	require.EqualValues(t, len(responses), calls.Load())
+}
+
 // TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2 外审第9轮 P1:spark 影子用量走
 // QueryUsage(/wham/usage,与 WSv2 无关),staleness 不得被 WSv2 门控,否则首刷后窗口永久冻结。
 func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {
@@ -227,7 +311,7 @@ func TestApplyExtraToUsageHidesAuthoritativelyAbsentWindow(t *testing.T) {
 		"codex_7d_used_percent":     92.0,
 	}
 
-	applyExtraToUsage(usage, extra, now)
+	applyExtraToUsage(usage, extra, now, false)
 	if usage.FiveHour != nil {
 		t.Fatalf("authoritatively absent 5h window remained visible: %#v", usage.FiveHour)
 	}
@@ -252,17 +336,17 @@ func TestHasCodexWhamWindowPresenceBlocksLegacyFallback(t *testing.T) {
 	}
 }
 
-func TestHideUnconfirmedCodexWindows(t *testing.T) {
+func TestApplyExtraToUsageRequiresConfirmedWhamWindows(t *testing.T) {
 	t.Parallel()
 	legacyUsage := &UsageInfo{
 		FiveHour: &UsageProgress{Utilization: 100},
 		SevenDay: &UsageProgress{Utilization: 50},
 	}
-	hideUnconfirmedCodexWindows(legacyUsage, map[string]any{
+	applyExtraToUsage(legacyUsage, map[string]any{
 		codexWham5hWindowPresentKey: true,
 		codexWham7dWindowPresentKey: true,
 		codexWhamUsageUpdatedAtKey:  time.Now().Format(time.RFC3339),
-	})
+	}, time.Now(), true)
 	if legacyUsage.FiveHour != nil || legacyUsage.SevenDay != nil {
 		t.Fatalf("legacy unversioned presence must be hidden pending wham refresh: %#v", legacyUsage)
 	}
@@ -275,8 +359,7 @@ func TestHideUnconfirmedCodexWindows(t *testing.T) {
 		codexWham5hWindowPresentKey: false,
 		codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
 	}
-	applyExtraToUsage(usage, extra, time.Now())
-	hideUnconfirmedCodexWindows(usage, extra)
+	applyExtraToUsage(usage, extra, time.Now(), true)
 	if usage.FiveHour != nil {
 		t.Fatalf("known absent 5h window must remain hidden: %#v", usage.FiveHour)
 	}
@@ -289,9 +372,13 @@ func TestHideUnconfirmedCodexWindows(t *testing.T) {
 		codexWham5hWindowPresentKey: false,
 		codexWham7dWindowPresentKey: true,
 		codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
+		codexWham7dUsedPercentKey:   75.0,
+		"codex_7d_reset_at":         time.Now().Add(time.Hour).Format(time.RFC3339),
 	}
-	applyExtraToUsage(usage, extra, time.Now())
-	hideUnconfirmedCodexWindows(usage, extra)
+	applyExtraToUsage(usage, extra, time.Now(), true)
+	require.Nil(t, usage.SevenDay, "a row from before WHAM stored its own reset time must be refreshed")
+	extra["codex_wham_7d_reset_at"] = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+	applyExtraToUsage(usage, extra, time.Now(), true)
 	if usage.FiveHour != nil || usage.SevenDay == nil {
 		t.Fatalf("expected per-window authoritative visibility, got 5h=%#v 7d=%#v", usage.FiveHour, usage.SevenDay)
 	}
@@ -749,7 +836,7 @@ func TestBuildCodexUsageProgressFromExtra_ZerosExpiredWindow(t *testing.T) {
 			"codex_5h_used_percent": 42.0,
 			"codex_5h_reset_at":     "2026-03-16T10:00:00Z", // 2h ago
 		}
-		progress := buildCodexUsageProgressFromExtra(extra, "5h", now)
+		progress := buildCodexUsageProgressFromExtra(extra, "5h", now, false)
 		if progress == nil {
 			t.Fatal("expected non-nil progress")
 		}
@@ -767,7 +854,7 @@ func TestBuildCodexUsageProgressFromExtra_ZerosExpiredWindow(t *testing.T) {
 			"codex_5h_used_percent": 42.0,
 			"codex_5h_reset_at":     resetAt,
 		}
-		progress := buildCodexUsageProgressFromExtra(extra, "5h", now)
+		progress := buildCodexUsageProgressFromExtra(extra, "5h", now, false)
 		if progress == nil {
 			t.Fatal("expected non-nil progress")
 		}
@@ -781,7 +868,7 @@ func TestBuildCodexUsageProgressFromExtra_ZerosExpiredWindow(t *testing.T) {
 			"codex_7d_used_percent": 88.0,
 			"codex_7d_reset_at":     "2026-03-15T00:00:00Z", // yesterday
 		}
-		progress := buildCodexUsageProgressFromExtra(extra, "7d", now)
+		progress := buildCodexUsageProgressFromExtra(extra, "7d", now, false)
 		if progress == nil {
 			t.Fatal("expected non-nil progress")
 		}

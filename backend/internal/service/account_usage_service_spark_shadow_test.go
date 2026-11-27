@@ -161,7 +161,7 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 	require.Equal(t, "active", usage.Source)
 	require.Empty(t, usage.Error)
 	require.NotNil(t, usage.UpdatedAt)
-	stamp, ok := shadow.Extra["codex_usage_updated_at"].(string)
+	stamp, ok := shadow.Extra[codexWhamUsageUpdatedAtKey].(string)
 	require.True(t, ok, "snapshot observation time must be stored as a string")
 	observedAt, err := time.Parse(time.RFC3339, stamp)
 	require.NoError(t, err)
@@ -192,6 +192,9 @@ func TestGetOpenAIUsage_SparkShadow_FailedOrEmptyQueryDoesNotRefreshSnapshot(t *
 				Extra: map[string]any{
 					"codex_7d_used_percent":     100.0,
 					"codex_usage_updated_at":    observedAt.Format(time.RFC3339),
+					codexWhamUsageUpdatedAtKey:  formatCodexWhamSnapshotGeneration(observedAt),
+					codexWham7dUsedPercentKey:   100.0,
+					"codex_wham_7d_reset_at":    observedAt.Add(7 * 24 * time.Hour).Format(time.RFC3339),
 					codexWhamPresenceSchemaKey:  codexWhamPresenceSchemaV1,
 					codexWham5hWindowPresentKey: false,
 					codexWham7dWindowPresentKey: true,

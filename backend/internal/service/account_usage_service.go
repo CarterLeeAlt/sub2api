@@ -851,7 +851,8 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		return usage, nil
 	}
 
-	applyExtraToUsage(usage, account.Extra, now)
+	whamOnly := s.openAIQuotaService != nil
+	applyExtraToUsage(usage, account.Extra, now, whamOnly)
 	if health := accountOpenAIUpstreamHealth(account); health.Kind != "" {
 		usage.Error = health.Message
 		usage.ErrorCode = health.Kind
@@ -860,13 +861,6 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		}
 		usage.NeedsReauth = health.Kind == "auth_invalid"
 	}
-	// In production the quota service is authoritative.  Legacy Extra fields
-	// from before /wham/usage was introduced must not be rendered while either
-	// window's presence is still unknown (including transient probe failures).
-	if s.openAIQuotaService != nil {
-		hideUnconfirmedCodexWindows(usage, account.Extra)
-	}
-
 	ctx = WithScopedAdminAccountOperation(ctx, "accounts.usage.read")
 	shouldRefreshSnapshot := force || shouldRefreshOpenAICodexSnapshot(account, usage, now)
 	allowThresholdRecovery := adminaccess.RestrictedFromContext(ctx) == nil
@@ -938,7 +932,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			} else if persisted {
 				probeSucceeded = true
 				mergeAccountExtra(account, updates)
-				applyExtraToUsage(usage, account.Extra, now)
+				applyExtraToUsage(usage, account.Extra, now, whamOnly)
 				usage.Source = "active"
 			} else {
 				// A newer generation already won in the database. This request's
@@ -1235,31 +1229,21 @@ func formatCodexWhamSnapshotGeneration(observedAt time.Time) string {
 	return observedAt.UTC().Format(codexWhamGenerationLayout)
 }
 
-// applyExtraToUsage rebuilds the codex 5h/7d windows in usage from the
-// account's Extra map.  Called after mergeAccountExtra to make the in-memory
-// UsageInfo consistent with the just-persisted Extra values.
-func applyExtraToUsage(usage *UsageInfo, extra map[string]any, now time.Time) {
-	if usage == nil {
-		return
+// Read the observation time and both windows from the same source. Response
+// headers may report a different limit even when they arrive after WHAM.
+func applyExtraToUsage(usage *UsageInfo, extra map[string]any, now time.Time, whamOnly bool) {
+	prefix := "codex_"
+	if whamOnly {
+		prefix = "codex_wham_"
 	}
-	// updated_at is the upstream observation time, not the time the UI read
-	// this cache. Legacy snapshots without a timestamp have unknown freshness.
 	usage.UpdatedAt = nil
-	if raw, ok := extra["codex_usage_updated_at"]; ok {
+	if raw, ok := extra[prefix+"usage_updated_at"]; ok {
 		if observedAt, err := parseTime(fmt.Sprint(raw)); err == nil && !observedAt.IsZero() {
 			usage.UpdatedAt = &observedAt
 		}
 	}
-	if present, known := codexWhamWindowPresence(extra, "5h"); known && !present {
-		usage.FiveHour = nil
-	} else if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil {
-		usage.FiveHour = progress
-	}
-	if present, known := codexWhamWindowPresence(extra, "7d"); known && !present {
-		usage.SevenDay = nil
-	} else if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil {
-		usage.SevenDay = progress
-	}
+	usage.FiveHour = buildCodexUsageProgressFromExtra(extra, "5h", now, whamOnly)
+	usage.SevenDay = buildCodexUsageProgressFromExtra(extra, "7d", now, whamOnly)
 }
 
 func codexWhamWindowPresence(extra map[string]any, window string) (bool, bool) {
@@ -1281,26 +1265,6 @@ func hasCodexWhamWindowPresence(extra map[string]any) bool {
 	_, fiveKnown := extra[codexWham5hWindowPresentKey].(bool)
 	_, sevenKnown := extra[codexWham7dWindowPresentKey].(bool)
 	return fiveKnown || sevenKnown
-}
-
-func hideUnconfirmedCodexWindows(usage *UsageInfo, extra map[string]any) {
-	if usage == nil {
-		return
-	}
-	// Presence markers written by older builds could be overwritten by passive
-	// x-codex-* headers.  Treat those records as untrusted until a current
-	// /wham/usage refresh stamps the schema marker.
-	if fmt.Sprint(extra[codexWhamPresenceSchemaKey]) != codexWhamPresenceSchemaV1 {
-		usage.FiveHour = nil
-		usage.SevenDay = nil
-		return
-	}
-	if _, known := codexWhamWindowPresence(extra, "5h"); !known {
-		usage.FiveHour = nil
-	}
-	if _, known := codexWhamWindowPresence(extra, "7d"); !known {
-		usage.SevenDay = nil
-	}
 }
 
 // errorCodeQuotaRefreshFailed 标记 OpenAI OAuth 额度主动刷新失败：返回值仍是上次
@@ -1860,47 +1824,30 @@ func windowStatsFromAccountStats(stats *usagestats.AccountStats) *WindowStats {
 	}
 }
 
-func buildCodexUsageProgressFromExtra(extra map[string]any, window string, now time.Time) *UsageProgress {
-	if len(extra) == 0 {
+func buildCodexUsageProgressFromExtra(extra map[string]any, window string, now time.Time, whamOnly bool) *UsageProgress {
+	present, known := codexWhamWindowPresence(extra, window)
+	if known && !present {
 		return nil
 	}
-
-	var (
-		usedPercentKey string
-		resetAfterKey  string
-		resetAtKey     string
-	)
-
-	switch window {
-	case "5h":
-		usedPercentKey = "codex_5h_used_percent"
-		resetAfterKey = "codex_5h_reset_after_seconds"
-		resetAtKey = "codex_5h_reset_at"
-	case "7d":
-		usedPercentKey = "codex_7d_used_percent"
-		resetAfterKey = "codex_7d_reset_after_seconds"
-		resetAtKey = "codex_7d_reset_at"
-	default:
-		return nil
+	prefix := "codex_" + window + "_"
+	if whamOnly {
+		if !known || extra[codexWhamPresenceSchemaKey] != codexWhamPresenceSchemaV1 {
+			return nil
+		}
+		prefix = "codex_wham_" + window + "_"
 	}
-
-	usedRaw, ok := extra[usedPercentKey]
+	used, ok := resolveAccountExtraNumber(extra, prefix+"used_percent")
 	if !ok {
 		return nil
 	}
-
-	progress := &UsageProgress{Utilization: parseExtraFloat64(usedRaw)}
-	if resetAtRaw, ok := extra[resetAtKey]; ok {
-		if resetAt, err := parseTime(fmt.Sprint(resetAtRaw)); err == nil {
-			progress.ResetsAt = &resetAt
-			progress.RemainingSeconds = int(time.Until(resetAt).Seconds())
-			if progress.RemainingSeconds < 0 {
-				progress.RemainingSeconds = 0
-			}
-		}
-	}
+	progress := &UsageProgress{Utilization: used, ResetsAt: parseSchedulingResetAt(extra[prefix+"reset_at"])}
 	if progress.ResetsAt == nil {
-		if resetAfterSeconds := parseExtraInt(extra[resetAfterKey]); resetAfterSeconds > 0 {
+		// Older WHAM rows lack a private reset time. The normal usage query
+		// refreshes missing windows, including these rows on their first read.
+		if whamOnly {
+			return nil
+		}
+		if resetAfterSeconds := parseExtraInt(extra[prefix+"reset_after_seconds"]); resetAfterSeconds > 0 {
 			base := now
 			if updatedAtRaw, ok := extra["codex_usage_updated_at"]; ok {
 				if updatedAt, err := parseTime(fmt.Sprint(updatedAtRaw)); err == nil {
@@ -1909,16 +1856,14 @@ func buildCodexUsageProgressFromExtra(extra map[string]any, window string, now t
 			}
 			resetAt := base.Add(time.Duration(resetAfterSeconds) * time.Second)
 			progress.ResetsAt = &resetAt
-			progress.RemainingSeconds = int(time.Until(resetAt).Seconds())
-			if progress.RemainingSeconds < 0 {
-				progress.RemainingSeconds = 0
-			}
 		}
 	}
 
-	// 窗口已过期（resetAt 在 now 之前）→ 额度已重置，归零
-	if progress.ResetsAt != nil && !now.Before(*progress.ResetsAt) {
-		progress.Utilization = 0
+	if progress.ResetsAt != nil {
+		progress.RemainingSeconds = max(0, int(progress.ResetsAt.Sub(now).Seconds()))
+		if !now.Before(*progress.ResetsAt) {
+			progress.Utilization = 0
+		}
 	}
 
 	return progress

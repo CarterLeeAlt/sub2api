@@ -885,9 +885,11 @@ func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Ti
 	}
 	if r := codexResetAtRFC3339(now, normalized.Reset5hSeconds); r != nil {
 		updates["codex_5h_reset_at"] = *r
+		updates["codex_wham_5h_reset_at"] = *r
 	}
 	if r := codexResetAtRFC3339(now, normalized.Reset7dSeconds); r != nil {
 		updates["codex_7d_reset_at"] = *r
+		updates["codex_wham_7d_reset_at"] = *r
 	}
 	if present, _ := updates[codexWham5hWindowPresentKey].(bool); !present {
 		clearAbsentCodexWindowExtra(updates, "5h")
@@ -905,6 +907,7 @@ func clearAbsentCodexWindowExtra(updates map[string]any, window string) {
 	}
 	// WHAM 专写副本同步清除，保持"权威缺席"语义对恢复判定同样成立。
 	updates["codex_wham_"+window+"_used_percent"] = nil
+	updates["codex_wham_"+window+"_reset_at"] = nil
 }
 
 // mapUpstreamStatus collapses upstream HTTP statuses into a stable set we
