@@ -40,6 +40,7 @@ type ImageTaskRecord struct {
 	Result      json.RawMessage `json:"result,omitempty"`
 	Error       json.RawMessage `json:"error,omitempty"`
 	CreatedAt   int64           `json:"created_at"`
+	DeadlineMS  int64           `json:"deadline_ms,omitempty"`
 	CompletedAt *int64          `json:"completed_at,omitempty"`
 	ExpiresAt   int64           `json:"expires_at"`
 }
@@ -67,6 +68,8 @@ type ImageTaskOwner struct {
 type ImageTaskStore interface {
 	Save(ctx context.Context, task *ImageTaskRecord, ttl time.Duration) error
 	Get(ctx context.Context, id string) (*ImageTaskRecord, error)
+	// FinishProcessing returns the stored winner. At or past deadline, timeout wins.
+	FinishProcessing(ctx context.Context, candidate, timeout *ImageTaskRecord, deadline time.Time, ttl time.Duration) (*ImageTaskRecord, error)
 }
 
 // ImageStorageResolver reports the currently effective object-storage binding.
@@ -130,11 +133,16 @@ func (s *ImageTaskService) current() (*ImageResultUploader, bool) {
 // Enabled 表示异步图片任务功能是否可用（总开关 + 凭证齐全）。
 // 关闭时 handler 直接返回 404，不创建任务、不写 Redis。
 func (s *ImageTaskService) Enabled() bool {
-	if s == nil || s.store == nil {
-		return false
-	}
-	_, enabled := s.current()
+	_, enabled := s.SubmissionStorage()
 	return enabled
+}
+
+// SubmissionStorage pins the storage binding for the lifetime of an accepted task.
+func (s *ImageTaskService) SubmissionStorage() (*ImageResultUploader, bool) {
+	if s == nil || s.store == nil {
+		return nil, false
+	}
+	return s.current()
 }
 
 // Pollable 表示已创建的任务能否被查询。
@@ -156,12 +164,13 @@ func (s *ImageTaskService) Create(ctx context.Context, owner ImageTaskOwner) (*I
 	}
 	now := time.Now().UTC()
 	task := &ImageTaskRecord{
-		ID:        "imgtask_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-		UserID:    owner.UserID,
-		APIKeyID:  owner.APIKeyID,
-		Status:    ImageTaskStatusProcessing,
-		CreatedAt: now.Unix(),
-		ExpiresAt: now.Add(s.ttl).Unix(),
+		ID:         "imgtask_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		UserID:     owner.UserID,
+		APIKeyID:   owner.APIKeyID,
+		Status:     ImageTaskStatusProcessing,
+		CreatedAt:  now.Unix(),
+		DeadlineMS: now.Add(s.executionTimeout).UnixMilli(),
+		ExpiresAt:  now.Add(s.ttl).Unix(),
 	}
 	if err := s.store.Save(ctx, task, s.ttl); err != nil {
 		return nil, ErrImageTaskUnavailable.WithCause(err)
@@ -188,57 +197,69 @@ func (s *ImageTaskService) Get(ctx context.Context, owner ImageTaskOwner, id str
 	// 会永久滞留（只能等 TTL 过期）。轮询时超过执行时限仍未终态的任务按超时
 	// 标 failed，使文档"任务最多执行 executionTimeout"的承诺在崩溃场景下同样
 	// 成立，客户端也不会无限轮询。
-	if task.Status == ImageTaskStatusProcessing && task.CreatedAt > 0 &&
-		time.Now().UTC().After(time.Unix(task.CreatedAt, 0).Add(s.executionTimeout)) {
-		now := time.Now().UTC()
-		completedAt := now.Unix()
-		task.Status = ImageTaskStatusFailed
-		task.HTTPStatus = http.StatusInternalServerError
-		task.Error = imageTaskErrorJSON("api_error", "image task timed out")
-		task.CompletedAt = &completedAt
-		task.ExpiresAt = now.Add(s.ttl).Unix()
-		if err := s.store.Save(ctx, task, s.ttl); err != nil {
-			return nil, ErrImageTaskUnavailable.WithCause(err)
+	if task.Status == ImageTaskStatusProcessing && !time.Now().Before(s.deadline(task)) {
+		task, err = s.finish(ctx, task, ImageTaskStatusFailed, http.StatusGatewayTimeout, nil, imageTaskErrorJSON("timeout_error", "image task timed out"))
+		if err != nil {
+			return nil, err
 		}
-		logger.L().Warn("image_task_stale_processing_reaped", zap.String("task_id", task.ID))
 	}
 	return imageTaskToPublic(task), nil
 }
 
-func (s *ImageTaskService) Complete(ctx context.Context, id string, statusCode int, result json.RawMessage) error {
-	if !json.Valid(result) {
-		return s.Fail(ctx, id, http.StatusBadGateway, imageTaskErrorJSON("api_error", "upstream returned a non-JSON image response"))
+func (s *ImageTaskService) deadline(task *ImageTaskRecord) time.Time {
+	if task.DeadlineMS != 0 {
+		return time.UnixMilli(task.DeadlineMS)
 	}
-	if uploader, _ := s.current(); uploader != nil {
-		rewritten, err := uploader.Rewrite(ctx, id, result)
+	return time.Unix(task.CreatedAt, 0).Add(s.executionTimeout)
+}
+
+// Deliver returns true only when the stored terminal result is available to the caller.
+func (s *ImageTaskService) Deliver(ctx context.Context, id string, statusCode int, result json.RawMessage, uploader *ImageResultUploader) (bool, error) {
+	task, err := s.store.Get(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if task.Status != ImageTaskStatusProcessing {
+		return task.Status == ImageTaskStatusCompleted, nil
+	}
+	var taskErr json.RawMessage
+	if !time.Now().Before(s.deadline(task)) {
+		taskErr = imageTaskErrorJSON("timeout_error", "image task timed out")
+	} else if !json.Valid(result) {
+		taskErr = imageTaskErrorJSON("api_error", "upstream returned a non-JSON image response")
+	} else if countOpenAIResponseImageOutputsFromJSONBytes(result) == 0 {
+		taskErr = imageTaskErrorJSON("api_error", "upstream returned no image output")
+	} else if uploader != nil {
+		uploadCtx, cancel := context.WithDeadline(ctx, s.deadline(task))
+		rewritten, err := uploader.Rewrite(uploadCtx, id, result)
+		cancel()
 		if err != nil {
-			// 转存失败不回退存 base64，避免大 blob 撑爆 Redis：直接把任务标记为失败。
 			logger.L().Error("image_task.offload_failed", zap.String("task_id", id), zap.Error(err))
-			return s.Fail(ctx, id, http.StatusBadGateway, imageTaskErrorJSON("api_error", "failed to store generated image to object storage"))
+			taskErr = imageTaskErrorJSON("api_error", "failed to store generated image to object storage")
 		}
 		result = rewritten
 	}
-	return s.finish(ctx, id, ImageTaskStatusCompleted, statusCode, result, nil)
+	status := ImageTaskStatusCompleted
+	if taskErr != nil {
+		status, statusCode, result = ImageTaskStatusFailed, http.StatusBadGateway, nil
+	}
+	winner, err := s.finish(ctx, task, status, statusCode, result, taskErr)
+	return err == nil && winner.Status == ImageTaskStatusCompleted, err
 }
 
 func (s *ImageTaskService) Fail(ctx context.Context, id string, statusCode int, taskErr json.RawMessage) error {
 	if !json.Valid(taskErr) {
 		taskErr = imageTaskErrorJSON("api_error", "image generation failed")
 	}
-	return s.finish(ctx, id, ImageTaskStatusFailed, statusCode, nil, taskErr)
-}
-
-func (s *ImageTaskService) finish(ctx context.Context, id, status string, statusCode int, result, taskErr json.RawMessage) error {
-	if s == nil || s.store == nil {
-		return ErrImageTaskUnavailable
-	}
 	task, err := s.store.Get(ctx, id)
 	if err != nil {
-		if errors.Is(err, ErrImageTaskNotFound) {
-			return ErrImageTaskNotFound
-		}
-		return ErrImageTaskUnavailable.WithCause(err)
+		return err
 	}
+	_, err = s.finish(ctx, task, ImageTaskStatusFailed, statusCode, nil, taskErr)
+	return err
+}
+
+func (s *ImageTaskService) finish(ctx context.Context, task *ImageTaskRecord, status string, statusCode int, result, taskErr json.RawMessage) (*ImageTaskRecord, error) {
 	now := time.Now().UTC()
 	completedAt := now.Unix()
 	task.Status = status
@@ -247,10 +268,10 @@ func (s *ImageTaskService) finish(ctx context.Context, id, status string, status
 	task.Error = taskErr
 	task.CompletedAt = &completedAt
 	task.ExpiresAt = now.Add(s.ttl).Unix()
-	if err := s.store.Save(ctx, task, s.ttl); err != nil {
-		return ErrImageTaskUnavailable.WithCause(err)
-	}
-	return nil
+	timeout := *task
+	timeout.Status, timeout.HTTPStatus, timeout.Result = ImageTaskStatusFailed, http.StatusGatewayTimeout, nil
+	timeout.Error = imageTaskErrorJSON("timeout_error", "image task timed out")
+	return s.store.FinishProcessing(ctx, task, &timeout, s.deadline(task), s.ttl)
 }
 
 func imageTaskToPublic(task *ImageTaskRecord) *ImageTask {

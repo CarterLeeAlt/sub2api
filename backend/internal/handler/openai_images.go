@@ -162,6 +162,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	var retry openAIHTTPRetry
 	var lastFailoverErr *service.UpstreamFailoverError
 	stopJSONKeepalive := func() {}
+	asyncDelivery, async := c.Get(asyncImageDeliveryKey)
 	jsonKeepaliveStarted := false
 	defer func() { stopJSONKeepalive() }()
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -261,7 +262,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		}
 
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
-		if !parsed.Stream && !jsonKeepaliveStarted {
+		if !parsed.Stream && !async && !jsonKeepaliveStarted {
 			stopJSONKeepalive = service.StartOpenAIImagesJSONKeepalive(c, h.openAIImagesJSONKeepaliveInterval())
 			jsonKeepaliveStarted = true
 		}
@@ -286,8 +287,14 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
-			if result != nil && result.ImageCount > 0 {
-				reqLog.Warn("openai.images.forward_partial_error_with_image_result",
+			if result != nil {
+				// An observed usage or delivery result is final for billing. Do not replay it.
+				if result.ImageCount == 0 && service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
+					h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "Image generation failed to deliver an image", streamStarted)
+				} else if parsed.Stream && strings.Contains(c.Writer.Header().Get("Content-Type"), "text/event-stream") && !service.OpenAIImagesStreamErrorSent(c) {
+					h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "Image stream ended before delivery completed", true)
+				}
+				reqLog.Warn("openai.images.forward_error_with_usage_result",
 					zap.Int64("account_id", account.ID),
 					zap.Int("image_count", result.ImageCount),
 					zap.Error(err),
@@ -398,11 +405,17 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
 			}
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, requestModel, false, result), true, result.FirstTokenMs)
+			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, requestModel, false, result), err == nil, result.FirstTokenMs)
 		} else {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, requestModel, false, result), true, nil)
 		}
 
+		if async && result != nil {
+			if !asyncDelivery.(func() bool)() {
+				result.ImageCount = 0
+				result.ImageOutputSizes = nil
+			}
+		}
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)

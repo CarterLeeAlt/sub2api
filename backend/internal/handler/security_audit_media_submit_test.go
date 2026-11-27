@@ -112,7 +112,7 @@ func TestAsyncImageSuccessfulPrecheckIsNotRepeatedByDetachedExecution(t *testing
 		executionMu.Lock()
 		repeatedDecision = decision != nil
 		executionMu.Unlock()
-		c.JSON(http.StatusOK, gin.H{"created": 1, "data": []any{}})
+		c.JSON(http.StatusOK, gin.H{"created": 1, "data": []gin.H{{"url": "https://example.test/image.png"}}})
 	}
 
 	router := gin.New()

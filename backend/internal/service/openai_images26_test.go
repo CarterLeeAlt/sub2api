@@ -242,8 +242,13 @@ func TestGPTImage26StreamedJSONEdits(t *testing.T) {
 				parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 				require.NoError(t, err)
 				result, err := svc.ForwardImages(context.Background(), c, directImagesTestAccount(), body, parsed, "")
-				require.NoError(t, err)
-				require.Equal(t, 2, result.ImageCount)
+				if disconnect {
+					require.ErrorIs(t, err, errImageDeliveryInterrupted)
+					require.Zero(t, result.ImageCount)
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, 2, result.ImageCount)
+				}
 				require.Equal(t, 40, result.Usage.ImageOutputTokens)
 				require.Equal(t, 80, result.Usage.ImageInputTokens)
 				require.Len(t, upstream.requests, 1)

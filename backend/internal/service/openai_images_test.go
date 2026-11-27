@@ -31,6 +31,8 @@ type openAIImagesReadErrorBody struct {
 	err error
 }
 
+func (w *failingOpenAIImageWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
+
 func (b *openAIImagesReadErrorBody) Read([]byte) (int, error) { return 0, b.err }
 func (b *openAIImagesReadErrorBody) Close() error             { return nil }
 
@@ -1828,9 +1830,9 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyStreamingDrainsAfterClientDisco
 	}
 
 	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, 1, result.ImageCount)
+	require.Zero(t, result.ImageCount)
 	require.Equal(t, 3, result.Usage.InputTokens)
 	require.Equal(t, 4, result.Usage.OutputTokens)
 	require.Equal(t, 2, result.Usage.ImageOutputTokens)
@@ -2277,10 +2279,10 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingDrainsAfterClientDiscon
 	}
 
 	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errNoDeliveredImage)
 	require.NotNil(t, result)
 	require.True(t, result.Stream)
-	require.Equal(t, 1, result.ImageCount)
+	require.Zero(t, result.ImageCount)
 	require.Equal(t, 5, result.Usage.InputTokens)
 	require.Equal(t, 9, result.Usage.OutputTokens)
 	require.Equal(t, 4, result.Usage.ImageOutputTokens)

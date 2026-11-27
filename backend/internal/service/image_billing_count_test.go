@@ -1,27 +1,67 @@
 package service
 
-import "testing"
+import (
+	"fmt"
+	"io"
+	"strings"
+	"testing"
 
-func TestResolveBillableImageCount(t *testing.T) {
-	tests := []struct {
-		name          string
-		reported      int
-		requested     int
-		fallbackToOne bool
-		want          int
-	}{
-		{name: "实际返回多张", reported: 3, requested: 5, want: 3},
-		{name: "开关开启兜底一张", reported: 0, requested: 3, fallbackToOne: true, want: 1},
-		{name: "开关关闭保留请求 n", reported: 0, requested: 3, want: 3},
-		{name: "流式开关关闭保持 0", reported: 0, requested: 0, want: 0},
-		{name: "非法负数开关关闭保持 n", reported: -1, requested: 2, want: 2},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveBillableImageCount(tt.reported, tt.requested, tt.fallbackToOne); got != tt.want {
-				t.Fatalf("resolveBillableImageCount(%d, %d, %v) = %d, want %d", tt.reported, tt.requested, tt.fallbackToOne, got, tt.want)
-			}
-		})
+	"github.com/stretchr/testify/require"
+)
+
+func TestImagesBillOnlyDeliveredOutputs(t *testing.T) {
+	const model = "gpt-image-2"
+	for _, count := range []int{0, 1, 3} {
+		for _, byImage := range []bool{true, false} {
+			t.Run(fmt.Sprintf("delivered_%d/count_billing_%t", count, byImage), func(t *testing.T) {
+				body := []byte(`{"model":"gpt-image-2","prompt":"draw","n":3}`)
+				c, rec := newOpenAIImagesTestContext(t, body)
+				items := make([]string, count)
+				for i := range items {
+					items[i] = `{"b64_json":"AA=="}`
+				}
+				resp := openAIImagesJSONResponse()
+				resp.Body = io.NopCloser(strings.NewReader(`{"data":[` + strings.Join(items, ",") + `],"usage":{"input_tokens":4,"output_tokens":8}}`))
+				svc := newOpenAIImagesTestService(&httpUpstreamRecorder{resp: resp})
+				parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+				require.NoError(t, err)
+				account := newOpenAIImagesAPIKeyAccount()
+				result, err := svc.ForwardImages(t.Context(), c, account, body, parsed, "")
+				if count == 0 {
+					require.ErrorIs(t, err, errNoDeliveredImage)
+					require.Equal(t, 502, rec.Code)
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, 200, rec.Code)
+				}
+				require.Equal(t, count, result.ImageCount)
+				require.Equal(t, 4, result.Usage.InputTokens)
+				require.Equal(t, 8, result.Usage.OutputTokens)
+				price := 0.25
+				groupID := int64(9)
+				group := &Group{
+					ID: groupID, Platform: PlatformOpenAI, Hydrated: true, RateMultiplier: 1,
+					ImageCountBilling: byImage, ImagePrice2K: &price,
+					ModelPricing: []ChannelModelPricing{{Models: []string{model}, BillingMode: BillingModeToken, InputPrice: &price, OutputPrice: &price}},
+				}
+				logs := &openAIRecordUsageLogRepoStub{inserted: true}
+				debits := &openAIRecordUsageUserRepoStub{}
+				billing := newOpenAIRecordUsageServiceForTest(logs, debits, &openAIRecordUsageSubRepoStub{}, nil)
+				billing.resolver = NewModelPricingResolver(nil, billing.billingService)
+				err = billing.RecordUsage(t.Context(), &OpenAIRecordUsageInput{Result: result, APIKey: &APIKey{ID: 1, GroupID: &groupID, Group: group}, User: &User{ID: 1}, Account: account})
+				require.NoError(t, err)
+				require.Equal(t, 1, logs.calls)
+				require.Equal(t, count, logs.lastLog.ImageCount)
+				require.Equal(t, 4, logs.lastLog.InputTokens)
+				require.Equal(t, 8, logs.lastLog.OutputTokens)
+				want := 12 * price
+				if byImage {
+					want = float64(count) * price
+				}
+				require.Equal(t, want, logs.lastLog.ActualCost)
+				require.Equal(t, want, debits.lastAmount)
+			})
+		}
 	}
 }
 
@@ -40,8 +80,5 @@ func TestCountOpenAIImageOutputs_OfficialMultiImageResponse(t *testing.T) {
 
 	if got := countOpenAIResponseImageOutputsFromJSONBytes(body); got != 3 {
 		t.Fatalf("countOpenAIResponseImageOutputsFromJSONBytes() = %d, want 3", got)
-	}
-	if got := resolveBillableImageCount(countOpenAIResponseImageOutputsFromJSONBytes(body), 1, false); got != 3 {
-		t.Fatalf("resolveBillableImageCount() = %d, want 3", got)
 	}
 }

@@ -262,11 +262,11 @@ func (s *OpenAIGatewayService) handleCodexDirectImagesNonStreamingResponse(resp 
 		}
 		return OpenAIUsage{}, 0, nil, err
 	}
+	usage, _ := codexDirectImagesUsage(body)
 	results, err := parseCodexDirectImagesResponse(body)
 	if err != nil {
-		return OpenAIUsage{}, 0, nil, err
+		return usage, 0, nil, err
 	}
-	usage, _ := codexDirectImagesUsage(body)
 	rootModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	if observer := upstreamResponseModelObserverFromContext(c); observer != nil {
 		observer.Observe(rootModel, true)
@@ -310,6 +310,8 @@ func (s *OpenAIGatewayService) handleCodexDirectImagesNonStreamingResponse(resp 
 			contentType = upstreamType
 		}
 	}
-	c.Data(resp.StatusCode, contentType, body)
+	if err := writeImageJSON(c, resp.StatusCode, contentType, body); err != nil {
+		return usage, 0, nil, err
+	}
 	return usage, len(results), openAIResponsesImageResultSizes(results), nil
 }

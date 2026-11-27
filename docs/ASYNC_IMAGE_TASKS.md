@@ -30,6 +30,8 @@ Saving requires step-up 2FA when that gate is enabled, for the same reason the b
 
 Turning the switch off stops new submissions but keeps already-accepted tasks pollable, so nothing in flight is stranded.
 
+Each accepted task keeps its original storage configuration until delivery. The execution deadline includes the upload. At the default 30-minute deadline an unfinished task becomes `failed`. A late completion or repeated poll preserves the recorded outcome. For OpenAI image requests, per-image billing counts only images available in the final result. Token-priced requests use reported upstream tokens even when generation, upload or delivery fails.
+
 ### From the config file
 
 The admin setting takes precedence. When nothing has ever been saved there, the `image_storage` block in `config.yaml` is used instead, so deployments that enabled the feature before the admin UI existed keep working untouched.

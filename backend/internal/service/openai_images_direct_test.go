@@ -234,7 +234,7 @@ func TestCodexDirectImagesStreaming(t *testing.T) {
 	}{
 		{"completed", "complete", 1, false, false},
 		{"duplicate", "complete,complete", 1, false, false},
-		{"disconnect", "partial,complete", 1, false, true},
+		{"disconnect", "partial,complete", 0, true, true},
 		{"truncated", "partial", 0, true, false},
 		{"partial_requested_multiple", "complete", 1, false, false},
 		{"error", "error", 0, true, false},
@@ -269,7 +269,7 @@ func TestCodexDirectImagesStreaming(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			if test.wantCount > 0 {
+			if test.wantCount > 0 || test.disconnect {
 				require.NotNil(t, result)
 				require.Equal(t, test.wantCount, result.ImageCount)
 				require.Equal(t, 20, result.Usage.ImageOutputTokens)

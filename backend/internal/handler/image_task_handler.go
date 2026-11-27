@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -32,16 +33,7 @@ func NewAsyncImageHandler(tasks *service.ImageTaskService, openAI *OpenAIGateway
 	return h
 }
 
-// enabled reports whether the async image task feature is available. Object
-// storage is the enablement gate: without it the endpoints are fully disabled
-// so that large base64 results never land in Redis.
-func (h *AsyncImageHandler) enabled() bool {
-	return h != nil && h.tasks != nil && h.tasks.Enabled()
-}
-
-// pollable reports whether task lookups can be served. It is deliberately weaker
-// than enabled(): results already written to Redis stay readable after the
-// feature is switched off, so an in-flight task is never stranded.
+// Existing tasks stay readable after an administrator disables new submissions.
 func (h *AsyncImageHandler) pollable() bool {
 	return h != nil && h.tasks != nil && h.tasks.Pollable()
 }
@@ -49,7 +41,12 @@ func (h *AsyncImageHandler) pollable() bool {
 // Submit accepts the same payload as the synchronous Images endpoint and
 // returns before the upstream image generation begins.
 func (h *AsyncImageHandler) Submit(c *gin.Context) {
-	if !h.enabled() {
+	var tasks *service.ImageTaskService
+	if h != nil {
+		tasks = h.tasks
+	}
+	uploader, enabled := tasks.SubmissionStorage()
+	if !enabled {
 		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", "async image tasks are not enabled")
 		return
 	}
@@ -129,7 +126,7 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 		"poll_url":   pollURL,
 	})
 
-	go h.run(task.ID, platform, taskCtx, recorder, cancel)
+	go h.run(task.ID, platform, taskCtx, recorder, cancel, uploader)
 }
 
 func (h *AsyncImageHandler) checkSecurityAuditBeforeSubmit(c *gin.Context, apiKey *service.APIKey, platform string, body []byte) bool {
@@ -227,7 +224,9 @@ func (h *AsyncImageHandler) executeWithGateway(platform string, c *gin.Context) 
 	h.openAI.Images(c)
 }
 
-func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, recorder *httptest.ResponseRecorder, cancel context.CancelFunc) {
+const asyncImageDeliveryKey = "async_image_delivery"
+
+func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, recorder *httptest.ResponseRecorder, cancel context.CancelFunc, uploader *service.ImageResultUploader) {
 	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -236,11 +235,19 @@ func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, r
 		}
 	}()
 
+	// The image gateway finalizes delivery before submitting usage. Requests that
+	// exit earlier (admission failures, for example) finalize here after execution.
+	deliver := sync.OnceValue(func() bool { return h.finishResponse(taskID, taskCtx, recorder, uploader) })
+	taskCtx.Set(asyncImageDeliveryKey, deliver)
 	h.execute(platform, taskCtx)
+	deliver()
+}
+
+func (h *AsyncImageHandler) finishResponse(taskID string, taskCtx *gin.Context, recorder *httptest.ResponseRecorder, uploader *service.ImageResultUploader) bool {
 	body := bytes.TrimSpace(recorder.Body.Bytes())
 	if err := taskCtx.Request.Context().Err(); err != nil && len(body) == 0 {
 		h.failTask(taskID, http.StatusGatewayTimeout, imageTaskErrorPayload("timeout_error", "image generation task timed out"))
-		return
+		return false
 	}
 	statusCode := recorder.Code
 	if statusCode == 0 {
@@ -249,14 +256,16 @@ func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, r
 	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 		if len(body) == 0 || !json.Valid(body) {
 			h.failTask(taskID, http.StatusBadGateway, imageTaskErrorPayload("api_error", "upstream returned an invalid image response"))
-			return
+			return false
 		}
-		if err := h.tasks.Complete(context.Background(), taskID, statusCode, json.RawMessage(body)); err != nil {
+		delivered, err := h.tasks.Deliver(context.Background(), taskID, statusCode, json.RawMessage(body), uploader)
+		if err != nil {
 			logger.L().Error("image_task.complete_store_failed", zap.String("task_id", taskID), zap.Error(err))
 		}
-		return
+		return delivered
 	}
 	h.failTask(taskID, statusCode, extractImageTaskError(body))
+	return false
 }
 
 func (h *AsyncImageHandler) failTask(taskID string, statusCode int, taskErr json.RawMessage) {

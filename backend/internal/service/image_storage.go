@@ -191,15 +191,14 @@ func (u *ImageResultUploader) Rewrite(ctx context.Context, taskID string, result
 	}
 	rawData, ok := top["data"]
 	if !ok {
-		// 没有 data 数组（结构不符合预期），保持原样返回，交由上层决定。
-		return result, nil
+		return nil, errNoDeliveredImage
 	}
 	var items []map[string]json.RawMessage
 	if err := json.Unmarshal(rawData, &items); err != nil {
 		return nil, fmt.Errorf("parse image response data: %w", err)
 	}
 	if len(items) == 0 {
-		return result, nil
+		return nil, errNoDeliveredImage
 	}
 	for i, item := range items {
 		data, contentType, err := u.fetchImageBytes(ctx, item)

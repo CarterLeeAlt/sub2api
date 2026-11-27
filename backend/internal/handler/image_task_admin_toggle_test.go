@@ -79,8 +79,10 @@ func TestAsyncImageEnablesWithoutRestart(t *testing.T) {
 	tasks := service.NewImageTaskServiceWithResolver(store, settings.Resolver(), time.Hour, time.Minute)
 
 	h := &AsyncImageHandler{tasks: tasks}
+	finishGeneration := make(chan struct{})
 	h.execute = func(_ string, c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"created": 1, "data": []gin.H{{"url": "https://upstream.test/i.png"}}})
+		<-finishGeneration
+		c.JSON(http.StatusOK, gin.H{"created": 1, "data": []gin.H{{"b64_json": "AA=="}}})
 	}
 
 	router := gin.New()
@@ -130,8 +132,15 @@ func TestAsyncImageEnablesWithoutRestart(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, http.StatusNotFound, submit().Code, "new submissions are refused again")
+	close(finishGeneration)
+	require.Eventually(t, func() bool {
+		result, err := tasks.Get(t.Context(), service.ImageTaskOwner{UserID: 7, APIKeyID: 9}, accepted.TaskID)
+		return err == nil && result.Status == service.ImageTaskStatusCompleted
+	}, time.Second, time.Millisecond)
 
 	pollRec := httptest.NewRecorder()
 	router.ServeHTTP(pollRec, httptest.NewRequest(http.MethodGet, accepted.PollURL, nil))
 	require.Equal(t, http.StatusOK, pollRec.Code, "an already-accepted task stays pollable after the switch is turned off")
+	require.Contains(t, pollRec.Body.String(), "https://cdn.example.test/object.png")
+	require.NotContains(t, pollRec.Body.String(), "b64_json")
 }

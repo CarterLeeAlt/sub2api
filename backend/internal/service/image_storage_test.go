@@ -224,7 +224,9 @@ func TestImageTaskServiceCompleteOffloadsToStorage(t *testing.T) {
 
 	b64 := base64.StdEncoding.EncodeToString(pngBytes)
 	result := json.RawMessage(`{"created":1,"data":[{"b64_json":"` + b64 + `"}]}`)
-	require.NoError(t, svc.Complete(context.Background(), created.ID, http.StatusOK, result))
+	delivered, err := svc.Deliver(t.Context(), created.ID, http.StatusOK, result, uploader)
+	require.NoError(t, err)
+	require.True(t, delivered)
 
 	got, err := svc.Get(context.Background(), owner, created.ID)
 	require.NoError(t, err)
@@ -246,7 +248,9 @@ func TestImageTaskServiceCompleteOffloadFailureMarksFailed(t *testing.T) {
 
 	b64 := base64.StdEncoding.EncodeToString(pngBytes)
 	result := json.RawMessage(`{"data":[{"b64_json":"` + b64 + `"}]}`)
-	require.NoError(t, svc.Complete(context.Background(), created.ID, http.StatusOK, result))
+	delivered, err := svc.Deliver(t.Context(), created.ID, http.StatusOK, result, uploader)
+	require.NoError(t, err)
+	require.False(t, delivered)
 
 	got, err := svc.Get(context.Background(), owner, created.ID)
 	require.NoError(t, err)
@@ -284,13 +288,16 @@ func TestImageTaskServiceCompletePrivateURLMarksFailed(t *testing.T) {
 
 	store := &imageTaskMemoryStore{}
 	storage := &fakeImageStorage{}
-	svc := NewImageTaskServiceWithUploader(store, NewImageResultUploader(storage, "images/", 0, nil), time.Hour, time.Minute)
+	uploader := NewImageResultUploader(storage, "images/", 0, nil)
+	svc := NewImageTaskServiceWithUploader(store, uploader, time.Hour, time.Minute)
 	owner := ImageTaskOwner{UserID: 1, APIKeyID: 2}
 	created, err := svc.Create(context.Background(), owner)
 	require.NoError(t, err)
 
 	result := json.RawMessage(`{"data":[{"url":"` + internal.URL + `/a.gif"}]}`)
-	require.NoError(t, svc.Complete(context.Background(), created.ID, http.StatusOK, result))
+	delivered, err := svc.Deliver(t.Context(), created.ID, http.StatusOK, result, uploader)
+	require.NoError(t, err)
+	require.False(t, delivered)
 
 	got, err := svc.Get(context.Background(), owner, created.ID)
 	require.NoError(t, err)

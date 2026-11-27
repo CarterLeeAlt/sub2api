@@ -285,7 +285,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		input.BillingModelSource,
 		result.UpstreamResponseModel,
 		result.UpstreamResponseModelConflict,
-		result.ImageCount > 0 || result.VideoCount > 0 || result.WebSearchCalls > 0 ||
+		result.ImageEndpoint || result.ImageCount > 0 || result.VideoCount > 0 || result.WebSearchCalls > 0 ||
 			result.AudioUsage != nil || result.SearchCount > 0,
 	); responseModel != "" && !strings.EqualFold(responseModel, baselineBillingModel) {
 		if identified, responseChannelPriced := s.hasIdentifiedOpenAIResponsePricing(ctx, responseModel, apiKey); identified {
@@ -629,7 +629,7 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCost(
 		return s.billingService.CalculateAudioCost(result.AudioUsage.Mode, result.AudioUsage.DurationOrUnits, cfg, webSearchMultiplier), nil
 	}
 
-	if result != nil && result.ImageCount > 0 {
+	if result != nil && (result.ImageEndpoint || result.ImageCount > 0) {
 		// 分组显式开启按张计费且来自图片端点时强制走图片计费；否则渠道 token 定价优先。
 		// 混合的 Responses/Chat/WS 请求即使产出了图片，也不能因开关丢失文本 token 费用。
 		if imageCountBillingApplies(apiKey, result.ImageEndpoint) {
@@ -777,6 +777,9 @@ func (s *OpenAIGatewayService) calculateOpenAIImageCost(
 	result *OpenAIForwardResult,
 	multiplier float64,
 ) *CostBreakdown {
+	if result.ImageCount == 0 {
+		return &CostBreakdown{BillingMode: string(BillingModeImage)}
+	}
 	sizeTier := NormalizeImageBillingTierOrDefault(result.ImageSize)
 	resolved := s.resolveOpenAIChannelPricing(ctx, billingModel, apiKey)
 	if resolved != nil && resolved.Source == PricingSourceGroup &&

@@ -45,6 +45,23 @@ func (s *asyncImageMemoryStore) Get(_ context.Context, id string) (*service.Imag
 	return &copy, nil
 }
 
+func (s *asyncImageMemoryStore) FinishProcessing(_ context.Context, candidate, timeout *service.ImageTaskRecord, deadline time.Time, _ time.Duration) (*service.ImageTaskRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.tasks[candidate.ID]
+	if current == nil {
+		return nil, service.ErrImageTaskNotFound
+	}
+	if current.Status != service.ImageTaskStatusProcessing {
+		return current, nil
+	}
+	if !time.Now().Before(deadline) {
+		candidate = timeout
+	}
+	s.tasks[candidate.ID] = candidate
+	return candidate, nil
+}
+
 func TestAsyncImageHandlerSubmitAndPoll(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := &asyncImageMemoryStore{tasks: make(map[string]*service.ImageTaskRecord)}
