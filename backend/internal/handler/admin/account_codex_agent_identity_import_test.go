@@ -125,6 +125,14 @@ func TestImportCodexSessionsMergesAgentIdentityRuntimesForSameTeam(t *testing.T)
 	require.Len(t, svc.updatedAccounts, 1)
 	require.Equal(t, "runtime-b", svc.updatedAccounts[0].input.Credentials["agent_runtime_id"])
 	require.Equal(t, "task-b", svc.updatedAccounts[0].input.Credentials["task_id"])
+	second["agent_identity"].(map[string]any)["task_id"] = ""
+	svc = newCodexImportMemoryAdminService([]service.Account{existing})
+	handler.adminService = svc
+	result, err = handler.importCodexSessions(t.Context(), CodexSessionImportRequest{SkipDefaultGroupBind: boolPtr(true)}, []codexImportEntry{{Index: 1, Value: second}})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Updated)
+	require.Equal(t, "runtime-b", svc.updatedAccounts[0].input.Credentials["agent_runtime_id"])
+	require.NotContains(t, svc.updatedAccounts[0].input.Credentials, "task_id")
 }
 
 func buildAgentIdentityImportValue(t *testing.T, runtimeID, accountID, userID, taskID string) map[string]any {

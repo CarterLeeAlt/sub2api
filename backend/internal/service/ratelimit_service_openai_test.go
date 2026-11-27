@@ -362,6 +362,7 @@ func quota429RecoveryAccount(t *testing.T, threshold int, usedPercent float64) (
 			codexWhamUsageUpdatedAtKey:        whamGeneration,
 			"codex_usage_updated_at":          now.Format(time.RFC3339),
 			"codex_5h_used_percent":           usedPercent,
+			codexWham5hUsedPercentKey:         usedPercent,
 			"codex_5h_reset_at":               resetAt.Format(time.RFC3339Nano),
 		},
 	}, whamGeneration
@@ -446,6 +447,8 @@ func TestOpenAICodexQuota429UnknownWindowRequiresAllWhamWindowsRecovered(t *test
 			"codex_5h_used_percent":     0.0,
 			"codex_5h_reset_at":         now.Add(time.Hour).Format(time.RFC3339Nano),
 			"codex_7d_used_percent":     96.0,
+			codexWham5hUsedPercentKey:   0.0,
+			codexWham7dUsedPercentKey:   96.0,
 			"codex_7d_reset_at":         now.Add(24 * time.Hour).Format(time.RFC3339Nano),
 		},
 	}
@@ -453,6 +456,8 @@ func TestOpenAICodexQuota429UnknownWindowRequiresAllWhamWindowsRecovered(t *test
 
 	require.False(t, svc.openAICodexQuota429Recovered(context.Background(), account, state, now))
 	account.Extra["codex_7d_used_percent"] = 94.0
+	require.False(t, svc.openAICodexQuota429Recovered(context.Background(), account, state, now), "a response header cannot clear the WHAM quota block")
+	account.Extra[codexWham7dUsedPercentKey] = 94.0
 	require.True(t, svc.openAICodexQuota429Recovered(context.Background(), account, state, now))
 }
 

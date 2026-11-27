@@ -53,6 +53,42 @@ func TestUpdateAccountReconcilesSchedulingThresholdPauseBeforeReturning(t *testi
 	require.Empty(t, updated.TempUnschedulableReason)
 }
 
+func TestImportedCodexExpiryAfterUpgrade(t *testing.T) {
+	const id int64 = 523
+	tokenEnd := time.Now().Add(time.Hour).Unix()
+	later := tokenEnd + 86400
+	for _, tc := range []struct {
+		name     string
+		business *int64
+		legacy   bool
+		want     int64
+	}{
+		{"token deadline only", nil, false, 0}, {"explicit same date", &tokenEnd, false, tokenEnd}, {"later business deadline", &later, false, later}, {"unknown legacy deadline", nil, true, tokenEnd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := &CreateAccountInput{Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"access_token": "old"}, ExpiresAt: &tokenEnd, CodexImportExpiry: &CodexImportExpiry{Requested: tc.business}}
+			if tc.legacy {
+				input.CodexImportExpiry = nil
+			}
+			account, err := buildAccountForCreate(input, nil)
+			require.NoError(t, err)
+			account.ID = id
+			require.Equal(t, tokenEnd, account.ExpiresAt.Unix())
+			require.True(t, account.AutoPauseOnExpired)
+			repo := &upstreamBillingProbeAdminRepo{upstreamBillingProbeAccountRepo: &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{id: account}}}
+			admin := &adminServiceImpl{accountRepo: repo}
+			updated, err := admin.UpdateAccount(t.Context(), id, &UpdateAccountInput{Credentials: map[string]any{"refresh_token": "renewable", "access_token": "new"}, Extra: map[string]any{}, CodexImportExpiry: &CodexImportExpiry{}})
+			require.NoError(t, err)
+			if tc.want == 0 {
+				require.Nil(t, updated.ExpiresAt)
+			} else {
+				require.Equal(t, tc.want, updated.ExpiresAt.Unix())
+			}
+			require.NotContains(t, updated.Extra, CodexImportBusinessExpiryKey)
+		})
+	}
+}
+
 type accountBillingSettingsAdminRepo struct {
 	*upstreamBillingProbeAccountRepo
 	concurrentRate   *float64

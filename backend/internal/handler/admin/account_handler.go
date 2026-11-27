@@ -1431,22 +1431,19 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 	var newCredentials map[string]any
 
 	if account.IsOpenAI() {
-		tokenInfo, err := h.openaiOAuthService.RefreshAccountToken(ctx, account)
+		updated, err := h.openaiOAuthService.RefreshAndSaveAccountToken(ctx, account)
 		if err != nil {
 			// 刷新失败但 access_token 可能仍有效，尝试设置隐私
-			service.AfterAccountCommit(ctx, func(committed context.Context) {
-				h.adminService.EnsureOpenAIPrivacy(committed, account)
-			})
+			if infraerrors.Reason(err) != "OPENAI_REFRESH_SUPERSEDED" {
+				service.AfterAccountCommit(ctx, func(committed context.Context) {
+					h.adminService.EnsureOpenAIPrivacy(committed, account)
+				})
+			}
 			return nil, "", err
 		}
 
-		newCredentials = h.openaiOAuthService.BuildAccountCredentials(tokenInfo)
-		for k, v := range account.Credentials {
-			if _, exists := newCredentials[k]; !exists {
-				newCredentials[k] = v
-			}
-		}
-		newCredentials = service.NormalizeOpenAIPersonalAccessTokenCredentials(account, tokenInfo, newCredentials)
+		service.AfterAccountCommit(ctx, func(committed context.Context) { h.adminService.EnsureOpenAIPrivacy(committed, updated) })
+		return updated, "", nil
 	} else if account.Platform == service.PlatformGemini {
 		tokenInfo, err := h.geminiOAuthService.RefreshAccountToken(ctx, account)
 		if err != nil {

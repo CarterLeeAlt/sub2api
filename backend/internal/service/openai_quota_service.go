@@ -107,6 +107,7 @@ type openAICreditsSnapshot struct {
 // Fields not relevant to the quota card are intentionally omitted to keep the
 // surface narrow; full upstream payload preservation is unnecessary.
 type OpenAIQuotaUsage struct {
+	windowsObservedAt     time.Time
 	Warning               *OpenAIUpstreamHealth        `json:"warning,omitempty"`
 	UserID                string                       `json:"user_id,omitempty"`
 	AccountID             string                       `json:"account_id,omitempty"`
@@ -267,6 +268,7 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 		if err := json.Unmarshal(resp.Bytes(), &wirePayload); err != nil {
 			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_UPSTREAM_INVALID_RESPONSE", "upstream returned invalid quota JSON").WithCause(err)
 		}
+		wirePayload.Usage.windowsObservedAt = time.Now().UTC()
 		break
 	}
 	payload := wirePayload.Usage
@@ -275,7 +277,7 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 	}
 	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota", http.StatusOK, nil)
 
-	payload.FetchedAt = time.Now().Unix()
+	payload.FetchedAt = payload.windowsObservedAt.Unix()
 	if !includeResetCreditDetails {
 		return &payload, nil
 	}

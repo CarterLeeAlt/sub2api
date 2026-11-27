@@ -897,11 +897,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 				// Order concurrent observations by response completion, not request
 				// start. A request that started earlier but returned later must not
 				// be discarded merely because the upstream call took longer.
-				if account.IsShadow() {
-					updates = buildCodexSparkWindowExtraUpdates(quotaUsage, time.Now())
-				} else {
-					updates = buildCodexWhamWindowExtraUpdates(quotaUsage, time.Now(), false)
-				}
+				updates = buildCodexWhamWindowExtraUpdates(quotaUsage, quotaUsage.windowsObservedAt, account.IsShadow())
 			} else {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()

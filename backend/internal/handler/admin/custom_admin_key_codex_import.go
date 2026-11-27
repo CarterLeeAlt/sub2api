@@ -145,6 +145,7 @@ func (h *AccountHandler) importScopedCodexSessions(ctx context.Context, api serv
 			if len(req.GroupIDs) > 0 {
 				input.GroupIDs = &req.GroupIDs
 			}
+			input.CodexImportExpiry = &service.CodexImportExpiry{Requested: req.ExpiresAt}
 			account, err = api.ScopedAdminUpdateCodex(ctx, existing.ID, input, func(current *service.Account, safe *service.UpdateAccountInput) error {
 				// 锁内重新匹配，不能将候选快照匹配结果应用到已被其他操作换绑的身份。
 				fresh := buildCodexAccountIndex([]service.Account{*current})
@@ -171,7 +172,7 @@ func (h *AccountHandler) importScopedCodexSessions(ctx context.Context, api serv
 			if candidate := (&service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: credentials, Extra: extra}); candidate.SupportsAutomaticModelCatalog() {
 				modelCatalog = req.ModelCatalog
 			}
-			account, err = api.ScopedAdminCreateCodex(ctx, &service.CreateAccountInput{ModelCatalog: modelCatalog, ProxyMode: proxyMode, Name: name, Notes: req.Notes, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: credentials, Extra: extra, GroupIDs: req.GroupIDs, ProxyID: req.ProxyID, Concurrency: concurrency, Priority: priority, RateMultiplier: req.RateMultiplier, LoadFactor: req.LoadFactor, ExpiresAt: expires, AutoPauseOnExpired: autoPause, SkipDefaultGroupBind: true})
+			account, err = api.ScopedAdminCreateCodex(ctx, &service.CreateAccountInput{CodexImportExpiry: &service.CodexImportExpiry{Requested: req.ExpiresAt}, ModelCatalog: modelCatalog, ProxyMode: proxyMode, Name: name, Notes: req.Notes, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: credentials, Extra: extra, GroupIDs: req.GroupIDs, ProxyID: req.ProxyID, Concurrency: concurrency, Priority: priority, RateMultiplier: req.RateMultiplier, LoadFactor: req.LoadFactor, ExpiresAt: expires, AutoPauseOnExpired: autoPause, SkipDefaultGroupBind: true})
 		}
 		if err != nil {
 			fail(entry.Index, err)

@@ -117,8 +117,11 @@ func ProvideOpenAIOAuthService(
 	proxyRepo ProxyRepository,
 	oauthClient OpenAIOAuthClient,
 	privacyClientFactory PrivacyClientFactory,
+	accountRepo AccountRepository,
+	invalidator TokenCacheInvalidator,
 ) *OpenAIOAuthService {
 	svc := NewOpenAIOAuthService(proxyRepo, oauthClient)
+	svc.accountRepo, svc.cacheInvalidator = accountRepo, invalidator
 	svc.SetPrivacyClientFactory(privacyClientFactory)
 	return svc
 }

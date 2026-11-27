@@ -987,7 +987,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if isOAuth && s.accountRepo != nil {
+	if isOAuth && !account.IsShadow() && resp.StatusCode != http.StatusTooManyRequests && s.accountRepo != nil {
 		if updates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(updates) > 0 {
 			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
 			mergeAccountExtra(account, updates)
@@ -1006,7 +1006,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			return s.testOpenAIAccountConnection(c, account, modelID, prompt, mode)
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
+			s.reconcileOpenAI429State(ctx, account, resp.Header, body, upstreamTestModelID)
 		}
 		if credentialAccount.IsOpenAIOAuth() {
 			_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "account_test", resp.StatusCode, body)
@@ -2200,7 +2200,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == http.StatusTooManyRequests {
-			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
+			s.reconcileOpenAI429State(ctx, account, resp.Header, body, testModelID)
 		}
 		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
 			errMsg := fmt.Sprintf("Chat Completions authentication failed (401): %s", string(body))
@@ -2349,8 +2349,10 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	compactionFound := openAICompactProbeFoundCompactionItem(body)
 	if s.accountRepo != nil {
 		updates := buildOpenAICompactProbeExtraUpdates(resp, body, nil, compactionFound, time.Now())
-		if codexUpdates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(codexUpdates) > 0 {
-			updates = mergeExtraUpdates(updates, codexUpdates)
+		if !account.IsShadow() && resp.StatusCode != http.StatusTooManyRequests {
+			if codexUpdates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(codexUpdates) > 0 {
+				updates = mergeExtraUpdates(updates, codexUpdates)
+			}
 		}
 		if len(updates) > 0 {
 			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
@@ -2358,7 +2360,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 		}
 		// 探测如返回 429,主动同步限流状态,避免后续短时间内继续选中。
 		if resp.StatusCode == http.StatusTooManyRequests {
-			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
+			s.reconcileOpenAI429State(ctx, account, resp.Header, body, testModelID)
 		}
 	}
 
@@ -2382,8 +2384,16 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	return nil
 }
 
-func (s *AccountTestService) reconcileOpenAI429State(ctx context.Context, account *Account, headers http.Header, body []byte) {
+func (s *AccountTestService) reconcileOpenAI429State(ctx context.Context, account *Account, headers http.Header, body []byte, model string) {
 	if s == nil || s.accountRepo == nil || account == nil {
+		return
+	}
+	if account.Platform == PlatformOpenAI {
+		gateway := s.openaiGatewayService
+		if gateway == nil {
+			gateway = &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: s.accountRepo, settingService: s.settingService, cfg: s.cfg}}
+		}
+		gateway.handleOpenAIAccountUpstreamError(ctx, account, http.StatusTooManyRequests, headers, body, model)
 		return
 	}
 

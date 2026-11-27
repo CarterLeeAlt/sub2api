@@ -463,7 +463,7 @@ func persistOpenAIRefreshCredentials(parent context.Context, repo AccountReposit
 			return current, true, nil
 		}
 		if current.Platform != PlatformOpenAI || current.Type != AccountTypeOAuth ||
-			current.IsCredentialShadow() || current.IsOpenAIPersonalAccessToken() ||
+			current.IsCredentialShadow() ||
 			!reflect.DeepEqual(OAuthCredentialIdentity(current.Credentials), OAuthCredentialIdentity(attempted.Credentials)) {
 			return current, false, nil
 		}

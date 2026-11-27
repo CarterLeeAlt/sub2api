@@ -1820,10 +1820,16 @@ func (r *accountRepository) UpdateOpenAIOAuthCredentialsIfUnchanged(
 	// Share the identity CAS and recovery transaction with request-path OAuth
 	// refreshes. Concurrent model edits survive; a successful rotation clears
 	// only its authentication diagnostic and matching temporary pause.
-	return r.UpdateOAuthCredentialsIfUnchanged(ctx, &service.Account{
+	expected := &service.Account{
 		ID: id, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 		Credentials: expectedCredentials, ProxyID: expectedProxyID,
-	}, credentials)
+	}
+	// PAT validation can remove obsolete OAuth fields. Task registration must
+	// not clear a separate account health error. Replace only an exact snapshot.
+	if expected.IsOpenAIPersonalAccessToken() || expected.IsOpenAIAgentIdentity() {
+		return r.accountTransactionScope(ctx).updateOAuthCredentialsIfUnchanged(ctx, id, service.PlatformOpenAI, expectedCredentials, expectedProxyID, credentials)
+	}
+	return r.UpdateOAuthCredentialsIfUnchanged(ctx, expected, credentials)
 }
 
 func (r *accountRepository) updateOAuthCredentialsIfUnchanged(
@@ -3231,6 +3237,8 @@ func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedu
 }
 
 func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now time.Time) (int64, error) {
+	// Token expiry already excludes this account from scheduling. Keep the
+	// operator's switch intact so replacing the token can restore eligibility.
 	rows, err := r.sql.QueryContext(ctx, `
 		UPDATE accounts
 		SET schedulable = FALSE,
@@ -3240,8 +3248,10 @@ func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now ti
 			AND auto_pause_on_expired = TRUE
 			AND expires_at IS NOT NULL
 			AND expires_at <= $1
+			AND (platform <> 'openai' OR type <> 'oauth' OR extra->>$2 IS NULL
+			     OR extra->>$2 = (EXTRACT(EPOCH FROM expires_at)::bigint)::text)
 		RETURNING id
-	`, now)
+	`, now, service.CodexImportBusinessExpiryKey)
 	if err != nil {
 		return 0, err
 	}

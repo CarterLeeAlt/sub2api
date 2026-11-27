@@ -27,6 +27,9 @@ func marshalOAuthCredentialIdentity(credentials map[string]any) (identity, nulls
 // Only provider changes are merged. A concurrent model/config edit must neither
 // be rolled back nor cause a successfully rotated refresh token to be discarded.
 func (r *accountRepository) UpdateOAuthCredentialsIfUnchanged(ctx context.Context, expected *service.Account, credentials map[string]any) (bool, error) {
+	if scoped := r.accountTransactionScope(ctx); scoped != r {
+		return scoped.UpdateOAuthCredentialsIfUnchanged(ctx, expected, credentials)
+	}
 	patch := map[string]any{}
 	for key, value := range credentials {
 		if !reflect.DeepEqual(expected.Credentials[key], value) {

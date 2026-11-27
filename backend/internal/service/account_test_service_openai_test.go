@@ -68,6 +68,9 @@ type openAIAccountTestRepo struct {
 	bulkUpdatedPayload AccountBulkUpdate
 	rateLimitedID      int64
 	rateLimitedAt      *time.Time
+	quota429State      string
+	modelLimitedID     int64
+	modelLimitedKey    string
 	clearedErrorID     int64
 	setErrorID         int64
 	setErrorMsg        string
@@ -88,6 +91,41 @@ func (r *openAIAccountTestRepo) SetRateLimited(_ context.Context, id int64, rese
 	r.rateLimitedID = id
 	r.rateLimitedAt = &resetAt
 	return nil
+}
+
+func (r *openAIAccountTestRepo) SetModelRateLimit(_ context.Context, id int64, key string, _ time.Time, _ ...string) error {
+	r.modelLimitedID = id
+	r.modelLimitedKey = key
+	return nil
+}
+
+func TestAdminProbe429KeepsSparkIndependent(t *testing.T) {
+	for _, mode := range []string{"", AccountTestModeCompact} {
+		ctx, _ := newTestContext()
+		parent := &Account{ID: 77, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "token"}}
+		shadow := &Account{ID: 78, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &parent.ID, QuotaDimension: QuotaDimensionSpark, Extra: map[string]any{codexWham5hUsedPercentKey: 17.0}}
+		repo := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{77: parent, 78: shadow}}}
+		resp := newJSONResponse(429, `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}`)
+		resp.Header.Set("x-codex-primary-used-percent", "100")
+		resp.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+		resp.Header.Set("x-codex-primary-window-minutes", "300")
+		limiter := NewRateLimitService(repo, nil, nil, nil, nil)
+		gateway := &OpenAIGatewayService{rateLimitService: limiter}
+		limiter.SetAccountRuntimeBlocker(gateway)
+		svc := &AccountTestService{accountRepo: repo, httpUpstream: &queuedHTTPUpstream{responses: []*http.Response{resp}}, openaiGatewayService: gateway}
+		require.Error(t, svc.TestAccountConnection(ctx, shadow.ID, "gpt-5.3-codex-spark", "", mode))
+		require.Equal(t, shadow.ID, repo.modelLimitedID)
+		require.Equal(t, "gpt-5.3-codex-spark", repo.modelLimitedKey)
+		require.Zero(t, repo.rateLimitedID)
+		require.NotContains(t, repo.updatedExtra, "codex_5h_used_percent")
+		require.Equal(t, 17.0, shadow.Extra[codexWham5hUsedPercentKey])
+		require.False(t, gateway.isOpenAIAccountRuntimeBlocked(parent))
+	}
+}
+
+func (r *openAIAccountTestRepo) SetOpenAICodexQuotaRateLimited(ctx context.Context, id int64, resetAt time.Time, state string) error {
+	r.quota429State = state
+	return r.SetRateLimited(ctx, id, resetAt)
 }
 
 func (r *openAIAccountTestRepo) ClearError(_ context.Context, id int64) error {
@@ -385,13 +423,11 @@ func TestAccountTestService_OpenAI429PersistsSnapshotAndRateLimitState(t *testin
 	require.Equal(t, 100.0, repo.updatedExtra["codex_5h_used_percent"])
 	require.Equal(t, account.ID, repo.rateLimitedID)
 	require.NotNil(t, repo.rateLimitedAt)
-	require.Equal(t, account.ID, repo.clearedErrorID)
-	require.Equal(t, StatusActive, account.Status)
-	require.Empty(t, account.ErrorMessage)
-	require.NotNil(t, account.RateLimitResetAt)
+	require.Equal(t, "7d", gjson.Get(repo.quota429State, "window").String())
+	require.Zero(t, repo.clearedErrorID)
 }
 
-func TestAccountTestService_OpenAI429BodyOnlyPersistsRateLimitAndClearsStaleError(t *testing.T) {
+func TestAccountTestService_OpenAI429BodyOnlyKeepsSeparateErrorAndRecordsAllWindows(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
@@ -414,10 +450,9 @@ func TestAccountTestService_OpenAI429BodyOnlyPersistsRateLimitAndClearsStaleErro
 	require.Error(t, err)
 	require.Equal(t, account.ID, repo.rateLimitedID)
 	require.NotNil(t, repo.rateLimitedAt)
-	require.Equal(t, account.ID, repo.clearedErrorID)
-	require.Equal(t, StatusActive, account.Status)
-	require.Empty(t, account.ErrorMessage)
-	require.NotNil(t, account.RateLimitResetAt)
+	require.Equal(t, "all", gjson.Get(repo.quota429State, "window").String())
+	require.Zero(t, repo.clearedErrorID)
+	require.Equal(t, StatusError, account.Status)
 	require.Empty(t, repo.updatedExtra)
 }
 
@@ -445,7 +480,7 @@ func TestAccountTestService_OpenAI429SyncsObservedPlanType(t *testing.T) {
 	require.Equal(t, "free", repo.bulkUpdatedPayload.Credentials["plan_type"])
 	require.Equal(t, "free", account.Credentials["plan_type"])
 	require.Equal(t, account.ID, repo.rateLimitedID)
-	require.NotNil(t, account.RateLimitResetAt)
+	require.NotNil(t, repo.rateLimitedAt)
 }
 
 func TestAccountTestService_OpenAI429ActiveAccountDoesNotClearError(t *testing.T) {
@@ -472,10 +507,10 @@ func TestAccountTestService_OpenAI429ActiveAccountDoesNotClearError(t *testing.T
 	require.NotNil(t, repo.rateLimitedAt)
 	require.Zero(t, repo.clearedErrorID)
 	require.Equal(t, StatusActive, account.Status)
-	require.NotNil(t, account.RateLimitResetAt)
+	require.Equal(t, "all", gjson.Get(repo.quota429State, "window").String())
 }
 
-func TestAccountTestService_OpenAI429WithoutResetSignalDoesNotMutateRuntimeState(t *testing.T) {
+func TestAccountTestService_OpenAI429WithoutResetSignalUsesConfiguredFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
@@ -496,8 +531,9 @@ func TestAccountTestService_OpenAI429WithoutResetSignalDoesNotMutateRuntimeState
 
 	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
 	require.Error(t, err)
-	require.Zero(t, repo.rateLimitedID)
-	require.Nil(t, repo.rateLimitedAt)
+	require.Equal(t, account.ID, repo.rateLimitedID)
+	require.WithinDuration(t, time.Now().Add(5*time.Second), *repo.rateLimitedAt, time.Second)
+	require.Empty(t, repo.quota429State)
 	require.Zero(t, repo.clearedErrorID)
 	require.Equal(t, StatusError, account.Status)
 	require.Equal(t, "stale 403", account.ErrorMessage)

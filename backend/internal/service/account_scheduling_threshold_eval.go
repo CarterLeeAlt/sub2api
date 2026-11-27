@@ -79,7 +79,7 @@ func shouldClearOpenAISchedulingThresholdPause(account *Account, now time.Time, 
 	if present, known := codexWhamWindowPresence(extra, reason.Window); known && !present {
 		return true
 	}
-	if openAIQuotaWindowReset(extra, reason.Window, now) {
+	if reset := parseSchedulingResetAt(extra["codex_wham_"+reason.Window+"_reset_at"]); reset != nil && !now.Before(*reset) {
 		return true
 	}
 

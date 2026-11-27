@@ -522,9 +522,8 @@ func (r *accountTestAgentIdentityRepo) GetByID(_ context.Context, _ int64) (*Acc
 	return r.account, nil
 }
 
-func (r *accountTestAgentIdentityRepo) UpdateCredentials(_ context.Context, _ int64, credentials map[string]any) error {
-	r.account.Credentials = credentials
-	return nil
+func (r *accountTestAgentIdentityRepo) UpdateOpenAIOAuthCredentialsIfUnchanged(_ context.Context, _ int64, expected map[string]any, _ *int64, credentials map[string]any) (bool, error) {
+	return saveTestAgentCredentials(r.account, expected, credentials)
 }
 
 func (r *accountTestAgentIdentityRepo) UpdateExtra(_ context.Context, _ int64, _ map[string]any) error {
@@ -540,7 +539,6 @@ func (r *agentIdentityForwardRepo) GetByID(_ context.Context, _ int64) (*Account
 	return r.account, nil
 }
 
-func (r *agentIdentityForwardRepo) UpdateCredentials(_ context.Context, _ int64, credentials map[string]any) error {
-	r.account.Credentials = credentials
-	return nil
+func (r *agentIdentityForwardRepo) UpdateOpenAIOAuthCredentialsIfUnchanged(_ context.Context, _ int64, expected map[string]any, _ *int64, credentials map[string]any) (bool, error) {
+	return saveTestAgentCredentials(r.account, expected, credentials)
 }

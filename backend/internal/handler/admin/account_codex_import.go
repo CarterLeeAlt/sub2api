@@ -278,6 +278,7 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			mergedCredentials := mergeCodexImportCredentials(existing.Credentials, credentials, item)
 			mergedExtra := mergeCodexImportMap(existing.Extra, extra)
 			updateInput := &service.UpdateAccountInput{
+				CodexImportExpiry:  &service.CodexImportExpiry{Requested: req.ExpiresAt},
 				Credentials:        mergedCredentials,
 				Extra:              mergedExtra,
 				Concurrency:        req.Concurrency,
@@ -334,6 +335,7 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			modelCatalog = req.ModelCatalog
 		}
 		account, createErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
+			CodexImportExpiry:     &service.CodexImportExpiry{Requested: req.ExpiresAt},
 			ModelCatalog:          modelCatalog,
 			Name:                  accountName,
 			Notes:                 req.Notes,
@@ -1110,6 +1112,9 @@ func mergeCodexImportCredentials(existing, incoming map[string]any, item *codexI
 	out := mergeCodexImportMap(existing, incoming)
 	if item == nil {
 		return out
+	}
+	if item.IsAgentIdentity && item.AgentTaskID == "" && item.AgentRuntimeID != codexCredentialString(existing, "agent_runtime_id") {
+		delete(out, "task_id")
 	}
 	if strings.TrimSpace(item.RefreshToken) == "" {
 		if codexCredentialString(existing, "refresh_token") == "" {

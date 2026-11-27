@@ -267,6 +267,7 @@ func (r *quotaSnapshotRecoveryReconcilerStub) ReconcileOpenAICodexQuotaRateLimit
 
 func quotaSnapshotTestUsage() *OpenAIQuotaUsage {
 	return &OpenAIQuotaUsage{
+		windowsObservedAt: time.Date(2026, 8, 25, 10, 0, 0, 1, time.UTC),
 		RateLimit: &OpenAIRateLimit{
 			PrimaryWindow:   &OpenAIRateLimitWindow{UsedPercent: 25, LimitWindowSeconds: 5 * 60 * 60, ResetAfterSeconds: 120},
 			SecondaryWindow: &OpenAIRateLimitWindow{UsedPercent: 40, LimitWindowSeconds: 7 * 24 * 60 * 60, ResetAfterSeconds: 240},
@@ -339,7 +340,8 @@ func TestOpenAIQuotaSnapshotRefreshDistributesParentSparkAndCountOnlySnapshot(t 
 	require.Empty(t, repo.reset[parent.ID].Credits)
 	require.Equal(t, repo.reset[parent.ID], repo.reset[shadow.ID])
 	require.Equal(t, "2026-08-25T10:00:00.123456789Z", repo.reset[parent.ID].FetchedAt)
-	require.Equal(t, repo.whamGeneration[parent.ID], repo.resetGeneration[parent.ID])
+	require.Equal(t, formatCodexWhamSnapshotGeneration(quota.usage.windowsObservedAt), repo.whamGeneration[parent.ID])
+	require.Equal(t, repo.whamGeneration[parent.ID], repo.whamGeneration[shadow.ID])
 }
 
 func TestOpenAIQuotaSnapshotRefreshDelayCoversTenThroughFifteenMinutes(t *testing.T) {
@@ -418,12 +420,16 @@ func TestOpenAIQuotaSnapshotRefreshRejectsOlderGeneration(t *testing.T) {
 	svc := NewOpenAIQuotaSnapshotRefreshService(repo, quota)
 
 	svc.now = func() time.Time { return time.Date(2026, 8, 25, 10, 0, 0, 2, time.UTC) }
+	quota.usage.windowsObservedAt = svc.now()
 	require.NoError(t, svc.refreshAccount(context.Background(), &account))
-	svc.now = func() time.Time { return time.Date(2026, 8, 25, 10, 0, 0, 1, time.UTC) }
+	quota.usage.windowsObservedAt = quota.usage.windowsObservedAt.Add(-time.Nanosecond)
+	quota.usage.RateLimit.PrimaryWindow.UsedPercent = 1
+	svc.now = func() time.Time { return time.Date(2026, 8, 25, 10, 0, 0, 3, time.UTC) }
 	require.NoError(t, svc.refreshAccount(context.Background(), &account))
 
 	require.Equal(t, "2026-08-25T10:00:00.000000002Z", repo.whamGeneration[account.ID])
-	require.Equal(t, "2026-08-25T10:00:00.000000002Z", repo.resetGeneration[account.ID])
+	require.Equal(t, "2026-08-25T10:00:00.000000003Z", repo.resetGeneration[account.ID])
+	require.Equal(t, float64(25), repo.wham[account.ID][codexWham5hUsedPercentKey])
 }
 
 func TestOpenAIQuotaSnapshotRefreshFailurePreservesSnapshots(t *testing.T) {

@@ -50,6 +50,10 @@ func (r *stubQuotaAccountRepo) UpdateCredentials(_ context.Context, id int64, cr
 	return nil
 }
 
+func (r *stubQuotaAccountRepo) UpdateOpenAIOAuthCredentialsIfUnchanged(_ context.Context, id int64, expected map[string]any, _ *int64, credentials map[string]any) (bool, error) {
+	return saveTestAgentCredentials(r.accounts[id], expected, credentials)
+}
+
 func (r *stubQuotaAccountRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
 	if r.extraUpdateErr != nil {
 		return r.extraUpdateErr
@@ -595,6 +599,7 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 
 	var capturedBeta string
 	var detailCalls int
+	var detailStarted time.Time
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		switch r.URL.Path {
@@ -605,6 +610,7 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 			})
 		case "/backend-api/wham/rate-limit-reset-credits":
 			detailCalls++
+			detailStarted = time.Now()
 			capturedBeta = r.Header.Get("OpenAI-Beta")
 			require.Equal(t, "org-parent123", r.Header.Get("ChatGPT-Account-ID"))
 			_, _ = w.Write([]byte(`{"credits":[{"id":"secret-credit-id","expires_at":"2026-07-03T04:05:06Z"},{"expiresAt":"2026-07-04T04:05:06Z"}]}`))
@@ -621,6 +627,9 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 	require.NotNil(t, usage.RateLimitResetCredits)
 	require.Equal(t, 2, usage.RateLimitResetCredits.AvailableCount)
 	require.Equal(t, 1, detailCalls)
+	require.False(t, usage.windowsObservedAt.IsZero())
+	require.False(t, usage.windowsObservedAt.After(detailStarted))
+	require.Equal(t, usage.windowsObservedAt.Unix(), usage.FetchedAt)
 	require.Equal(t, openaiQuotaCodexBeta, capturedBeta)
 	require.Equal(t, []OpenAIRateLimitResetCreditDetail{
 		{ExpiresAt: "2026-07-03T04:05:06Z"},

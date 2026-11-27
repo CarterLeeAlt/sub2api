@@ -67,6 +67,26 @@ func TestModelCatalogRefreshOAuthAuthorizationModes(t *testing.T) {
 	}
 }
 
+func TestCatalogAgentIdentityRenewsRejectedTaskOnce(t *testing.T) {
+	key, privateKey := newTestAgentIdentityKey(t)
+	account := &Account{ID: 33, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModeAgentIdentity, "agent_runtime_id": key.runtimeID, "agent_private_key": privateKey, "task_id": "obsolete"}}
+	registered := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { registered++; fmt.Fprint(w, `{"task_id":"current"}`) }))
+	defer server.Close()
+	old := openAIAgentIdentityAuthAPIBaseURL
+	openAIAgentIdentityAuthAPIBaseURL = server.URL
+	defer func() { openAIAgentIdentityAuthAPIBaseURL = old }()
+	up := &queuedHTTPUpstream{responses: []*http.Response{newJSONResponse(401, `{"error":{"code":"invalid_task_id"}}`), newJSONResponse(200, `{"models":[{"slug":"sample"}]}`)}}
+	svc := &AccountTestService{accountRepo: &accountTestAgentIdentityRepo{account: account}, httpUpstream: up}
+	models, _, err := svc.fetchOpenAIOAuthUpstreamModels(t.Context(), account)
+	require.NoError(t, err)
+	require.Equal(t, []string{"sample"}, models)
+	require.Equal(t, 1, registered)
+	require.Len(t, up.requests, 2)
+	require.Equal(t, "current", account.GetCredential("task_id"))
+	require.NotEqual(t, up.requests[0].Header.Get("Authorization"), up.requests[1].Header.Get("Authorization"))
+}
+
 func TestExtractOpenAICodexManifestModelIDs(t *testing.T) {
 	t.Parallel()
 

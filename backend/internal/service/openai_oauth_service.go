@@ -14,6 +14,8 @@ import (
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
 type OpenAIOAuthService struct {
+	accountRepo          AccountRepository
+	cacheInvalidator     TokenCacheInvalidator
 	sessionStore         *openai.SessionStore
 	proxyRepo            ProxyRepository
 	oauthClient          OpenAIOAuthClient
@@ -389,7 +391,33 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
 }
 
-// BuildAccountCredentials builds credentials map from token info
+// RefreshAndSaveAccountToken commits a manual refresh only for the credentials used to obtain it.
+func (s *OpenAIOAuthService) RefreshAndSaveAccountToken(ctx context.Context, account *Account) (*Account, error) {
+	attempt := snapshotOAuthRefreshAccount(account)
+	info, err := s.RefreshAccountToken(ctx, attempt)
+	if err != nil {
+		return nil, err
+	}
+	credentials := MergeCredentials(attempt.Credentials, s.BuildAccountCredentials(info))
+	credentials = NormalizeOpenAIPersonalAccessTokenCredentials(attempt, info, credentials)
+	current, applied, err := persistOpenAIRefreshCredentials(ctx, s.accountRepo, attempt, credentials)
+	if err != nil {
+		return nil, err
+	}
+	if !applied {
+		return nil, infraerrors.Conflict("OPENAI_REFRESH_SUPERSEDED", "账号授权已变更，已保留新凭据")
+	}
+	if s.cacheInvalidator != nil {
+		AfterAccountCommit(ctx, func(committed context.Context) {
+			if err := s.cacheInvalidator.InvalidateToken(committed, current); err != nil {
+				slog.Warn("openai_refresh_token_cache_invalidation_failed", "account_id", current.ID, "error", err)
+			}
+		})
+	}
+	return current, nil
+}
+
+// BuildAccountCredentials builds credentials from a token response.
 func (s *OpenAIOAuthService) BuildAccountCredentials(tokenInfo *OpenAITokenInfo) map[string]any {
 	creds := map[string]any{
 		"access_token": tokenInfo.AccessToken,

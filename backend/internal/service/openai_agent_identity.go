@@ -292,18 +292,21 @@ func ensureAgentIdentityTaskForAccount(ctx context.Context, repo AccountReposito
 	if currentTaskID != "" && (expectedTaskID == "" || currentTaskID != expectedTaskID) {
 		return nil
 	}
-	newTaskID, err := registerAgentIdentityTask(ctx, credAccount)
+	attempt := snapshotOAuthRefreshAccount(credAccount)
+	newTaskID, err := registerAgentIdentityTask(ctx, attempt)
 	if err != nil {
 		return err
 	}
-	credentials := make(map[string]any, len(credAccount.Credentials)+1)
-	for key, value := range credAccount.Credentials {
-		credentials[key] = value
-	}
+	credentials := shallowCopyMap(attempt.Credentials)
 	credentials["task_id"] = newTaskID
-	if err := persistAccountCredentials(ctx, repo, credAccount, credentials); err != nil {
+	current, applied, err := persistOpenAIRefreshCredentials(ctx, repo, attempt, credentials)
+	if err != nil {
 		return err
 	}
+	if !applied {
+		return errors.New("account identity changed during task registration")
+	}
+	credAccount.Credentials = shallowCopyMap(current.Credentials)
 	if !account.IsShadow() && account != credAccount {
 		account.Credentials = shallowCopyMap(credAccount.Credentials)
 	}

@@ -385,15 +385,18 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccount(ctx context.Context, 
 	if usage == nil {
 		return fmt.Errorf("upstream returned an empty quota snapshot")
 	}
-	observedAt := s.now().UTC()
+	if usage.windowsObservedAt.IsZero() {
+		return fmt.Errorf("quota snapshot omitted its window observation time")
+	}
+	creditObservedAt := s.now().UTC()
 
-	whamUpdates := buildCodexWhamWindowExtraUpdates(usage, observedAt, false)
+	whamUpdates := buildCodexWhamWindowExtraUpdates(usage, usage.windowsObservedAt, false)
 	var firstErr error
 	whamPersisted, err := s.persistWhamSnapshot(ctx, account.ID, whamUpdates)
 	if err != nil {
 		firstErr = err
 	}
-	if err := s.persistResetCreditSnapshot(ctx, account.ID, usage.RateLimitResetCredits, observedAt); err != nil && firstErr == nil {
+	if err := s.persistResetCreditSnapshot(ctx, account.ID, usage.RateLimitResetCredits, creditObservedAt); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -417,10 +420,10 @@ func (s *OpenAIQuotaSnapshotRefreshService) refreshAccount(ctx context.Context, 
 		if shadow == nil || !shadow.IsShadow() {
 			continue
 		}
-		if _, err := s.persistWhamSnapshot(ctx, shadow.ID, buildCodexSparkWindowExtraUpdates(usage, observedAt)); err != nil && firstErr == nil {
+		if _, err := s.persistWhamSnapshot(ctx, shadow.ID, buildCodexSparkWindowExtraUpdates(usage, usage.windowsObservedAt)); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		if err := s.persistResetCreditSnapshot(ctx, shadow.ID, usage.RateLimitResetCredits, observedAt); err != nil && firstErr == nil {
+		if err := s.persistResetCreditSnapshot(ctx, shadow.ID, usage.RateLimitResetCredits, creditObservedAt); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

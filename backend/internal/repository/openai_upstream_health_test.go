@@ -71,6 +71,10 @@ func TestOpenAIUpstreamHealthPostgresCAS(t *testing.T) {
 	require.False(t, applied)
 	// A newly authorized credential is protected from in-flight failures using the old token.
 	require.NoError(t, repo.UpdateCredentials(ctx, a.ID, map[string]any{"access_token": "new", "refresh_token": "new-refresh"}))
+	applied, err = repo.UpdateOpenAIOAuthCredentialsIfUnchanged(ctx, a.ID, stale.Credentials, stale.ProxyID, map[string]any{"access_token": "late", "refresh_token": "late"})
+	require.NoError(t, err)
+	require.False(t, applied)
+	require.Equal(t, "new-refresh", read().GetOpenAIRefreshToken())
 	require.NotContains(t, read().Extra, service.OpenAIUpstreamHealthExtraKey)
 	require.NoError(t, repo.ClearError(ctx, a.ID))
 	state.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -97,4 +101,24 @@ func TestOpenAIUpstreamHealthPostgresCAS(t *testing.T) {
 	shadowView, err = repo.GetByID(ctx, shadow.ID)
 	require.NoError(t, err)
 	require.NotContains(t, shadowView.Extra, service.OpenAIUpstreamHealthExtraKey)
+	// Token expiry blocks selection immediately; it must not turn a temporary
+	// credential deadline into a permanent manual scheduling switch.
+	deadline := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	for _, tc := range []struct {
+		name, source string
+		wantSwitch   bool
+	}{{"token expiry", "0", true}, {"business expiry", fmt.Sprint(deadline.Unix()), false}, {"legacy expiry", "", false}} {
+		extra := map[string]any{}
+		if tc.source != "" {
+			extra[service.CodexImportBusinessExpiryKey] = tc.source
+		}
+		acct := &service.Account{Name: tc.name, Platform: "openai", Type: "oauth", Status: "active", Schedulable: true, AutoPauseOnExpired: true, ExpiresAt: &deadline, Extra: extra, Credentials: map[string]any{"access_token": "fixture"}}
+		require.NoError(t, repo.Create(ctx, acct))
+		_, err := repo.AutoPauseExpiredAccounts(ctx, time.Now())
+		require.NoError(t, err)
+		saved, err := repo.GetByID(ctx, acct.ID)
+		require.NoError(t, err)
+		require.False(t, saved.IsSchedulable())
+		require.Equal(t, tc.wantSwitch, saved.Schedulable)
+	}
 }

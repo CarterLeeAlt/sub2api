@@ -404,6 +404,7 @@ type UpdateGroupInput struct {
 }
 
 type CreateAccountInput struct {
+	CodexImportExpiry  *CodexImportExpiry `json:"-"`
 	ModelCatalog       *ModelCatalogEdit
 	ProxyMode          string // 受限写入在验权后选择代理。
 	Name               string
@@ -442,6 +443,7 @@ type ShadowOptions struct {
 }
 
 type UpdateAccountInput struct {
+	CodexImportExpiry     *CodexImportExpiry `json:"-"`
 	ModelCatalog          *ModelCatalogEdit
 	ProxyMode             string // 受限写入在验权后选择代理。
 	Name                  string

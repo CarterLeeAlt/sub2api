@@ -282,27 +282,7 @@ func (h *OpenAIOAuthHandler) RefreshAccountToken(c *gin.Context) {
 		return
 	}
 
-	// Use OpenAI OAuth service to refresh token
-	tokenInfo, err := h.openaiOAuthService.RefreshAccountToken(c.Request.Context(), account)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	// Build new credentials from token info
-	newCredentials := h.openaiOAuthService.BuildAccountCredentials(tokenInfo)
-
-	// Preserve non-token settings from existing credentials
-	for k, v := range account.Credentials {
-		if _, exists := newCredentials[k]; !exists {
-			newCredentials[k] = v
-		}
-	}
-	newCredentials = service.NormalizeOpenAIPersonalAccessTokenCredentials(account, tokenInfo, newCredentials)
-
-	updatedAccount, err := h.adminService.UpdateAccount(c.Request.Context(), accountID, &service.UpdateAccountInput{
-		Credentials: newCredentials,
-	})
+	updatedAccount, err := h.openaiOAuthService.RefreshAndSaveAccountToken(c.Request.Context(), account)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

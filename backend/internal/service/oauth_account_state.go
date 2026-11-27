@@ -15,7 +15,7 @@ const ClaudeOAuthStateKey = "claude_oauth_state"
 // cannot pass the comparison by adding a previously missing field.
 func OAuthCredentialIdentity(credentials map[string]any) map[string]any {
 	identity := make(map[string]any)
-	for _, key := range []string{"access_token", "refresh_token", "id_token", "_token_version", "client_id", "chatgpt_account_id", "organization_id", "account_uuid", "organization_uuid", "is_fedramp", "scope"} {
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "_token_version", "client_id", "chatgpt_account_id", "chatgpt_user_id", "organization_id", "account_uuid", "organization_uuid", "is_fedramp", "chatgpt_account_is_fedramp", "scope", "auth_mode", "openai_auth_mode", "agent_runtime_id", "agent_private_key", "task_id"} {
 		identity[key] = credentials[key]
 	}
 	return identity

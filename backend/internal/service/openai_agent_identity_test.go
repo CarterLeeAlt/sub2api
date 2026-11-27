@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -145,6 +146,7 @@ func TestEnsureAgentIdentityTaskPersistsAndRedactsCredentials(t *testing.T) {
 		"chatgpt_account_id": "account-test",
 	}}
 	service := &OpenAIGatewayService{accountRepo: repo}
+	repo.account = account
 	require.NoError(t, service.ensureAgentIdentityTask(context.Background(), account, ""))
 	require.Equal(t, "task-persisted", account.GetCredential("task_id"))
 	require.Equal(t, "task-persisted", repo.credentials["task_id"])
@@ -197,6 +199,32 @@ func TestEnsureAgentIdentityTaskSharesLockAcrossServicesForSameAccount(t *testin
 	require.Equal(t, "task-shared", repo.account.GetCredential("task_id"))
 }
 
+func TestAgentTaskRegistrationCannotOverwriteReplacementRuntime(t *testing.T) {
+	key, privateKey := newTestAgentIdentityKey(t)
+	a := &Account{ID: 9002, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"auth_mode": OpenAIAuthModeAgentIdentity, "agent_runtime_id": key.runtimeID, "agent_private_key": privateKey}}
+	started, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		fmt.Fprint(w, `{"task_id":"late-task"}`)
+	}))
+	defer server.Close()
+	old := openAIAgentIdentityAuthAPIBaseURL
+	openAIAgentIdentityAuthAPIBaseURL = server.URL
+	defer func() { openAIAgentIdentityAuthAPIBaseURL = old }()
+	repo := &agentIdentityCredentialsRepo{account: a}
+	done := make(chan error, 1)
+	go func() {
+		done <- ensureAgentIdentityTaskForAccount(t.Context(), repo, nil, &sync.Mutex{}, cloneAgentIdentityTestAccount(a), "")
+	}()
+	<-started
+	a.Credentials["agent_runtime_id"] = "replacement"
+	a.Credentials["task_id"] = "replacement-task"
+	close(release)
+	require.ErrorContains(t, <-done, "identity changed")
+	require.Equal(t, "replacement-task", a.GetCredential("task_id"))
+}
+
 func cloneAgentIdentityTestAccount(account *Account) *Account {
 	copy := *account
 	copy.Credentials = shallowCopyMap(account.Credentials)
@@ -214,11 +242,20 @@ func (r *agentIdentityCredentialsRepo) GetByID(_ context.Context, _ int64) (*Acc
 	return r.account, nil
 }
 
-func (r *agentIdentityCredentialsRepo) UpdateCredentials(_ context.Context, _ int64, credentials map[string]any) error {
+func saveTestAgentCredentials(account *Account, expected, credentials map[string]any) (bool, error) {
+	if account == nil || !reflect.DeepEqual(account.Credentials, expected) {
+		return false, nil
+	}
+	account.Credentials = shallowCopyMap(credentials)
+	return true, nil
+}
+
+func (r *agentIdentityCredentialsRepo) UpdateOpenAIOAuthCredentialsIfUnchanged(_ context.Context, _ int64, expected map[string]any, _ *int64, credentials map[string]any) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.credentials = credentials
-	return nil
+	ok, err := saveTestAgentCredentials(r.account, expected, credentials)
+	r.credentials = r.account.Credentials
+	return ok, err
 }
 
 func mustAgentIdentityJSON(t *testing.T, value any) []byte {

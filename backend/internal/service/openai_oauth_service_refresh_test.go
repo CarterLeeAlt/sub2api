@@ -16,6 +16,7 @@ import (
 
 type openaiOAuthClientRefreshStub struct {
 	refreshCalls int32
+	result       *openai.TokenResponse
 }
 
 func (s *openaiOAuthClientRefreshStub) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
@@ -29,7 +30,36 @@ func (s *openaiOAuthClientRefreshStub) RefreshToken(ctx context.Context, refresh
 
 func (s *openaiOAuthClientRefreshStub) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string) (*openai.TokenResponse, error) {
 	atomic.AddInt32(&s.refreshCalls, 1)
+	if s.result != nil {
+		return s.result, nil
+	}
 	return nil, errors.New("not implemented")
+}
+
+func TestOpenAIManualRefreshUsesOriginalAuthorization(t *testing.T) {
+	for _, concurrent := range []bool{false, true} {
+		account := openAIRefreshTestAccount()
+		repo := &refreshAPIAccountRepo{account: account}
+		if concurrent {
+			repo.beforeSuccessCAS = func(r *refreshAPIAccountRepo) { r.account.Credentials["refresh_token"] = "new-authorization" }
+		}
+		client := &openaiOAuthClientRefreshStub{result: &openai.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", ExpiresIn: 3600}}
+		svc := NewOpenAIOAuthService(nil, client)
+		t.Cleanup(svc.Stop)
+		svc.accountRepo = repo
+		updated, err := svc.RefreshAndSaveAccountToken(t.Context(), account)
+		require.Equal(t, int32(1), client.refreshCalls)
+		if concurrent {
+			require.ErrorContains(t, err, "已保留新凭据")
+			require.Nil(t, updated)
+			require.Equal(t, "new-authorization", account.GetOpenAIRefreshToken())
+			require.Zero(t, repo.updateCalls)
+		} else {
+			require.NoError(t, err)
+			require.Equal(t, "rotated-access", updated.GetOpenAIAccessToken())
+			require.Equal(t, 1, repo.updateCalls)
+		}
+	}
 }
 
 func TestOpenAIOAuthService_RefreshAccountToken_NoRefreshTokenUsesExistingAccessToken(t *testing.T) {

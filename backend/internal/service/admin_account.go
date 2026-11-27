@@ -416,6 +416,64 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
+// CodexImportExpiry distinguishes the administrator's deadline from the effective
+// (possibly shorter) access-token lifetime on a non-refreshable import.
+type CodexImportExpiry struct{ Requested *int64 }
+
+const CodexImportBusinessExpiryKey = "codex_import_business_expires_at"
+
+func applyCodexImportExpiry(account *Account, policy *CodexImportExpiry, effective *int64, previousBusiness any) *int64 {
+	delete(account.Extra, CodexImportBusinessExpiryKey)
+	if !account.IsOpenAIOAuth() {
+		return effective
+	}
+	stored, hasStored := previousBusiness.(string)
+	storedDeadline, parseErr := strconv.ParseInt(stored, 10, 64)
+	hasStored = hasStored && parseErr == nil
+	renewable := account.GetCredential("refresh_token") != "" || account.IsOpenAIAgentIdentity()
+	if policy == nil {
+		if effective != nil || !hasStored {
+			return effective
+		}
+		if renewable {
+			return &storedDeadline
+		}
+		if account.Extra == nil {
+			account.Extra = make(map[string]any)
+		}
+		account.Extra[CodexImportBusinessExpiryKey] = stored
+		return nil
+	}
+	// Unknown legacy deadlines may be contractual; preserve them as business deadlines.
+	var business int64
+	if account.ExpiresAt != nil {
+		business = account.ExpiresAt.Unix()
+	}
+	if hasStored {
+		business = storedDeadline
+	}
+	if policy.Requested != nil {
+		business = *policy.Requested
+	}
+	if renewable {
+		if hasStored || policy.Requested != nil {
+			return &business
+		}
+		return effective
+	}
+	if effective == nil {
+		return nil
+	}
+	if account.Extra == nil {
+		account.Extra = make(map[string]any)
+	}
+	account.Extra[CodexImportBusinessExpiryKey] = strconv.FormatInt(business, 10)
+	if business > 0 && business < *effective {
+		return &business
+	}
+	return effective
+}
+
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
 	if input.Platform == PlatformTypeSafe && input.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
@@ -469,8 +527,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		ComputeQuotaResetAt(account.Extra)
 		NormalizeFixedQuotaWindows(account.Extra)
 	}
-	if input.ExpiresAt != nil && *input.ExpiresAt > 0 {
-		expiresAt := time.Unix(*input.ExpiresAt, 0)
+	expiry := applyCodexImportExpiry(account, input.CodexImportExpiry, input.ExpiresAt, nil)
+	if expiry != nil && *expiry > 0 {
+		expiresAt := time.Unix(*expiry, 0)
 		account.ExpiresAt = &expiresAt
 	}
 	if input.AutoPauseOnExpired != nil {
@@ -616,6 +675,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 	}
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
+	previousBusinessExpiry := account.Extra[CodexImportBusinessExpiryKey]
 	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
 	previousOpenCodeUsageIdentity := openCodeGoUsageIdentity(account)
 	// 安全/身份不变量(影子账号):通用更新路径被 edit/re-auth/refresh/batch 共用,
@@ -866,11 +926,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if input.Status != "" {
 		account.Status = input.Status
 	}
-	if input.ExpiresAt != nil {
-		if *input.ExpiresAt <= 0 {
+	expiry := applyCodexImportExpiry(account, input.CodexImportExpiry, input.ExpiresAt, previousBusinessExpiry)
+	if expiry != nil {
+		if *expiry <= 0 {
 			account.ExpiresAt = nil
 		} else {
-			expiresAt := time.Unix(*input.ExpiresAt, 0)
+			expiresAt := time.Unix(*expiry, 0)
 			account.ExpiresAt = &expiresAt
 		}
 	}
@@ -980,6 +1041,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 // （如 model_rate_limits / passive_usage_* 等）。
 func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error {
 	updates = sanitizedCodexFingerprintExtraUpdates(updates)
+	delete(updates, CodexImportBusinessExpiryKey)
 	delete(updates, UpstreamBillingProbeEnabledExtraKey)
 	delete(updates, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(updates, UpstreamBillingGroupSyncEnabledExtraKey)
@@ -1009,6 +1071,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
 	// Managed probe/session state may only enter through dedicated typed endpoints.
 	input.Extra = sanitizedCodexFingerprintExtraUpdates(input.Extra)
+	delete(input.Extra, CodexImportBusinessExpiryKey)
 	delete(input.Extra, UpstreamBillingProbeEnabledExtraKey)
 	delete(input.Extra, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(input.Extra, UpstreamBillingGroupSyncEnabledExtraKey)

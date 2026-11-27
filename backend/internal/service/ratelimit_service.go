@@ -605,13 +605,19 @@ func (s *RateLimitService) openAICodexQuota429Recovered(ctx context.Context, acc
 	if account == nil || state == nil || !openAICodexSnapshotIdentityTrusted(account) {
 		return false
 	}
+	generation, err := time.Parse(codexWhamGenerationLayout, codexWhamSnapshotGeneration(account.Extra))
+	if err != nil || now.Sub(generation) >= openAICodexAutoPauseStaleAfter {
+		return false
+	}
 	thresholds := map[string]int(nil)
 	if s.settingService != nil {
 		thresholds = s.settingService.GetAccountSchedulingThresholds(ctx)
 	}
 	recoveryThreshold := openAICodex429RecoveryThreshold(account, thresholds)
 	windows := []string{state.Window}
-	if state.Window == "all" {
+	// With proactive pausing enabled, both windows must support recovery. Do
+	// not mix a WHAM generation with percentages from later response headers.
+	if state.Window == "all" || recoveryThreshold < 100 {
 		windows = []string{"5h", "7d"}
 	}
 	for _, window := range windows {
@@ -622,14 +628,13 @@ func (s *RateLimitService) openAICodexQuota429Recovered(ctx context.Context, acc
 		if !present {
 			continue
 		}
-		usedPercent, ok := resolveAccountExtraNumber(account.Extra, "codex_"+window+"_used_percent")
+		usedPercent, ok := resolveAccountExtraNumber(account.Extra, "codex_wham_"+window+"_used_percent")
 		if !ok || usedPercent < 0 || usedPercent >= float64(recoveryThreshold) {
 			return false
 		}
 	}
 
-	decision := EvaluateAccountSchedulingThreshold(account, thresholds, now)
-	return !validAccountSchedulingThresholdPause(decision, now)
+	return true
 }
 
 // ReconcileOpenAICodexQuotaRateLimitIfSnapshotUnchanged clears an account-level

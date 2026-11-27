@@ -61,6 +61,13 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 			if readErr != nil {
 				return nil, nil, newUpstreamModelSyncUpstreamError("Failed to read upstream error", readErr)
 			}
+			if credentialAccount.IsOpenAIAgentIdentity() && !agentIdentityTaskRecoveryWasTried(ctx) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, errorBody) {
+				_ = resp.Body.Close()
+				if err := ensureAgentIdentityTaskForAccount(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount, credentialAccount.GetCredential("task_id")); err != nil {
+					return nil, nil, newUpstreamModelSyncUpstreamError("Failed to renew Agent Identity task", err)
+				}
+				return s.fetchOpenAIOAuthUpstreamModels(markAgentIdentityTaskRecoveryTried(ctx), account)
+			}
 			_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "models", resp.StatusCode, errorBody)
 			return nil, nil, &UpstreamModelSyncError{
 				Kind:       UpstreamModelSyncErrorUpstream,
