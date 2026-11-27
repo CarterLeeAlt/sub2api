@@ -75,14 +75,16 @@ func signedThinkingHistoryBody() []byte {
 }
 
 func TestFilterThinkingBlocksSignedHistorySkipsDecode(t *testing.T) {
-	body := signedThinkingHistoryBody()
-	allocs := testing.AllocsPerRun(5, func() {
-		got := filterThinkingBlocksInternal(body, false)
-		if &got[0] != &body[0] {
-			t.Fatal("valid signed history must be returned unchanged")
-		}
+	runIsolatedAllocationTest(t, func() {
+		body := signedThinkingHistoryBody()
+		allocs := testing.AllocsPerRun(5, func() {
+			got := filterThinkingBlocksInternal(body, false)
+			if &got[0] != &body[0] {
+				t.Fatal("valid signed history must be returned unchanged")
+			}
+		})
+		require.Less(t, allocs, float64(16), "allocs: %v", allocs)
 	})
-	require.Less(t, allocs, float64(16), "allocs: %v", allocs)
 }
 
 func FuzzThinkingBlocksNeedFiltering(f *testing.F) {
