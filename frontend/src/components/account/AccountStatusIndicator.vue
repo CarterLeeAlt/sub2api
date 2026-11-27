@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-wrap items-start gap-2">
+  <div class="flex flex-col items-start gap-2">
     <div v-if="(modelCatalogPending || modelCatalogFailed) && !hasError && health?.kind !== 'auth_refresh_required'" class="flex flex-col items-start gap-1" :title="modelCatalog.error || t('admin.accounts.modelCatalog.pending')">
       <span class="badge text-xs badge-warning">{{ t(modelCatalogPending ? 'admin.accounts.modelCatalog.pendingStatus' : 'admin.accounts.modelCatalog.failedStatus') }}</span>
       <span v-if="modelCatalog.synced_at" class="text-[11px] text-gray-400">{{ t('admin.accounts.modelCatalog.lastSuccess') }}: {{ formatDateTimeToMinute(modelCatalog.synced_at) }}</span>
@@ -87,17 +87,8 @@
     </div>
 
     <!-- Model Status Indicators (普通限流 / 超量请求中) -->
-    <div
-      v-if="activeModelStatuses.length > 0"
-      :class="[
-        activeModelStatuses.length <= 4
-          ? 'flex flex-col gap-1'
-          : activeModelStatuses.length <= 8
-            ? 'columns-2 gap-x-2'
-            : 'columns-3 gap-x-2'
-      ]"
-    >
-      <div v-for="item in activeModelStatuses" :key="`${item.kind}-${item.model}`" class="group relative mb-1 break-inside-avoid">
+    <div v-if="activeModelStatuses.length > 0" class="flex flex-col items-start gap-1">
+      <div v-for="item in activeModelStatuses" :key="`${item.kind}-${item.model}`" class="group relative">
         <!-- 积分已用尽 -->
         <span
           v-if="item.kind === 'credits_exhausted'"

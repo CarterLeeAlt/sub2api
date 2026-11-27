@@ -976,10 +976,10 @@
             :platform="account?.platform || 'anthropic'"
             :account-id="account?.id"
             :show-sync-button="account.platform !== 'grok' || !account.id"
-            @upstream-sync-finished="refreshGrokDiagnostics"
+            @upstream-sync-finished="account.platform === 'grok' ? refreshGrokDiagnostics() : refreshModelCatalogStatus()"
             :automatic-catalog="automaticModelCatalogEligible"
             :catalog-source="modelCatalogSource"
-            :catalog-state="accountModelCatalog(account)"
+            :catalog-state="modelCatalogStatus"
             @catalog-source="selectModelCatalogSource"
           />
 
@@ -1248,7 +1248,7 @@
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
             <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id"
-              :automatic-catalog="automaticModelCatalogEligible" :catalog-source="modelCatalogSource" :catalog-state="accountModelCatalog(account)" @catalog-source="selectModelCatalogSource" />
+              :automatic-catalog="automaticModelCatalogEligible" :catalog-source="modelCatalogSource" :catalog-state="modelCatalogStatus" @catalog-source="selectModelCatalogSource" />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
               <span v-if="allowedModels.length === 0 && modelMappings.length === 0 && !(automaticModelCatalogEligible && modelCatalogSource === 'upstream')">{{
@@ -3390,6 +3390,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 
 import { adminAPI } from '@/api/admin'
+import { usePageVisible } from '@/composables/usePageVisible'
 import { useQuotaNotifyState } from '@/composables/useQuotaNotifyState'
 import type {
   Account,
@@ -3415,7 +3416,7 @@ import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
 import UpstreamGroupSyncButton from '@/components/account/UpstreamGroupSyncButton.vue'
 import OpenAIImageSizeTiersField from '@/components/account/OpenAIImageSizeTiersField.vue'
-import { accountModelCatalog, supportsAutomaticModelCatalog, type ModelCatalogSource } from '@/components/account/modelCatalog'
+import { accountModelCatalog, supportsAutomaticModelCatalog, type ModelCatalogSource, type ModelCatalogState } from '@/components/account/modelCatalog'
 import {
   OPENAI_IMAGE_SIZE_TIERS,
   applyOpenAIImageSizeTiersToExtra,
@@ -4168,6 +4169,45 @@ const modelCatalogEdited = ref(false)
 const modelCatalogRevision = ref('')
 let initialModelMappings = ''
 const automaticModelCatalogEligible = computed(() => props.account != null && supportsAutomaticModelCatalog({ ...props.account, extra: { ...props.account.extra, openai_passthrough: openaiPassthroughEnabled.value, openai_oauth_passthrough: false } }))
+const liveModelCatalogAccountId = computed(() => {
+  const { show, account } = props
+  return show && account && supportsAutomaticModelCatalog(account) && accountModelCatalog(account).source === 'upstream'
+    ? account.id
+    : null
+})
+const observedModelCatalog = ref<ModelCatalogState | null>(null)
+const modelCatalogStatus = computed(() => observedModelCatalog.value ?? accountModelCatalog(props.account))
+let modelCatalogStatusRequest: AbortController | null = null
+
+const refreshModelCatalogStatus = async () => {
+  const accountId = liveModelCatalogAccountId.value
+  if (accountId === null || modelCatalogStatusRequest || document.hidden) return
+
+  const controller = new AbortController()
+  modelCatalogStatusRequest = controller
+  try {
+    const account = await adminAPI.accounts.getById(accountId, controller.signal)
+    if (!controller.signal.aborted) observedModelCatalog.value = accountModelCatalog(account)
+  } catch {
+    // Keep the last server status until the next successful read.
+  } finally {
+    if (modelCatalogStatusRequest === controller) modelCatalogStatusRequest = null
+  }
+}
+
+watch(liveModelCatalogAccountId, (accountId, _, onCleanup) => {
+  observedModelCatalog.value = null
+  if (accountId === null) return
+
+  const timer = setInterval(refreshModelCatalogStatus, 10_000)
+  onCleanup(() => {
+    clearInterval(timer)
+    modelCatalogStatusRequest?.abort()
+    modelCatalogStatusRequest = null
+  })
+}, { immediate: true })
+usePageVisible(refreshModelCatalogStatus)
+
 const selectModelCatalogSource = (source: ModelCatalogSource) => {
   if (!automaticModelCatalogEligible.value) return
   modelCatalogSource.value = source

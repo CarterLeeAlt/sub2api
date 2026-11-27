@@ -13,6 +13,10 @@ const { updateAccountMock, checkMixedChannelRiskMock, previewUpstreamGroup, auth
   checkMixedChannelRiskMock: vi.fn(),
   authIsSimpleMode: { value: true }
 }))
+const { getAccountMock, syncUpstreamModelsMock } = vi.hoisted(() => ({
+  getAccountMock: vi.fn(),
+  syncUpstreamModelsMock: vi.fn()
+}))
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
@@ -33,6 +37,7 @@ vi.mock('@/stores/auth', () => ({
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
+      getById: getAccountMock,
       update: updateAccountMock,
       previewUpstreamGroup,
       checkMixedChannelRisk: checkMixedChannelRiskMock
@@ -48,6 +53,7 @@ vi.mock('@/api/admin', () => ({
 }))
 
 vi.mock('@/api/admin/accounts', () => ({
+  accountsAPI: { getById: getAccountMock, syncUpstreamModels: syncUpstreamModelsMock },
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
@@ -326,7 +332,7 @@ function buildOpenAIOAuthParentAccount() {
   } as any
 }
 
-function mountModal(account = buildAccount(), renderGroupSelector = false) {
+function mountModal(account = buildAccount(), renderGroupSelector = false, renderModelSelector = false) {
   return mount(EditAccountModal, {
     props: {
       show: true,
@@ -341,7 +347,7 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
         Icon: true,
         ProxySelector: true,
         GroupSelector: renderGroupSelector ? false : GroupSelectorStub,
-        ModelWhitelistSelector: ModelWhitelistSelectorStub
+        ModelWhitelistSelector: renderModelSelector ? false : ModelWhitelistSelectorStub
       }
     }
   })
@@ -371,6 +377,105 @@ describe('EditAccountModal', () => {
   })
 
   afterEach(() => vi.useRealTimers())
+
+  describe('live upstream model catalog status', () => {
+    const oldError = 'OpenAI image catalog is not available yet'
+    const oldSync = '2026-11-28T02:46:24+08:00'
+    const newSync = '2026-11-28T03:53:16+08:00'
+    let restoreDocumentHidden: () => void
+    const makeCatalogAccount = (id = 21) => ({
+      ...buildOpenAIOAuthParentAccount(),
+      id,
+      credentials: { access_token: 'fixture', model_mapping: { 'gpt-6.2-sol': 'gpt-6.2-sol' } },
+      extra: { model_catalog: { source: 'upstream', revision: 'r1', ready: true, synced_at: oldSync, error: oldError } }
+    })
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+      restoreDocumentHidden = () => hidden.mockRestore()
+      getAccountMock.mockReset()
+      syncUpstreamModelsMock.mockReset()
+    })
+
+    afterEach(() => restoreDocumentHidden())
+
+    it('replaces a saved warning after recovery without overwriting edits or saving the form', async () => {
+      const account = makeCatalogAccount()
+      getAccountMock.mockRejectedValueOnce(new Error('network unavailable')).mockResolvedValueOnce({
+        ...account,
+        name: 'server name',
+        credentials: { model_mapping: { 'gpt-6.2-astra': 'gpt-6.2-astra' } },
+        extra: { model_catalog: { source: 'upstream', revision: 'r2', ready: true, synced_at: newSync } }
+      })
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      const wrapper = mountModal(account, false, true)
+      const status = () => wrapper.get('[data-testid="model-catalog-status"]').text()
+      const name = wrapper.get<HTMLInputElement>('[data-tour="edit-account-form-name"]')
+      const customModel = wrapper.get('input[placeholder="admin.accounts.enterCustomModelName"]')
+
+      try {
+        expect(status()).toContain(oldError)
+        await name.setValue('unsaved name')
+        await customModel.setValue('unsaved-model')
+        await customModel.trigger('keydown.enter')
+        expect(wrapper.text()).toContain('unsaved-model')
+
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect(status()).toContain(oldError)
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect(getAccountMock).toHaveBeenCalledTimes(2)
+        expect(status()).not.toContain(oldError)
+        expect(status()).toContain(new Date(newSync).toLocaleString())
+        expect(wrapper.text()).toContain('unsaved-model')
+        expect(wrapper.text()).not.toContain('gpt-6.2-astra')
+        expect(name.element.value).toBe('unsaved name')
+        expect(updateAccountMock).not.toHaveBeenCalled()
+
+        await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+        expect(updateAccountMock.mock.calls[0]?.[1]?.model_catalog).toEqual({ source: 'custom', revision: 'r1' })
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
+    it('refreshes after manual sync, ignores old in-flight reads, and stops reading on close', async () => {
+      const account = makeCatalogAccount()
+      const nextAccount = makeCatalogAccount(57)
+      const recovered = { ...nextAccount.extra.model_catalog, synced_at: newSync, error: '' }
+      let resolveOldRead: (result: typeof account) => void = () => {}
+      getAccountMock.mockImplementationOnce(() => new Promise(resolve => { resolveOldRead = resolve }))
+      getAccountMock.mockResolvedValueOnce({ ...nextAccount, extra: { model_catalog: recovered } })
+      syncUpstreamModelsMock.mockResolvedValueOnce({ models: ['gpt-6.2-sol'] })
+      const wrapper = mountModal(account, false, true)
+      try {
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(getAccountMock).toHaveBeenCalledTimes(1)
+        const oldSignal = getAccountMock.mock.calls[0][1] as AbortSignal
+        await wrapper.setProps({ account: nextAccount })
+        expect(oldSignal.aborted).toBe(true)
+
+        await wrapper.get('[data-testid="sync-upstream-models"]').trigger('click')
+        await flushPromises()
+        expect(getAccountMock).toHaveBeenLastCalledWith(57, expect.any(AbortSignal))
+        expect(wrapper.get('[data-testid="model-catalog-status"]').text()).not.toContain(oldError)
+        resolveOldRead(account)
+        await flushPromises()
+        expect(wrapper.get('[data-testid="model-catalog-status"]').text()).toContain(new Date(newSync).toLocaleString())
+
+        await wrapper.setProps({ show: false })
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect(getAccountMock).toHaveBeenCalledTimes(2)
+        await wrapper.setProps({ show: true })
+        expect(wrapper.get('[data-testid="model-catalog-status"]').text()).toContain(oldError)
+        getAccountMock.mockResolvedValueOnce({ ...nextAccount, extra: { model_catalog: recovered } })
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect(wrapper.get('[data-testid="model-catalog-status"]').text()).not.toContain(oldError)
+      } finally {
+        wrapper.unmount()
+      }
+    })
+  })
 
   it('uses the saved connection until the administrator changes the upstream', async () => {
     const account = buildAccount()

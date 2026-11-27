@@ -173,11 +173,13 @@ export async function listWithEtag(
 /**
  * Get account by ID
  * @param id - Account ID
+ * @param signal - Optional cancellation signal
  * @returns Account details
  */
-export async function getById(id: number): Promise<Account> {
-  const { data } = await apiClient.get<Account>(`/admin/accounts/${id}`)
-  return data
+export async function getById(id: number, signal?: AbortSignal): Promise<Account> {
+  const path = `/admin/accounts/${id}`
+  const response = signal ? await apiClient.get<Account>(path, { signal }) : await apiClient.get<Account>(path)
+  return response.data
 }
 
 /**
