@@ -282,7 +282,9 @@ func TestFetchUpstreamSupportedModelsSupportsOpenAIOAuth(t *testing.T) {
 	require.Equal(t, "9.9.9", gotClientVersion)
 }
 
-func TestFetchUpstreamSupportedModelsOpenAIOAuthAddsImageModelWithoutLegacyMainModel(t *testing.T) {
+func TestFetchUpstreamSupportedModelsOpenAIOAuthPreservesManifestImageAfterCatalogLoads(t *testing.T) {
+	previous := officialImageModels.Swap(&imageSpecSnapshot{Lifecycle: &imageModelLifecycle{}})
+	defer officialImageModels.Store(previous)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.6-sol","supported_in_api":true,"priority":1,"input_modalities":["text","image"]},{"slug":"gpt-5.5","supported_in_api":true,"priority":2,"input_modalities":["text"]},{"slug":"gpt-image-2"},{"slug":"gpt-image-2"}]}`))

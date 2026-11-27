@@ -63,11 +63,21 @@ type openAIImagesFailoverHTTPUpstream struct {
 	service.HTTPUpstream
 	mu         sync.Mutex
 	accountIDs []int64
+	models     []string
 }
 
-func (u *openAIImagesFailoverHTTPUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+func (u *openAIImagesFailoverHTTPUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	var model string
+	if req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		model = gjson.GetBytes(body, "model").String()
+	}
 	u.mu.Lock()
 	u.accountIDs = append(u.accountIDs, accountID)
+	u.models = append(u.models, model)
 	u.mu.Unlock()
 	return &http.Response{
 		StatusCode: http.StatusOK,
@@ -85,6 +95,62 @@ func (u *openAIImagesFailoverHTTPUpstream) calls() []int64 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return append([]int64(nil), u.accountIDs...)
+}
+
+func TestOpenAIGatewayHandlerImages_RequiresModelAndOnlySwitchesAccounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const sunburst = "gpt-image-2.6-sunburst"
+	const flare = "gpt-image-2.6-flare"
+	newAccount := func(id int64, model string) service.Account {
+		account := newOpenAIImagesSizeRoutingAccount(id, "1K", "2K", "4K")
+		account.Credentials["model_mapping"] = map[string]any{model: model}
+		service.SetAccountModelCatalog(&account, service.AccountModelCatalog{Source: "upstream", Ready: true})
+		return account
+	}
+	for _, tc := range []struct {
+		name       string
+		body       string
+		accounts   []service.Account
+		wantStatus int
+		wantIDs    []int64
+		wantModels []string
+	}{
+		{
+			name:       "Sunburst only switches between its accounts",
+			body:       `{"model":"gpt-image-2.6-sunburst","prompt":"draw"}`,
+			accounts:   []service.Account{newAccount(1, flare), newAccount(2, sunburst), newAccount(3, sunburst)},
+			wantStatus: http.StatusBadGateway,
+			wantIDs:    []int64{2, 3},
+			wantModels: []string{sunburst, sunburst},
+		},
+		{
+			name:       "missing model is rejected even when an account is available",
+			body:       `{"prompt":"draw"}`,
+			accounts:   []service.Account{newAccount(1, flare)},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "explicit Flare selects Flare even when Sunburst is available",
+			body:       `{"model":"gpt-image-2.6-flare","prompt":"draw"}`,
+			accounts:   []service.Account{newAccount(1, sunburst), newAccount(2, flare)},
+			wantStatus: http.StatusBadGateway,
+			wantIDs:    []int64{2},
+			wantModels: []string{flare},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &openAIImagesFailoverHTTPUpstream{}
+			handler := newOpenAIImagesSizeRoutingTestHandler(t, tc.accounts, upstream)
+			response, _ := serveOpenAIImagesSizeRoutingRequest(handler, 3144, tc.body)
+			require.Equal(t, tc.wantStatus, response.Code, response.Body.String())
+			require.Equal(t, tc.wantIDs, upstream.calls())
+			require.Equal(t, tc.wantModels, upstream.models)
+			if tc.wantStatus == http.StatusBadRequest {
+				require.Equal(t, "invalid_request_error", gjson.GetBytes(response.Body.Bytes(), "error.type").String())
+				require.Equal(t, "model is required", gjson.GetBytes(response.Body.Bytes(), "error.message").String())
+			}
+		})
+	}
 }
 
 func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhenExhausted(t *testing.T) {

@@ -283,7 +283,6 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEditWithMaskAndNa
 	require.NotNil(t, parsed)
 	require.Len(t, parsed.Uploads, 1)
 	require.NotNil(t, parsed.MaskUpload)
-	require.True(t, parsed.HasMask)
 	require.Equal(t, "png", parsed.OutputFormat)
 	require.Equal(t, "high", parsed.InputFidelity)
 	require.NotNil(t, parsed.OutputCompression)
@@ -293,27 +292,30 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEditWithMaskAndNa
 	require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
 }
 
-func TestOpenAIGatewayServiceParseOpenAIImagesRequest_PromptOnlyDefaultsRemainBasic(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	body := []byte(`{"prompt":"draw a cat"}`)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = req
-
-	svc := &OpenAIGatewayService{}
-	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+func TestOpenAIGatewayServiceParseOpenAIImagesRequest_ModelRequired(t *testing.T) {
+	for _, body := range []string{`{"prompt":"draw a cat"}`, `{"model":""}`, `{"model":"  "}`, `{"model":null}`} {
+		c, _ := newOpenAIImagesTestContext(t, []byte(body))
+		_, err := (&OpenAIGatewayService{}).ParseOpenAIImagesRequest(c, []byte(body))
+		require.EqualError(t, err, "model is required")
+	}
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	require.NoError(t, form.WriteField("prompt", "edit the image"))
+	part, err := form.CreateFormFile("image", "input.png")
 	require.NoError(t, err)
-	require.NotNil(t, parsed)
-	require.Equal(t, "gpt-image-2", parsed.Model)
-	require.Equal(t, OpenAIImagesCapabilityBasic, parsed.RequiredCapability)
+	_, err = io.WriteString(part, "fixture-image")
+	require.NoError(t, err)
+	require.NoError(t, form.Close())
+	c, _ := newOpenAIImagesTestContext(t, body.Bytes())
+	c.Request.URL.Path = "/v1/images/edits"
+	c.Request.Header.Set("Content-Type", form.FormDataContentType())
+	_, err = (&OpenAIGatewayService{}).ParseOpenAIImagesRequest(c, body.Bytes())
+	require.EqualError(t, err, "model is required")
 }
 
 func TestOpenAIGatewayServiceParseOpenAIImagesRequest_ExplicitSizeRequiresNativeCapability(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	body := []byte(`{"prompt":"draw a cat","size":"1024x1024"}`)
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","size":"1024x1024"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -396,7 +398,6 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_JSONEditURLs(t *testing.T)
 	require.Equal(t, 90, *parsed.OutputCompression)
 	require.NotNil(t, parsed.PartialImages)
 	require.Equal(t, 2, *parsed.PartialImages)
-	require.True(t, parsed.HasMask)
 	require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
 }
 

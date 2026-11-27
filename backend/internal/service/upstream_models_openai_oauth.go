@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -136,15 +137,21 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 	if len(models) == 0 {
 		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
-	if openAICodexImageGenerationEligible(credentialAccount, manifestModels) {
-		spec := officialImageModels.Load()
-		if spec == nil {
-			// Keep a saved automatic whitelist intact while the shared catalog loads.
-			if account.ModelCatalog().Ready {
-				return nil, nil, newUpstreamModelSyncUpstreamError("OpenAI image catalog is not available yet", nil)
-			}
-			return models, body, nil
+	spec := officialImageModels.Load()
+	canGenerate := openAICodexImageGenerationEligible(credentialAccount, manifestModels)
+	if spec == nil || spec.Lifecycle == nil {
+		var officialModels map[string]imageEndpointSupport
+		if spec != nil {
+			officialModels = spec.Models
 		}
+		textModels := slices.DeleteFunc(models, func(id string) bool { return isOfficialImageModelID(id, officialModels) })
+		// Keep a saved automatic whitelist intact while the shared catalog loads.
+		if len(textModels) == 0 || (canGenerate && account.ModelCatalog().Ready) {
+			return nil, nil, newUpstreamModelSyncUpstreamError("OpenAI image catalog is not available yet", nil)
+		}
+		return textModels, body, nil
+	}
+	if canGenerate {
 		excluded := make(map[string]bool)
 		for _, entry := range manifestModels {
 			if entry.SupportedInAPI != nil && !*entry.SupportedInAPI {
@@ -156,7 +163,10 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 				models = append(models, id)
 			}
 		}
-		models = dedupeAndSortModelIDs(models)
+	}
+	models = spec.Lifecycle.filterModelIDs(models)
+	if len(models) == 0 {
+		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
 	return models, body, nil
 }

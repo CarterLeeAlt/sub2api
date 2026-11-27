@@ -23,10 +23,11 @@ type imageEndpointSupport struct {
 }
 
 type imageSpecSnapshot struct {
-	Models  map[string]imageEndpointSupport `json:"models"`
-	ETag    string                          `json:"etag"`
-	Checked time.Time                       `json:"checked"`
-	Updated time.Time                       `json:"updated"`
+	Models    map[string]imageEndpointSupport `json:"models"`
+	Lifecycle *imageModelLifecycle            `json:"lifecycle,omitempty"`
+	ETag      string                          `json:"etag"`
+	Checked   time.Time                       `json:"checked"`
+	Updated   time.Time                       `json:"updated"`
 }
 
 // Immutable snapshots are shared by parsing, routing and account discovery.
@@ -146,7 +147,9 @@ func (s *OpenAIModelCatalogRefreshService) refreshImageSpec(ctx context.Context)
 	}
 	now := time.Now().UTC()
 	s.nextImageSpecFetch = now.Add(time.Hour)
-	updated, fetchErr := fetchOfficialImageSpec(ctx, &http.Client{Timeout: 25 * time.Second}, officialImageSpecURL, snapshot, now)
+	fetchCtx, cancel := context.WithTimeout(ctx, 50*time.Second)
+	defer cancel()
+	updated, fetchErr := fetchOfficialImageCatalog(fetchCtx, &http.Client{Timeout: 25 * time.Second}, officialImageSpecURL, officialModelDocsURL, snapshot, now)
 	// Persist failed checks too. A change of leader must not start a second
 	// download within the hour or replace the last usable catalog.
 	updated.Checked = now

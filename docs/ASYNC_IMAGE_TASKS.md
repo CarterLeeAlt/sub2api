@@ -14,7 +14,7 @@ GET  /v1/images/tasks/{task_id}
 
 The aliases are `/images/generations/async`, `/images/edits/async`, and `/images/tasks/{task_id}`.
 
-Only OpenAI and Grok groups are supported. Requests use the same JSON or multipart payload as the corresponding synchronous endpoint. Streaming image requests are rejected because a polled task returns one final JSON result.
+Only OpenAI and Grok groups are supported. Requests use the same JSON or multipart payload as the corresponding synchronous endpoint. Both forms require `model`. If it is missing or blank, the API returns HTTP 400 with `error.message` set to `model is required`. Streaming image requests are rejected because a polled task returns one final JSON result.
 
 ## Enabling the feature (object storage)
 

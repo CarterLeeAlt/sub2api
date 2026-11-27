@@ -129,10 +129,6 @@ func TestOpenAIImagesComplexityLegacyBridgeAndAPIKey(t *testing.T) {
 			}
 		})
 	}
-	c, _ := newOpenAIImagesTestContext(t, []byte(`{"prompt":"draw","complexity":"low"}`))
-	parsed, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, []byte(`{"prompt":"draw","complexity":"low"}`))
-	require.NoError(t, err)
-	require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
 }
 
 func TestGPTImage26OutputFormats(t *testing.T) {

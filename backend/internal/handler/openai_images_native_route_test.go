@@ -117,7 +117,10 @@ func (rejectedImageUpload) Save(context.Context, string, string, []byte) (string
 }
 
 func TestAsyncImageLedgerMatchesPollResult(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, "gpt-image-2.6-sunburst", gjson.GetBytes(body, "model").String())
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"data":[{"b64_json":"AA=="}],"usage":{"input_tokens":4,"output_tokens":8}}`)
 	}))
@@ -139,14 +142,25 @@ func TestAsyncImageLedgerMatchesPollResult(t *testing.T) {
 			router := gin.New()
 			router.Use(nativeImageTestIdentity)
 			router.POST("/v1/images/generations/async", h.Submit)
+			router.POST("/v1/images/edits/async", h.Submit)
 			router.GET("/v1/images/tasks/:task_id", h.Get)
-			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations/async", strings.NewReader(`{"model":"gpt-image-2","prompt":"draw","n":3}`))
+			for _, path := range []string{"/v1/images/generations/async", "/v1/images/edits/async"} {
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"prompt":"draw","stream":true}`))
+				req.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, req)
+				require.Equal(t, http.StatusBadRequest, response.Code)
+				require.Equal(t, "model is required", gjson.Get(response.Body.String(), "error.message").String())
+			}
+			require.Empty(t, store.tasks)
+			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations/async", strings.NewReader(`{"model":"gpt-image-2.6-sunburst","prompt":"draw","n":3}`))
 			req.Header.Set("Content-Type", "application/json")
 			accepted := httptest.NewRecorder()
 			router.ServeHTTP(accepted, req)
 			require.Equal(t, 202, accepted.Code)
 			select {
 			case log := <-logs.created:
+				require.Equal(t, "gpt-image-2.6-sunburst", log.Model)
 				require.Equal(t, tc.count, log.ImageCount)
 				require.Equal(t, 4, log.InputTokens)
 				require.Equal(t, 8, log.OutputTokens)

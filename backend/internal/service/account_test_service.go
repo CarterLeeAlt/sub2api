@@ -3205,9 +3205,8 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 		Model:    strings.TrimSpace(modelID),
 		Prompt:   prompt,
 		Size:     account.OpenAIImageTestSize(),
+		N:        1,
 	}
-	parsed.ExplicitSize = parsed.Size != ""
-	applyOpenAIImagesDefaults(parsed)
 
 	upstreamModel := account.GetMappedModel(parsed.Model)
 	if account.Type == AccountTypeOAuth {

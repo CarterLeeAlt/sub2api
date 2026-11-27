@@ -1889,9 +1889,6 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	if mapped := strings.TrimSpace(channelMappedModel); !account.IsOpenAIOAuth() && mapped != "" {
 		requestModel = mapped
 	}
-	if requestModel == "" {
-		requestModel = "gpt-image-2"
-	}
 	if err := validateOpenAIImagesModel(requestModel); err != nil {
 		return nil, err
 	}

@@ -16,6 +16,18 @@ import (
 
 const fixtureImageSpec = `{"paths":{"/images/generations":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Generate"}}}}}},"/images/edits":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"model":{"enum":["fixture-painter"]}}}}}}}}},"components":{"schemas":{"Generate":{"properties":{"model":{"anyOf":[{"type":"string"},{"enum":["fixture-painter","fixture-retired"],"x-openai-enum-deprecations":{"fixture-retired":{"message":"This model was retired on July 2."}}}]}}}}}}`
 
+const fixtureImageDeprecations = "## Upcoming deprecations\n\n" +
+	"| Shutdown date | Affected model | Status | Recommended replacement |\n" +
+	"| --- | --- | --- | --- |\n" +
+	"| **Dec 1, 2026** | `gpt-image-1-mini`, `gpt-image-1.5`, `chatgpt-image-latest` | Deprecated | `gpt-image-2.6-flare` |\n" +
+	"| **Feb 10, 2027** | `gpt-image-2`, `gpt-image-2-2026-04-21`, `fixture-driver` | Deprecated | `gpt-image-2.6-sunburst` |\n\n" +
+	"## Feature and endpoint deprecations\n" +
+	"| Feb 15, 2027 | `gpt-image-2.5-flare` | Deprecated | Test feature notice |\n\n" +
+	"## Past deprecations\n\n" +
+	"| Shutdown date | Affected model or feature | Listed replacement |\n" +
+	"| --- | --- | --- |\n" +
+	"| **Oct 23, 2026** | `gpt-image-1` | `gpt-image-2.5-flare` |\n"
+
 func TestOfficialImageCatalogSharedHourlyCheck(t *testing.T) {
 	previous := officialImageModels.Swap(nil)
 	defer officialImageModels.Store(previous)
@@ -70,12 +82,96 @@ func TestOfficialImageCatalogHTTP(t *testing.T) {
 	require.Equal(t, first, got)
 }
 
+func TestOAuthImageSyncFiltersDeprecationsAndDefaultSnapshots(t *testing.T) {
+	active := []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"}
+	imageIDs := append(append([]string{}, active...), "gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08",
+		"gpt-image-1-mini", "gpt-image-1.5", "chatgpt-image-latest", "gpt-image-2", "gpt-image-2-2026-04-21")
+	spec := strings.ReplaceAll(fixtureImageSpec, `"fixture-painter"`, `"`+strings.Join(imageIDs, `","`)+`"`)
+	deprecations := fixtureImageDeprecations
+	flareSnapshot := "gpt-image-2.5-flare-2026-09-08"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/openapi.json":
+			w.Header().Set("ETag", `"spec"`)
+			if r.Header.Get("If-None-Match") == `"spec"` {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			_, _ = io.WriteString(w, spec)
+		case "/deprecations.md":
+			_, _ = io.WriteString(w, deprecations)
+		case "/models/gpt-image-2.5-flare.md":
+			_, _ = fmt.Fprintf(w, "# GPT Image\n\nModel ID: `gpt-image-2.5-flare`\n\n- Default snapshot: `%s`\n", flareSnapshot)
+		case "/models/gpt-image-2.5-sunburst.md":
+			_, _ = io.WriteString(w, "# GPT Image\n\nModel ID: `gpt-image-2.5-sunburst`\n\n- Default snapshot: `gpt-image-2.5-sunburst-2026-09-08`\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	base := imageSpecSnapshot{}
+	first, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, base, now)
+	require.NoError(t, err)
+	require.Equal(t, active, first.Lifecycle.filterModelIDs(imageIDs))
+
+	previous := officialImageModels.Swap(&first)
+	defer officialImageModels.Store(previous)
+	account := directImagesTestAccount()
+	account.Credentials["plan_type"] = "team"
+	SetAccountModelCatalog(account, AccountModelCatalog{Source: "upstream", Revision: "initial", Ready: true})
+	ReplaceAccountModelWhitelist(account, imageIDs)
+	store := &catalogRefreshTestStore{accounts: []Account{*account}}
+	manifest := `{"models":[{"slug":"fixture-driver","supported_in_api":true,"input_modalities":["text","image"],"reasoning":false,"context_window":1000},{"slug":"gpt-image-2"},{"slug":"gpt-image-1"}]}`
+	upstream := &codexModelsHTTPUpstreamStub{do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+		require.Equal(t, http.MethodGet, req.Method)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(manifest))}, nil
+	}}
+	tester := &AccountTestService{httpUpstream: upstream}
+	manual, err := tester.SyncUpstreamModelCatalog(t.Context(), account)
+	require.NoError(t, err)
+	models := append([]string{"fixture-driver"}, active...)
+	require.Equal(t, models, manual.Models)
+	worker := NewOpenAIModelCatalogRefreshService(store, tester, &fakeLeaderLockCache{})
+	defer worker.Stop()
+	require.NoError(t, worker.RunOnce(t.Context()))
+	require.Len(t, store.saved, 1)
+	for _, id := range models {
+		require.True(t, store.saved[0].IsModelSupported(id), id)
+	}
+	for _, id := range append(imageIDs[len(active):], "gpt-image-1") {
+		require.False(t, store.saved[0].IsModelSupported(id), id)
+	}
+
+	// A newer default does not make the previous snapshot a duplicate.
+	flareSnapshot = "gpt-image-2.5-flare-2026-12-01"
+	next, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, first, now.Add(time.Hour))
+	require.NoError(t, err)
+	require.Contains(t, next.Lifecycle.filterModelIDs(imageIDs), "gpt-image-2.5-flare-2026-09-08")
+	require.Equal(t, []string{"gpt-image-2.5-sunburst-2026-09-08"}, first.Lifecycle.filterModelIDs([]string{"gpt-image-2.5-sunburst-2026-09-08"}))
+
+	deprecations = strings.ReplaceAll(fixtureImageDeprecations, "Affected model", "Rearranged column")
+	retained, err := fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, first, now.Add(time.Hour))
+	require.Error(t, err)
+	require.Equal(t, first, retained)
+	deprecations = fixtureImageDeprecations
+	flareSnapshot = ""
+	retained, err = fetchOfficialImageCatalog(t.Context(), server.Client(), server.URL+"/openapi.json", server.URL, first, now.Add(time.Hour))
+	require.Error(t, err)
+	require.Equal(t, first, retained)
+
+	officialImageModels.Store(&imageSpecSnapshot{Models: first.Models})
+	_, err = tester.SyncUpstreamModelCatalog(t.Context(), account)
+	require.ErrorContains(t, err, "image catalog is not available yet")
+}
+
 func TestOAuthSyncListsOfficialImageModelsWithoutGeneratingImages(t *testing.T) {
 	models, err := parseOfficialImageModels([]byte(fixtureImageSpec))
 	require.NoError(t, err)
 	models["withheld-painter"] = imageEndpointSupport{Generate: true}
 	models["editing-only"] = imageEndpointSupport{Edit: true}
-	previous := officialImageModels.Swap(&imageSpecSnapshot{Models: models, Updated: time.Now()})
+	previous := officialImageModels.Swap(&imageSpecSnapshot{Models: models, Lifecycle: &imageModelLifecycle{}, Updated: time.Now()})
 	defer officialImageModels.Store(previous)
 	a := directImagesTestAccount()
 	a.Credentials["plan_type"] = "team"
