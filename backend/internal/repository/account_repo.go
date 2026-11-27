@@ -3391,26 +3391,7 @@ func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 		return false, nil
 	}
 	if weeklyReset != nil {
-		previous, err := json.Marshal(weeklyReset.Previous)
-		if err != nil {
-			return false, err
-		}
-		current, err := json.Marshal(weeklyReset.Current)
-		if err != nil {
-			return false, err
-		}
-		var periodStart *time.Time
-		if !weeklyReset.Start.IsZero() {
-			periodStart = &weeklyReset.Start
-		}
-		// Freeze the local ledger totals visible when the provider reading was
-		// received, including zero. Later cleanup/backfill can then be distinguished
-		// from a difference that was already present at observation time.
-		_, err = client.ExecContext(ctx, `INSERT INTO openai_weekly_quota_observations
-			(account_id,generation,period_start,reason,start_source,previous_reading,current_reading,local_requests,local_account_cost)
-			SELECT $1,$2,$3,$4,$5,NULLIF($6::jsonb,'null'::jsonb),NULLIF($7::jsonb,'null'::jsonb),COUNT(*),`+accountWindowCostSQL+`
-			FROM usage_logs WHERE account_id=$1 AND created_at >= $3 AND created_at <= $2::text::timestamptz`, id, expectedWhamUpdatedAt, periodStart, weeklyReset.Reason, weeklyReset.Source, string(previous), string(current))
-		if err != nil {
+		if err := insertOpenAIWeeklyObservation(ctx, client, id, expectedWhamUpdatedAt, weeklyReset); err != nil {
 			return false, err
 		}
 	}

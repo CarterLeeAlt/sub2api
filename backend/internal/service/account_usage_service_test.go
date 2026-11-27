@@ -257,6 +257,12 @@ func TestOpenAIUsageBatchChargesFromRecordedSeatChange(t *testing.T) {
 	require.Equal(t, []time.Time{start}, logs.starts)
 	require.Equal(t, 16., batch[account.ID].SevenDay.Utilization)
 	require.Equal(t, 1., batch[account.ID].SevenDay.WindowStats.Cost)
+	require.Nil(t, batch[account.ID].FiveHour)
+	logs.starts = nil
+	single, err := svc.GetUsage(t.Context(), account.ID)
+	require.NoError(t, err)
+	require.Equal(t, []time.Time{start}, logs.starts)
+	require.Equal(t, batch[account.ID], single)
 }
 
 // TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2 外审第9轮 P1:spark 影子用量走

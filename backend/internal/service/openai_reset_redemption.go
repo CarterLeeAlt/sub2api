@@ -16,9 +16,10 @@ const openAIResetFenceScope = "openai_reset_account_fence"
 const openAIResetRetention = 365 * 24 * time.Hour
 
 type openAIResetFence struct {
-	AccountID int64                   `json:"account_id,omitempty"`
-	Operation string                  `json:"operation"`
-	Result    *OpenAIQuotaResetResult `json:"result,omitempty"`
+	AccountID      int64                   `json:"account_id,omitempty"`
+	MemberIdentity string                  `json:"member_identity,omitempty"`
+	Operation      string                  `json:"operation"`
+	Result         *OpenAIQuotaResetResult `json:"result,omitempty"`
 }
 
 func openAIResetIdentity(fedRAMP bool, workspace string) string {
@@ -27,22 +28,25 @@ func openAIResetIdentity(fedRAMP bool, workspace string) string {
 
 // The fence is workspace-wide. A receipt belongs only to the member row that
 // redeemed it. Older fences do not identify that row.
-func (s *OpenAIQuotaService) latestQuotaRedemption(ctx context.Context, accountID int64, identity string) (string, error) {
+func (s *OpenAIQuotaService) latestQuotaRedemption(ctx context.Context, accountID int64, identity, memberIdentity string) (string, int, error) {
 	if s.resetIdempotency == nil || s.resetIdempotency.repo == nil {
-		return "", nil
+		return "", 0, nil
 	}
 	record, err := s.resetIdempotency.repo.GetByScopeAndKeyHash(ctx, openAIResetFenceScope, identity)
 	if err != nil || record == nil || record.ResponseBody == nil {
-		return "", err
+		return "", 0, err
 	}
 	var fence openAIResetFence
 	if err := json.Unmarshal([]byte(*record.ResponseBody), &fence); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if fence.AccountID != accountID || fence.Result == nil || fence.Result.Code != "reset" || fence.Result.WindowsReset <= 0 || fence.Result.Credit == nil {
-		return "", nil
+		return "", 0, nil
 	}
-	return fence.Result.Credit.RedeemedAt, nil
+	if memberIdentity == "" || fence.MemberIdentity != memberIdentity {
+		return "", 0, nil
+	}
+	return fence.Result.Credit.RedeemedAt, fence.Result.WindowsReset, nil
 }
 
 func (s *OpenAIQuotaService) ConfigureRedemption(idem *IdempotencyCoordinator, locks LeaderLockCache) {
@@ -165,6 +169,7 @@ func (s *OpenAIQuotaService) redeemResetOnce(ctx context.Context, id int64, oper
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_RESET_UNCONFIRMED", "Reset outcome is unconfirmed; retry the same confirmation: "+err.Error())
 	}
 	marker.Result = out
+	marker.MemberIdentity = out.memberIdentity
 	body, err = json.Marshal(marker)
 	if err != nil {
 		return nil, err

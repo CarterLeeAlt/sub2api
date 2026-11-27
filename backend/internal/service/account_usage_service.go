@@ -1875,13 +1875,8 @@ func codexWindowStatsStart(progress *UsageProgress, fallbackWindow time.Duration
 }
 
 func codexWeeklyStatsStart(extra map[string]any, progress *UsageProgress, now time.Time) time.Time {
-	if progress != nil && progress.ResetsAt != nil {
-		if !now.Before(*progress.ResetsAt) {
-			return *progress.ResetsAt
-		}
-		if start := parseSchedulingResetAt(extra[OpenAIWeeklyPeriodStartKey]); start != nil && !start.After(now) && start.Before(*progress.ResetsAt) {
-			return *start
-		}
+	if start := parseSchedulingResetAt(extra[OpenAIWeeklyPeriodStartKey]); progress != nil && start != nil && !start.After(now) {
+		return *start
 	}
 	return codexWindowStatsStart(progress, 7*24*time.Hour, now)
 }

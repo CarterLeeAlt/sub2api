@@ -109,6 +109,8 @@ type openAICreditsSnapshot struct {
 type OpenAIQuotaUsage struct {
 	windowsObservedAt     time.Time
 	creditRedeemedAt      string
+	creditWindowsReset    int
+	weeklyIdentity        string
 	workspaceMatched      *bool
 	memberMatched         *bool
 	Warning               *OpenAIUpstreamHealth        `json:"warning,omitempty"`
@@ -163,10 +165,11 @@ type OpenAIQuotaResetCredit struct {
 // The inner Credit also carries `redeemed_at` (RFC3339 string); we deliberately do
 // NOT add a top-level redeemed_at to avoid ambiguity with the nested field.
 type OpenAIQuotaResetResult struct {
-	Replayed     bool                    `json:"replayed,omitempty"`
-	Code         string                  `json:"code"`
-	Credit       *OpenAIQuotaResetCredit `json:"credit,omitempty"`
-	WindowsReset int                     `json:"windows_reset"`
+	memberIdentity string
+	Replayed       bool                    `json:"replayed,omitempty"`
+	Code           string                  `json:"code"`
+	Credit         *OpenAIQuotaResetCredit `json:"credit,omitempty"`
+	WindowsReset   int                     `json:"windows_reset"`
 }
 
 // OpenAIQuotaService queries and consumes ChatGPT/Codex rate-limit reset credits
@@ -277,13 +280,14 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 	payload := wirePayload.Usage
 	payload.workspaceMatched = quotaIdentityMatches(chatGPTAccountID, payload.AccountID)
 	payload.memberMatched = quotaIdentityMatches(identity.GetChatGPTUserID(), payload.UserID)
+	payload.weeklyIdentity = weeklyQuotaIdentity(identity, chatGPTAccountID)
 	if !payload.RateLimitPresent {
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_UPSTREAM_INVALID_RESPONSE", "upstream response omitted required rate_limit field")
 	}
 	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota", http.StatusOK, nil)
 
 	payload.FetchedAt = payload.windowsObservedAt.Unix()
-	payload.creditRedeemedAt, err = s.latestQuotaRedemption(ctx, accountID, openAIResetIdentity(fedRAMP, chatGPTAccountID))
+	payload.creditRedeemedAt, payload.creditWindowsReset, err = s.latestQuotaRedemption(ctx, accountID, openAIResetIdentity(fedRAMP, chatGPTAccountID), payload.weeklyIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("read confirmed quota redemption: %w", err)
 	}
@@ -554,6 +558,7 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 		"code", payload.Code,
 		"windows_reset", payload.WindowsReset,
 	)
+	payload.memberIdentity = weeklyQuotaIdentity(identity, chatGPTAccountID)
 	return &payload, nil
 }
 
@@ -833,6 +838,8 @@ func buildCodexWhamWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time, sp
 	}
 	updates := buildCodexWhamRateLimitExtraUpdates(usage.RateLimit, now)
 	updates["codex_wham_credit_redeemed_at"] = usage.creditRedeemedAt
+	updates["codex_wham_credit_windows_reset"] = usage.creditWindowsReset
+	updates[weeklyQuotaIdentityKey] = usage.weeklyIdentity
 	updates["codex_wham_plan_type"] = strings.TrimSpace(usage.PlanType)
 	updates["codex_wham_workspace_matched"] = usage.workspaceMatched
 	updates["codex_wham_member_matched"] = usage.memberMatched

@@ -308,6 +308,10 @@ const accountWindowCostSQL = `COALESCE(SUM(COALESCE(account_stats_cost, total_co
 
 // GetAccountWindowStats 获取账号时间窗口内的统计
 func (r *usageLogRepository) GetAccountWindowStats(ctx context.Context, accountID int64, startTime time.Time) (*usagestats.AccountStats, error) {
+	return queryAccountWindowStats(ctx, r.sql, accountID, startTime, nil)
+}
+
+func queryAccountWindowStats(ctx context.Context, queryer sqlQueryer, accountID int64, startTime time.Time, endTime *time.Time) (*usagestats.AccountStats, error) {
 	query := `
 		SELECT
 			COUNT(*) as requests,
@@ -318,13 +322,18 @@ func (r *usageLogRepository) GetAccountWindowStats(ctx context.Context, accountI
 		FROM usage_logs
 		WHERE account_id = $1 AND created_at >= $2
 	`
+	args := []any{accountID, startTime}
+	if endTime != nil {
+		query += " AND created_at < $3"
+		args = append(args, *endTime)
+	}
 
 	stats := &usagestats.AccountStats{}
 	if err := scanSingleRow(
 		ctx,
-		r.sql,
+		queryer,
 		query,
-		[]any{accountID, startTime},
+		args,
 		&stats.Requests,
 		&stats.Tokens,
 		&stats.Cost,

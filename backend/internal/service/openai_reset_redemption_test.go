@@ -16,7 +16,7 @@ import (
 )
 
 func TestOpenAIResetRetryAndReplayConsumeOnce(t *testing.T) {
-	a := &Account{ID: 100, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Credentials: map[string]any{"access_token": "fake-token", "chatgpt_account_id": "upstream-account"}}
+	a := &Account{ID: 100, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Credentials: map[string]any{"access_token": "fake-token", "chatgpt_account_id": "upstream-account", "chatgpt_user_id": "upstream-member"}}
 	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{100: a, 101: {ID: 101, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: a.Credentials}}}
 	cache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(a): "fake-token"}}
 	ids := []string{}
@@ -54,9 +54,14 @@ func TestOpenAIResetRetryAndReplayConsumeOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, out.WindowsReset)
 	for id, want := range map[int64]string{100: "2026-11-28T01:00:00Z", 101: ""} {
-		got, err := svc.latestQuotaRedemption(t.Context(), id, openAIResetIdentity(false, "upstream-account"))
+		got, windows, err := svc.latestQuotaRedemption(t.Context(), id, openAIResetIdentity(false, "upstream-account"), weeklyQuotaIdentity(a, "upstream-account"))
 		require.NoError(t, err)
 		require.Equal(t, want, got)
+		if want == "" {
+			require.Zero(t, windows)
+		} else {
+			require.Equal(t, 2, windows)
+		}
 	}
 	replay, err := svc.ResetCredit(context.Background(), 100, "confirmation")
 	require.NoError(t, err)
