@@ -927,6 +927,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 				slog.Warn("openai_codex_snapshot_persist_failed", "account_id", account.ID, "error", err)
 			} else if persisted {
 				probeSucceeded = true
+				now = time.Now()
 				mergeAccountExtra(account, updates)
 				applyExtraToUsage(usage, account.Extra, now, whamOnly)
 				usage.Source = "active"
@@ -1001,7 +1002,8 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 
 	if usage.SevenDay != nil || s.openAIQuotaService == nil {
-		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
+		start := codexWeeklyStatsStart(account.Extra, usage.SevenDay, now)
+		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, start); err == nil {
 			if usage.SevenDay == nil {
 				usage.SevenDay = &UsageProgress{UtilizationUnknown: true}
 			}
@@ -1870,6 +1872,18 @@ func codexWindowStatsStart(progress *UsageProgress, fallbackWindow time.Duration
 		return progress.ResetsAt.Add(-fallbackWindow)
 	}
 	return now.Add(-fallbackWindow)
+}
+
+func codexWeeklyStatsStart(extra map[string]any, progress *UsageProgress, now time.Time) time.Time {
+	if progress != nil && progress.ResetsAt != nil {
+		if !now.Before(*progress.ResetsAt) {
+			return *progress.ResetsAt
+		}
+		if start := parseSchedulingResetAt(extra[OpenAIWeeklyPeriodStartKey]); start != nil && !start.After(now) && start.Before(*progress.ResetsAt) {
+			return *start
+		}
+	}
+	return codexWindowStatsStart(progress, 7*24*time.Hour, now)
 }
 
 func (s *AccountUsageService) GetAccountUsageStats(ctx context.Context, accountID int64, startTime, endTime time.Time) (*usagestats.AccountUsageStatsResponse, error) {

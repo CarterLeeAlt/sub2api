@@ -1650,6 +1650,31 @@ func (s *AccountRepoSuite) TestUpdateOpenAICodexWhamSnapshotIfNewer_AcceptsNewer
 	s.Require().Equal(95.0, got.Extra["codex_5h_used_percent"])
 }
 
+func (s *AccountRepoSuite) TestWeeklyQuotaChangeRetainsBothReadingsWhenNoLocalBillExists() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "quota-ledger", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth})
+	at := time.Date(2026, 11, 28, 1, 28, 3, 0, time.UTC)
+	write := func(observed time.Time, used int) bool {
+		generation := observed.Format("2006-01-02T15:04:05.000000000Z")
+		applied, err := s.repo.UpdateOpenAICodexWhamSnapshotIfNewer(s.ctx, account.ID, generation, map[string]any{
+			"codex_wham_usage_updated_at": generation, "codex_wham_7d_window_present": true, "codex_wham_7d_used_percent": used,
+			"codex_wham_7d_reset_at": at.Add(24 * time.Hour).Format(time.RFC3339), "codex_wham_7d_window_seconds": 604800,
+		})
+		s.Require().NoError(err)
+		return applied
+	}
+	s.Require().True(write(at, 0))
+	s.Require().True(write(at.Add(time.Minute), 4))
+	s.Require().False(write(at.Add(time.Second), 2))
+	var before, after, requests int
+	var cost float64
+	err := scanSingleRow(s.ctx, clientFromContext(s.ctx, s.client), `SELECT (previous_reading->>'used_percent')::int,(current_reading->>'used_percent')::int,local_requests,local_account_cost FROM openai_weekly_quota_observations WHERE account_id=$1 AND reason='reading_changed'`, []any{account.ID}, &before, &after, &requests, &cost)
+	s.Require().NoError(err)
+	s.Require().Zero(before)
+	s.Require().Equal(4, after)
+	s.Require().Zero(requests)
+	s.Require().Zero(cost)
+}
+
 func (s *AccountRepoSuite) TestUpdateOpenAIResetCreditSnapshotIfNewer_UpgradesLegacyAndRejectsOlder() {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:     "acc-reset-credit-legacy",

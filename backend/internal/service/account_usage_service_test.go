@@ -239,6 +239,26 @@ func TestOpenAIUsageRefreshTracksWeeklyQuotaChanges(t *testing.T) {
 	require.EqualValues(t, len(responses), calls.Load())
 }
 
+func TestOpenAIUsageBatchChargesFromRecordedSeatChange(t *testing.T) {
+	observed := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	start := observed.Add(-2 * time.Hour)
+	end := observed.Add(4 * 24 * time.Hour)
+	account := Account{ID: 58, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account.Extra = buildCodexWhamWindowExtraUpdates(&OpenAIQuotaUsage{RateLimit: &OpenAIRateLimit{
+		PrimaryWindow: &OpenAIRateLimitWindow{UsedPercent: 16, LimitWindowSeconds: 604800, ResetAt: end.Unix()},
+	}}, observed, false)
+	account.Extra[OpenAIWeeklyPeriodStartKey] = start.Format(time.RFC3339Nano)
+	logs := &windowCostRepo{}
+	svc := &AccountUsageService{accountRepo: &stubOpenAIAccountRepo{accounts: []Account{account}}, usageLogRepo: logs, cache: NewUsageCache(), openAIQuotaService: &OpenAIQuotaService{}}
+	svc.cache.openAIProbeCache.Store(account.ID, observed.Add(openAIProbeCacheTTL))
+	batch, failures, _, err := svc.GetUsageBatch(t.Context(), []int64{account.ID}, false)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+	require.Equal(t, []time.Time{start}, logs.starts)
+	require.Equal(t, 16., batch[account.ID].SevenDay.Utilization)
+	require.Equal(t, 1., batch[account.ID].SevenDay.WindowStats.Cost)
+}
+
 // TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2 外审第9轮 P1:spark 影子用量走
 // QueryUsage(/wham/usage,与 WSv2 无关),staleness 不得被 WSv2 门控,否则首刷后窗口永久冻结。
 func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {

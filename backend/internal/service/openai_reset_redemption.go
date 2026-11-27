@@ -16,8 +16,33 @@ const openAIResetFenceScope = "openai_reset_account_fence"
 const openAIResetRetention = 365 * 24 * time.Hour
 
 type openAIResetFence struct {
+	AccountID int64                   `json:"account_id,omitempty"`
 	Operation string                  `json:"operation"`
 	Result    *OpenAIQuotaResetResult `json:"result,omitempty"`
+}
+
+func openAIResetIdentity(fedRAMP bool, workspace string) string {
+	return HashIdempotencyKey(fmt.Sprintf("%t:%s", fedRAMP, workspace))
+}
+
+// The fence is workspace-wide. A receipt belongs only to the member row that
+// redeemed it. Older fences do not identify that row.
+func (s *OpenAIQuotaService) latestQuotaRedemption(ctx context.Context, accountID int64, identity string) (string, error) {
+	if s.resetIdempotency == nil || s.resetIdempotency.repo == nil {
+		return "", nil
+	}
+	record, err := s.resetIdempotency.repo.GetByScopeAndKeyHash(ctx, openAIResetFenceScope, identity)
+	if err != nil || record == nil || record.ResponseBody == nil {
+		return "", err
+	}
+	var fence openAIResetFence
+	if err := json.Unmarshal([]byte(*record.ResponseBody), &fence); err != nil {
+		return "", err
+	}
+	if fence.AccountID != accountID || fence.Result == nil || fence.Result.Code != "reset" || fence.Result.WindowsReset <= 0 || fence.Result.Credit == nil {
+		return "", nil
+	}
+	return fence.Result.Credit.RedeemedAt, nil
 }
 
 func (s *OpenAIQuotaService) ConfigureRedemption(idem *IdempotencyCoordinator, locks LeaderLockCache) {
@@ -58,7 +83,7 @@ func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, id int64, key stri
 	if upstreamID == "" {
 		return nil, infraerrors.BadRequest("OPENAI_RESET_IDENTITY_REQUIRED", "Upstream account identity is required for reset coordination")
 	}
-	identity := HashIdempotencyKey(fmt.Sprintf("%t:%s", a.IsChatGPTAccountFedRAMP(), upstreamID))
+	identity := openAIResetIdentity(a.IsChatGPTAccountFedRAMP(), upstreamID)
 	operation := HashIdempotencyKey(fmt.Sprintf("openai-reset:%d:%s", id, key))
 	result, err := s.resetIdempotency.Execute(ctx, IdempotencyExecuteOptions{
 		Scope: "openai_reset_redeem", ActorScope: fmt.Sprintf("account:%d", id), Method: http.MethodPost, Route: "/admin/openai/accounts/:id/reset-quota",
@@ -126,7 +151,7 @@ func (s *OpenAIQuotaService) redeemResetOnce(ctx context.Context, id int64, oper
 			return nil, infraerrors.Conflict("OPENAI_RESET_UNRESOLVED", "Previous reset is unconfirmed; retry its original confirmation")
 		}
 	}
-	marker := openAIResetFence{Operation: operation}
+	marker := openAIResetFence{AccountID: id, Operation: operation}
 	body, err := json.Marshal(marker)
 	if err != nil {
 		return nil, err

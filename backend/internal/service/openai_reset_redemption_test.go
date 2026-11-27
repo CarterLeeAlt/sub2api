@@ -36,7 +36,7 @@ func TestOpenAIResetRetryAndReplayConsumeOnce(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":2}`))
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":2,"credit":{"redeemed_at":"2026-11-28T01:00:00Z"}}`))
 	}))
 	defer server.Close()
 	svc := NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, cache, nil), newQuotaRedirectingFactory(server), nil)
@@ -53,6 +53,11 @@ func TestOpenAIResetRetryAndReplayConsumeOnce(t *testing.T) {
 	out, err := svc.ResetCredit(context.Background(), 100, "confirmation")
 	require.NoError(t, err)
 	require.Equal(t, 2, out.WindowsReset)
+	for id, want := range map[int64]string{100: "2026-11-28T01:00:00Z", 101: ""} {
+		got, err := svc.latestQuotaRedemption(t.Context(), id, openAIResetIdentity(false, "upstream-account"))
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	}
 	replay, err := svc.ResetCredit(context.Background(), 100, "confirmation")
 	require.NoError(t, err)
 	require.True(t, replay.Replayed)

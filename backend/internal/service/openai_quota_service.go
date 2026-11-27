@@ -108,6 +108,9 @@ type openAICreditsSnapshot struct {
 // surface narrow; full upstream payload preservation is unnecessary.
 type OpenAIQuotaUsage struct {
 	windowsObservedAt     time.Time
+	creditRedeemedAt      string
+	workspaceMatched      *bool
+	memberMatched         *bool
 	Warning               *OpenAIUpstreamHealth        `json:"warning,omitempty"`
 	UserID                string                       `json:"user_id,omitempty"`
 	AccountID             string                       `json:"account_id,omitempty"`
@@ -272,12 +275,18 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, in
 		break
 	}
 	payload := wirePayload.Usage
+	payload.workspaceMatched = quotaIdentityMatches(chatGPTAccountID, payload.AccountID)
+	payload.memberMatched = quotaIdentityMatches(identity.GetChatGPTUserID(), payload.UserID)
 	if !payload.RateLimitPresent {
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_UPSTREAM_INVALID_RESPONSE", "upstream response omitted required rate_limit field")
 	}
 	_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, identity, "quota", http.StatusOK, nil)
 
 	payload.FetchedAt = payload.windowsObservedAt.Unix()
+	payload.creditRedeemedAt, err = s.latestQuotaRedemption(ctx, accountID, openAIResetIdentity(fedRAMP, chatGPTAccountID))
+	if err != nil {
+		return nil, fmt.Errorf("read confirmed quota redemption: %w", err)
+	}
 	if !includeResetCreditDetails {
 		return &payload, nil
 	}
@@ -357,10 +366,8 @@ func (s *OpenAIQuotaService) CacheCreditsSnapshot(ctx context.Context, accountID
 	return nil
 }
 
-// CachePostResetSnapshot persists the reset credits observed after a reset.
-// Usage windows are deliberately not written here: the reset workflow's
-// recovery path already syncs them through the monotonic WHAM writes, and a
-// blind extra update could regress newer snapshots.
+// CachePostResetSnapshot persists the observed windows and credit balance with
+// their own generation guards, including when only one window actually reset.
 func (s *OpenAIQuotaService) CachePostResetSnapshot(ctx context.Context, accountID int64, usage *OpenAIQuotaUsage) error {
 	ctx = WithScopedAdminAccountOperation(ctx, "openai.quota.reset")
 	if err := scopedAccountIDAccess(ctx, s.accountRepo, accountID, "openai.quota.reset", true); err != nil {
@@ -368,6 +375,16 @@ func (s *OpenAIQuotaService) CachePostResetSnapshot(ctx context.Context, account
 	}
 	var credits *OpenAIRateLimitResetCredits
 	if usage != nil {
+		if usage.RateLimitPresent && !usage.windowsObservedAt.IsZero() {
+			writer, ok := s.accountRepo.(OpenAICodexWhamSnapshotRepository)
+			if !ok {
+				return fmt.Errorf("account repository does not support monotonic WHAM snapshots")
+			}
+			updates := buildCodexWhamWindowExtraUpdates(usage, usage.windowsObservedAt, false)
+			if _, err := writer.UpdateOpenAICodexWhamSnapshotIfNewer(ctx, accountID, codexWhamSnapshotGeneration(updates), updates); err != nil {
+				return err
+			}
+		}
 		credits = usage.RateLimitResetCredits
 	}
 	return s.cacheResetCreditsSnapshotAt(ctx, accountID, credits, time.Now())
@@ -470,7 +487,7 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, r
 	if err != nil {
 		return nil, err
 	}
-	if expectedIdentity != "" && HashIdempotencyKey(fmt.Sprintf("%t:%s", fedRAMP, chatGPTAccountID)) != expectedIdentity {
+	if expectedIdentity != "" && openAIResetIdentity(fedRAMP, chatGPTAccountID) != expectedIdentity {
 		return nil, infraerrors.Conflict("OPENAI_CREDENTIALS_CHANGED", "Account identity changed during reset")
 	}
 	identity, err := captureOpenAIQuotaIdentity(ctx, s.accountRepo, accountID, accessToken, chatGPTAccountID, proxyURL, fedRAMP)
@@ -814,7 +831,12 @@ func buildCodexWhamWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time, sp
 	if spark {
 		return buildCodexSparkWindowExtraUpdates(usage, now)
 	}
-	return buildCodexWhamRateLimitExtraUpdates(usage.RateLimit, now)
+	updates := buildCodexWhamRateLimitExtraUpdates(usage.RateLimit, now)
+	updates["codex_wham_credit_redeemed_at"] = usage.creditRedeemedAt
+	updates["codex_wham_plan_type"] = strings.TrimSpace(usage.PlanType)
+	updates["codex_wham_workspace_matched"] = usage.workspaceMatched
+	updates["codex_wham_member_matched"] = usage.memberMatched
+	return updates
 }
 
 func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Time) map[string]any {
@@ -890,6 +912,18 @@ func buildCodexWhamRateLimitExtraUpdates(rateLimit *OpenAIRateLimit, now time.Ti
 		updates["codex_wham_5h_reset_at"] = *r
 	}
 	if r := codexResetAtRFC3339(now, normalized.Reset7dSeconds); r != nil {
+		weekly := rateLimit.SecondaryWindow
+		if normalized.Used7dPercent == snap.PrimaryUsedPercent {
+			weekly = rateLimit.PrimaryWindow
+		}
+		if weekly != nil {
+			updates["codex_wham_7d_window_seconds"] = weekly.LimitWindowSeconds
+			updates["codex_wham_7d_reported_reset_at"] = weekly.ResetAt
+			updates["codex_wham_7d_reset_after_seconds"] = weekly.ResetAfterSeconds
+			if weekly.ResetAt > 0 {
+				*r = time.Unix(weekly.ResetAt, 0).UTC().Format(time.RFC3339)
+			}
+		}
 		updates["codex_7d_reset_at"] = *r
 		updates["codex_wham_7d_reset_at"] = *r
 	}
@@ -910,6 +944,11 @@ func clearAbsentCodexWindowExtra(updates map[string]any, window string) {
 	// WHAM 专写副本同步清除，保持"权威缺席"语义对恢复判定同样成立。
 	updates["codex_wham_"+window+"_used_percent"] = nil
 	updates["codex_wham_"+window+"_reset_at"] = nil
+	if window == "7d" {
+		updates["codex_wham_7d_window_seconds"] = nil
+		updates["codex_wham_7d_reported_reset_at"] = nil
+		updates["codex_wham_7d_reset_after_seconds"] = nil
+	}
 }
 
 // mapUpstreamStatus collapses upstream HTTP statuses into a stable set we

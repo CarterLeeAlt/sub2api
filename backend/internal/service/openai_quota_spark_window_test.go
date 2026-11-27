@@ -31,6 +31,15 @@ type stubQuotaAccountRepo struct {
 	extraUpdates     map[int64]map[string]any
 	extraUpdateCalls int
 	extraUpdateErr   error
+	whamSnapshot     map[string]any
+}
+
+func (r *stubQuotaAccountRepo) UpdateOpenAICodexWhamSnapshotIfNewer(_ context.Context, _ int64, generation string, updates map[string]any) (bool, error) {
+	if generation != codexWhamSnapshotGeneration(updates) {
+		return false, fmt.Errorf("WHAM generation mismatch")
+	}
+	r.whamSnapshot = updates
+	return true, nil
 }
 
 func (r *stubQuotaAccountRepo) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -870,8 +879,9 @@ func TestCachePostResetSnapshot(t *testing.T) {
 	credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
 	balance := "1200.50"
 	usage := &OpenAIQuotaUsage{
-		Credits:               &OpenAICredits{HasCredits: true, Balance: &balance},
-		FetchedAt:             123,
+		Credits:           &OpenAICredits{HasCredits: true, Balance: &balance},
+		FetchedAt:         123,
+		windowsObservedAt: time.Unix(123, 0), RateLimitPresent: true,
 		RateLimitResetCredits: credits,
 		RateLimit: &OpenAIRateLimit{
 			PrimaryWindow: &OpenAIRateLimitWindow{
@@ -884,8 +894,8 @@ func TestCachePostResetSnapshot(t *testing.T) {
 	}
 
 	require.NoError(t, svc.CachePostResetSnapshot(context.Background(), 100, usage))
-	// Fork 语义:重置后只通过严格 fetched_at CAS 快照缓存重置卡;5h/7d 用量
-	// 窗口由恢复路径的 WHAM 单调写入负责,禁止在此盲写覆盖较新快照。
+	require.Equal(t, formatCodexWhamSnapshotGeneration(usage.windowsObservedAt), codexWhamSnapshotGeneration(repo.whamSnapshot))
+	require.Equal(t, true, repo.whamSnapshot[codexWham7dWindowPresentKey])
 	require.Equal(t, 0, repo.extraUpdateCalls)
 	snapshot, ok := repo.extraUpdates[100][openaiQuotaResetCreditsKey].(*OpenAIResetCreditSnapshot)
 	require.True(t, ok, "reset credits must persist through the strict fetched-at CAS snapshot")

@@ -3304,15 +3304,11 @@ func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 	if !ok || strings.TrimSpace(actual) != expectedWhamUpdatedAt {
 		return false, errors.New("WHAM snapshot generation does not match update payload")
 	}
-	payload, err := json.Marshal(updates)
-	if err != nil {
-		return false, err
-	}
-
 	baseCtx := ctx
 	contextTx := dbent.TxFromContext(ctx)
 	client := clientFromContext(ctx, r.client)
 	var tx *dbent.Tx
+	var err error
 	if contextTx == nil {
 		if r.client == nil {
 			return false, errors.New("account repository client is unavailable")
@@ -3328,6 +3324,21 @@ func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 		}
 	}
 
+	var weeklyReset *service.OpenAIWeeklyReset
+	if _, hasWeek := updates["codex_wham_7d_window_present"]; hasWeek {
+		row, err := client.Account.Query().Where(dbaccount.IDEQ(id), dbaccount.DeletedAtIsNil()).Select(dbaccount.FieldExtra).ForUpdate().Only(ctx)
+		if dbent.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		weeklyReset = service.ApplyOpenAIWeeklyReset(row.Extra, updates)
+	}
+	payload, err := json.Marshal(updates)
+	if err != nil {
+		return false, err
+	}
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
 		SET extra = CASE
@@ -3378,6 +3389,30 @@ func (r *accountRepository) UpdateOpenAICodexWhamSnapshotIfNewer(
 	}
 	if affected == 0 {
 		return false, nil
+	}
+	if weeklyReset != nil {
+		previous, err := json.Marshal(weeklyReset.Previous)
+		if err != nil {
+			return false, err
+		}
+		current, err := json.Marshal(weeklyReset.Current)
+		if err != nil {
+			return false, err
+		}
+		var periodStart *time.Time
+		if !weeklyReset.Start.IsZero() {
+			periodStart = &weeklyReset.Start
+		}
+		// Freeze the local ledger totals visible when the provider reading was
+		// received, including zero. Later cleanup/backfill can then be distinguished
+		// from a difference that was already present at observation time.
+		_, err = client.ExecContext(ctx, `INSERT INTO openai_weekly_quota_observations
+			(account_id,generation,period_start,reason,start_source,previous_reading,current_reading,local_requests,local_account_cost)
+			SELECT $1,$2,$3,$4,$5,NULLIF($6::jsonb,'null'::jsonb),NULLIF($7::jsonb,'null'::jsonb),COUNT(*),`+accountWindowCostSQL+`
+			FROM usage_logs WHERE account_id=$1 AND created_at >= $3 AND created_at <= $2::text::timestamptz`, id, expectedWhamUpdatedAt, periodStart, weeklyReset.Reason, weeklyReset.Source, string(previous), string(current))
+		if err != nil {
+			return false, err
+		}
 	}
 	if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, schedulerMetadataOnlyOutboxPayload()); err != nil {
 		return false, err
