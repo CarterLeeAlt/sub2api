@@ -39,14 +39,16 @@ type OpsOutputTPS struct {
 }
 
 type OpsDashboardOverview struct {
-	StartTime time.Time `json:"start_time"`
-	EndTime   time.Time `json:"end_time"`
-	Platform  string    `json:"platform"`
-	GroupID   *int64    `json:"group_id"`
+	Delivery  *DeliveryWindow `json:"delivery,omitempty"`
+	StartTime time.Time       `json:"start_time"`
+	EndTime   time.Time       `json:"end_time"`
+	Platform  string          `json:"platform"`
+	GroupID   *int64          `json:"group_id"`
 
 	// HealthScore is a backend-computed overall health score (0-100).
 	// It is derived from the monitored metrics in this overview, plus best-effort system metrics/job heartbeats.
-	HealthScore int `json:"health_score"`
+	HealthScore      int                `json:"health_score"`
+	HealthDeductions map[string]float64 `json:"health_deductions,omitempty"`
 
 	// Latest system-level snapshot (window=1m, global).
 	SystemMetrics *OpsSystemMetricsSnapshot `json:"system_metrics"`

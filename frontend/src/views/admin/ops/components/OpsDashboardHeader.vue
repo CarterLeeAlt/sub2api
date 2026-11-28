@@ -7,7 +7,7 @@ import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { adminAPI } from '@/api'
-import { opsAPI, type OpsDashboardOverview, type OpsMetricThresholds, type OpsRealtimeTrafficSummary } from '@/api/admin/ops'
+import { opsAPI, type OpsDashboardOverview, type OpsDeliveryWindow, type OpsMetricThresholds, type OpsRealtimeTrafficSummary } from '@/api/admin/ops'
 import type { OpsRequestDetailsPreset } from './OpsRequestDetailsModal.vue'
 import { useAdminSettingsStore } from '@/stores'
 import { formatDateTimeLocalInput, formatNumber } from '@/utils/format'
@@ -275,43 +275,38 @@ function getThresholdColorClass(level: ThresholdLevel): string {
 
 // --- Realtime / Overview labels ---
 
-const totalRequestsLabel = computed(() => formatNumber(overview.value?.request_count_total ?? 0))
-const totalTokensLabel = computed(() => formatNumber(overview.value?.token_consumed ?? 0))
-
-const realtimeTrafficSummary = ref<OpsRealtimeTrafficSummary | null>(null)
-const realtimeTrafficLoading = ref(false)
-
-function makeZeroRealtimeTrafficSummary(): OpsRealtimeTrafficSummary {
-  const now = new Date().toISOString()
-  return {
-    window: realtimeWindow.value,
-    start_time: now,
-    end_time: now,
-    platform: props.platform,
-    group_id: props.groupId,
-    qps: { current: 0, peak: 0, avg: 0 },
-    tps: { current: 0, peak: 0, avg: 0 }
-  }
+const measured = computed(() => overview.value?.delivery?.seconds ? overview.value.delivery : null)
+const output = computed(() => measured.value?.missing ? null : measured.value)
+const totalRequestsLabel = computed(() => measured.value ? formatNumber(measured.value.requests) : '—')
+function unitLabel(unit?: string, rate = true) {
+  if (unit === 'token') return rate ? 'tok/s' : 'tok'
+  return t(rate ? 'admin.ops.charsPerSec' : 'admin.ops.chars')
+}
+const totalTokensLabel = computed(() => output.value ? `${formatNumber(output.value.output)} ${unitLabel(output.value.unit, false)}` : '—')
+function describeCoverage(d?: OpsDeliveryWindow | null) {
+  if (!d?.from || !d.to) return t('admin.ops.noMeasurement')
+  return t('admin.ops.covered', { from: new Date(d.from).toLocaleString(), to: new Date(d.to).toLocaleString(), seconds: d.seconds, tokens: d.token_coverage == null ? '—' : `${(d.token_coverage * 100).toFixed(1)}%` })
 }
 
+const realtimeTrafficSummary = ref<OpsRealtimeTrafficSummary | null>(null)
+let realtimeGeneration = 0
+
 async function loadRealtimeTrafficSummary() {
-  if (realtimeTrafficLoading.value) return
+  const generation = ++realtimeGeneration
   if (!adminSettingsStore.opsRealtimeMonitoringEnabled) {
-    realtimeTrafficSummary.value = makeZeroRealtimeTrafficSummary()
+    realtimeTrafficSummary.value = null
     return
   }
-  realtimeTrafficLoading.value = true
   try {
     const res = await opsAPI.getRealtimeTrafficSummary(realtimeWindow.value, props.platform, props.groupId)
+    if (generation !== realtimeGeneration) return
     if (res && res.enabled === false) {
       adminSettingsStore.setOpsRealtimeMonitoringEnabledLocal(false)
     }
     realtimeTrafficSummary.value = res?.summary ?? null
   } catch (err) {
     console.error('[OpsDashboardHeader] Failed to load realtime traffic summary', err)
-    realtimeTrafficSummary.value = null
-  } finally {
-    realtimeTrafficLoading.value = false
+    if (generation === realtimeGeneration) realtimeTrafficSummary.value = null
   }
 }
 
@@ -327,8 +322,8 @@ watch(
   () => adminSettingsStore.opsRealtimeMonitoringEnabled,
   (enabled) => {
     if (!enabled) {
-      // Keep UI stable when realtime monitoring is turned off.
-      realtimeTrafficSummary.value = makeZeroRealtimeTrafficSummary()
+      ++realtimeGeneration
+      realtimeTrafficSummary.value = null
     } else {
       loadRealtimeTrafficSummary()
     }
@@ -351,91 +346,59 @@ watch(
 
 // no-op: parent controls refresh cadence
 
-const displayRealTimeQps = computed(() => {
-  const v = realtimeTrafficSummary.value?.qps?.current
-  return typeof v === 'number' && Number.isFinite(v) ? v : 0
-})
-
-const displayRealTimeTps = computed(() => {
-  const v = realtimeTrafficSummary.value?.tps?.current
-  return typeof v === 'number' && Number.isFinite(v) ? v : 0
-})
-
-const realtimeQpsPeakLabel = computed(() => {
-  const v = realtimeTrafficSummary.value?.qps?.peak
-  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(1) : '-'
-})
-const realtimeTpsPeakLabel = computed(() => {
-  const v = realtimeTrafficSummary.value?.tps?.peak
-  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(1) : '-'
-})
-const realtimeQpsAvgLabel = computed(() => {
-  const v = realtimeTrafficSummary.value?.qps?.avg
-  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(1) : '-'
-})
-const realtimeTpsAvgLabel = computed(() => {
-  const v = realtimeTrafficSummary.value?.tps?.avg
-  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(1) : '-'
-})
-
-const qpsAvgLabel = computed(() => {
-  const v = overview.value?.qps?.avg
-  if (typeof v !== 'number') return '-'
-  return v.toFixed(1)
-})
-
-const tpsAvgLabel = computed(() => {
-  const v = overview.value?.tps?.avg
-  if (typeof v !== 'number') return '-'
-  return v.toFixed(1)
-})
+const realtime = computed(() => realtimeTrafficSummary.value?.delivery)
+function realtimeLabel(metric: 'qps' | 'rate', stat: 'current' | 'peak' | 'avg') {
+  const d = realtime.value
+  if (!d?.seconds || (stat === 'current' && !d.current_available) || (metric === 'rate' && d.missing)) return '—'
+  return d[metric][stat].toFixed(1)
+}
+const qpsAvgLabel = computed(() => measured.value?.qps.avg.toFixed(1) ?? '—')
+const tpsAvgLabel = computed(() => output.value ? `${output.value.rate.avg.toFixed(1)} ${unitLabel(output.value.unit)}` : '—')
 
 const slaPercent = computed(() => {
   const v = overview.value?.sla
-  if (typeof v !== 'number') return null
+  if (!measured.value || typeof v !== 'number') return null
   if ((overview.value?.request_count_sla ?? 0) <= 0) return null
   return v * 100
 })
 
 const errorRatePercent = computed(() => {
   const v = overview.value?.error_rate
-  if (typeof v !== 'number') return null
+  if (!measured.value || !overview.value?.request_count_sla || typeof v !== 'number') return null
   return v * 100
 })
 
 const upstreamErrorRatePercent = computed(() => {
   const v = overview.value?.upstream_error_rate
-  if (typeof v !== 'number') return null
+  if (!measured.value?.attempts || typeof v !== 'number') return null
   return v * 100
 })
 
-const durationP99Ms = computed(() => overview.value?.duration?.p99_ms ?? null)
-const durationP95Ms = computed(() => overview.value?.duration?.p95_ms ?? null)
-const durationP90Ms = computed(() => overview.value?.duration?.p90_ms ?? null)
-const durationP50Ms = computed(() => overview.value?.duration?.p50_ms ?? null)
-const durationAvgMs = computed(() => overview.value?.duration?.avg_ms ?? null)
-const durationMaxMs = computed(() => overview.value?.duration?.max_ms ?? null)
 
-const ttftP99Ms = computed(() => overview.value?.ttft?.p99_ms ?? null)
-const ttftP95Ms = computed(() => overview.value?.ttft?.p95_ms ?? null)
-const ttftP90Ms = computed(() => overview.value?.ttft?.p90_ms ?? null)
-const ttftP50Ms = computed(() => overview.value?.ttft?.p50_ms ?? null)
-const ttftAvgMs = computed(() => overview.value?.ttft?.avg_ms ?? null)
-const ttftMaxMs = computed(() => overview.value?.ttft?.max_ms ?? null)
+const ttftP99Ms = computed(() => output.value?.ttft.p99_ms ?? null)
+const ttftP95Ms = computed(() => output.value?.ttft.p95_ms ?? null)
+const ttftP90Ms = computed(() => output.value?.ttft.p90_ms ?? null)
+const ttftP50Ms = computed(() => output.value?.ttft.p50_ms ?? null)
+const ttftAvgMs = computed(() => output.value?.ttft.avg_ms ?? null)
+const ttftMaxMs = computed(() => output.value?.ttft.max_ms ?? null)
 
 // --- Health Score & Diagnosis (primary) ---
 
 const isSystemIdle = computed(() => {
   const ov = overview.value
-  if (!ov) return true
-  const qps = ov.qps?.current
-  const errorRate = ov.error_rate ?? 0
-  return (qps ?? 0) === 0 && errorRate === 0
+  return !!measured.value && measured.value.requests === 0 && !ov?.request_count_sla && !measured.value.output
 })
 
 const healthScoreValue = computed<number | null>(() => {
   const v = overview.value?.health_score
+  if (!overview.value?.health_deductions) return null
   return typeof v === 'number' && Number.isFinite(v) ? v : null
+})
+const healthHelp = computed(() => {
+  const deductions = overview.value?.health_deductions
+  return deductions ? t('admin.ops.healthDeductions', {
+    errors: deductions.errors.toFixed(1), ttft: deductions.ttft.toFixed(1), infra: deductions.infra.toFixed(1)
+  }) : t('admin.ops.healthHelp')
 })
 
 const healthScoreColor = computed(() => {
@@ -1080,7 +1043,7 @@ function handleToolbarRefresh() {
 
               <div class="absolute flex flex-col items-center">
                 <span :class="[props.fullscreen ? 'text-5xl' : 'text-3xl', 'font-black', healthScoreClass]">
-                  {{ isSystemIdle ? t('admin.ops.idleStatus') : (overview.health_score ?? '--') }}
+                  {{ isSystemIdle ? t('admin.ops.idleStatus') : (healthScoreValue ?? '—') }}
                 </span>
                 <span :class="[props.fullscreen ? 'text-xs' : 'text-[10px]', 'font-bold uppercase tracking-wider text-gray-400']">{{ t('admin.ops.health') }}</span>
               </div>
@@ -1089,13 +1052,13 @@ function handleToolbarRefresh() {
             <div class="mt-4 text-center" v-if="!props.fullscreen">
               <div class="flex items-center justify-center gap-1 text-xs font-medium text-gray-500">
                 {{ t('admin.ops.healthCondition') }}
-                <HelpTooltip :content="t('admin.ops.healthHelp')" />
+                <HelpTooltip :content="healthHelp" />
               </div>
               <div class="mt-1 text-xs font-bold" :class="healthScoreClass">
                 {{
                   isSystemIdle
                     ? t('admin.ops.idleStatus')
-                    : typeof overview.health_score === 'number' && overview.health_score >= 90
+                    : healthScoreValue == null ? t('admin.ops.noMeasurement') : healthScoreValue >= 90
                       ? t('admin.ops.healthyStatus')
                       : t('admin.ops.riskyStatus')
                 }}
@@ -1112,7 +1075,7 @@ function handleToolbarRefresh() {
                   <span class="relative inline-flex h-3 w-3 rounded-full bg-blue-500"></span>
                 </div>
                 <h3 class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.ops.realtime.title') }}</h3>
-                <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.qps')" />
+                <HelpTooltip v-if="!props.fullscreen" :content="`${t('admin.ops.tooltips.qps')} ${describeCoverage(realtime)}`" />
               </div>
 
               <!-- Time Window Selector -->
@@ -1138,12 +1101,12 @@ function handleToolbarRefresh() {
                 <div :class="[props.fullscreen ? 'text-xs' : 'text-[10px]', 'font-bold uppercase text-gray-400']">{{ t('admin.ops.current') }}</div>
                 <div class="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-2">
                   <div class="flex items-baseline gap-1.5">
-                    <span :class="[props.fullscreen ? 'text-4xl' : 'text-xl sm:text-2xl', 'font-black text-gray-900 dark:text-white']">{{ displayRealTimeQps.toFixed(1) }}</span>
+                    <span :class="[props.fullscreen ? 'text-4xl' : 'text-xl sm:text-2xl', 'font-black text-gray-900 dark:text-white']">{{ realtimeLabel('qps', 'current') }}</span>
                     <span :class="[props.fullscreen ? 'text-sm' : 'text-xs', 'font-bold text-gray-500']">QPS</span>
                   </div>
                   <div class="flex items-baseline gap-1.5">
-                    <span :class="[props.fullscreen ? 'text-4xl' : 'text-xl sm:text-2xl', 'font-black text-gray-900 dark:text-white']">{{ displayRealTimeTps.toFixed(1) }}</span>
-                    <span :class="[props.fullscreen ? 'text-sm' : 'text-xs', 'font-bold text-gray-500']">{{ t('admin.ops.tps') }}</span>
+                    <span :class="[props.fullscreen ? 'text-4xl' : 'text-xl sm:text-2xl', 'font-black text-gray-900 dark:text-white']">{{ realtimeLabel('rate', 'current') }}</span>
+                    <span :class="[props.fullscreen ? 'text-sm' : 'text-xs', 'whitespace-nowrap font-bold text-gray-500']">{{ unitLabel(realtime?.unit) }}</span>
                   </div>
                 </div>
               </div>
@@ -1155,12 +1118,12 @@ function handleToolbarRefresh() {
                   <div :class="[props.fullscreen ? 'text-xs' : 'text-[10px]', 'font-bold uppercase text-gray-400']">{{ t('admin.ops.peak') }}</div>
                   <div :class="[props.fullscreen ? 'text-base' : 'text-sm', 'mt-1 space-y-0.5 font-medium text-gray-600 dark:text-gray-400']">
                     <div class="flex items-baseline gap-1.5">
-                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeQpsPeakLabel }}</span>
+                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeLabel('qps', 'peak') }}</span>
                       <span class="text-xs">QPS</span>
                     </div>
                     <div class="flex items-baseline gap-1.5">
-                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeTpsPeakLabel }}</span>
-                      <span class="text-xs">{{ t('admin.ops.tps') }}</span>
+                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeLabel('rate', 'peak') }}</span>
+                      <span class="whitespace-nowrap text-xs">{{ unitLabel(realtime?.unit) }}</span>
                     </div>
                   </div>
                 </div>
@@ -1170,12 +1133,12 @@ function handleToolbarRefresh() {
                   <div :class="[props.fullscreen ? 'text-xs' : 'text-[10px]', 'font-bold uppercase text-gray-400']">{{ t('admin.ops.average') }}</div>
                   <div :class="[props.fullscreen ? 'text-base' : 'text-sm', 'mt-1 space-y-0.5 font-medium text-gray-600 dark:text-gray-400']">
                     <div class="flex items-baseline gap-1.5">
-                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeQpsAvgLabel }}</span>
+                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeLabel('qps', 'avg') }}</span>
                       <span class="text-xs">QPS</span>
                     </div>
                     <div class="flex items-baseline gap-1.5">
-                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeTpsAvgLabel }}</span>
-                      <span class="text-xs">{{ t('admin.ops.tps') }}</span>
+                      <span class="font-black text-gray-900 dark:text-white">{{ realtimeLabel('rate', 'avg') }}</span>
+                      <span class="whitespace-nowrap text-xs">{{ unitLabel(realtime?.unit) }}</span>
                     </div>
                   </div>
                 </div>
@@ -1188,12 +1151,12 @@ function handleToolbarRefresh() {
 
       <!-- Right: 6 cards (3 cols x 2 rows) -->
       <div class="grid h-full grid-cols-1 content-center gap-4 sm:grid-cols-2 lg:col-span-7 lg:grid-cols-3">
-        <!-- Card 1: Requests -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" style="order: 1;">
+        <!-- Requests -->
+        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="ops-requests-card" style="order: 3;">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-1">
               <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.requestsTitle') }}</span>
-              <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.totalRequests')" />
+              <HelpTooltip v-if="!props.fullscreen" :content="`${t('admin.ops.tooltips.totalRequests')} ${describeCoverage(measured)}`" />
             </div>
             <button
               v-if="!props.fullscreen"
@@ -1210,7 +1173,7 @@ function handleToolbarRefresh() {
               <span class="font-bold text-gray-900 dark:text-white">{{ totalRequestsLabel }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-gray-500">{{ t('admin.ops.tokens') }}:</span>
+              <span class="text-gray-500">{{ t('admin.ops.outputAmount') }}:</span>
               <span class="font-bold text-gray-900 dark:text-white">{{ totalTokensLabel }}</span>
             </div>
             <div class="flex justify-between">
@@ -1218,14 +1181,14 @@ function handleToolbarRefresh() {
               <span class="font-bold text-gray-900 dark:text-white">{{ qpsAvgLabel }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-gray-500">{{ t('admin.ops.avgTps') }}:</span>
+              <span class="text-gray-500">{{ t('admin.ops.avgOutput') }}:</span>
               <span class="font-bold text-gray-900 dark:text-white">{{ tpsAvgLabel }}</span>
             </div>
           </div>
         </div>
 
-        <!-- Card 2: SLA -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" style="order: 2;">
+        <!-- SLA -->
+        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="ops-sla-card" style="order: 1;">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2">
               <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.sla') }}</span>
@@ -1250,64 +1213,13 @@ function handleToolbarRefresh() {
           <div class="mt-3 text-xs">
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.exceptions') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber((overview.request_count_sla ?? 0) - (overview.success_count ?? 0)) }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.error_count_sla) : '—' }}</span>
             </div>
           </div>
         </div>
 
-        <!-- Card 4: Request Duration -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" style="order: 4;">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1">
-              <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.latencyDuration') }}</span>
-              <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.latency')" />
-            </div>
-            <button
-              v-if="!props.fullscreen"
-              class="text-[10px] font-bold text-blue-500 hover:underline"
-              type="button"
-              @click="openDetails({ title: t('admin.ops.latencyDuration'), sort: 'duration_desc' })"
-            >
-              {{ t('admin.ops.requestDetails.details') }}
-            </button>
-          </div>
-          <div class="mt-2 flex items-baseline gap-2">
-            <div class="text-3xl font-black text-gray-900 dark:text-white">
-              {{ durationP99Ms ?? '-' }}
-            </div>
-            <span class="text-xs font-bold text-gray-400">ms (P99)</span>
-          </div>
-          <div class="mt-3 grid grid-cols-1 gap-x-3 gap-y-1 text-xs 2xl:grid-cols-2">
-            <div class="flex items-baseline gap-1 whitespace-nowrap">
-              <span class="text-gray-500">P95:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ durationP95Ms ?? '-' }}</span>
-              <span class="text-gray-400">ms</span>
-            </div>
-            <div class="flex items-baseline gap-1 whitespace-nowrap">
-              <span class="text-gray-500">P90:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ durationP90Ms ?? '-' }}</span>
-              <span class="text-gray-400">ms</span>
-            </div>
-            <div class="flex items-baseline gap-1 whitespace-nowrap">
-              <span class="text-gray-500">P50:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ durationP50Ms ?? '-' }}</span>
-              <span class="text-gray-400">ms</span>
-            </div>
-            <div class="flex items-baseline gap-1 whitespace-nowrap">
-              <span class="text-gray-500">Avg:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ durationAvgMs ?? '-' }}</span>
-              <span class="text-gray-400">ms</span>
-            </div>
-            <div class="flex items-baseline gap-1 whitespace-nowrap">
-              <span class="text-gray-500">Max:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ durationMaxMs ?? '-' }}</span>
-              <span class="text-gray-400">ms</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Card 5: TTFT -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" style="order: 5;">
+        <!-- TTFT -->
+        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="ops-ttft-card" style="order: 4;">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-1">
               <span class="text-[10px] font-bold uppercase text-gray-400">TTFT</span>
@@ -1317,7 +1229,7 @@ function handleToolbarRefresh() {
               v-if="!props.fullscreen"
               class="text-[10px] font-bold text-blue-500 hover:underline"
               type="button"
-              @click="openDetails({ title: t('admin.ops.ttftLabel'), kind: 'success', sort: 'ttft_desc' })"
+              @click="openDetails({ title: t('admin.ops.ttftLabel'), sort: 'ttft_desc' })"
             >
               {{ t('admin.ops.requestDetails.details') }}
             </button>
@@ -1357,8 +1269,8 @@ function handleToolbarRefresh() {
           </div>
         </div>
 
-        <!-- Card 3: Request Errors -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" style="order: 3;">
+        <!-- Request Errors -->
+        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="ops-request-errors-card" style="order: 2;">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-1">
               <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.requestErrors') }}</span>
@@ -1374,17 +1286,17 @@ function handleToolbarRefresh() {
           <div class="mt-3 space-y-1 text-xs">
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.errorCount') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber(overview.error_count_sla ?? 0) }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.error_count_sla) : '—' }}</span>
             </div>
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.businessLimited') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber(overview.business_limited_count ?? 0) }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.business_limited_count) : '—' }}</span>
             </div>
           </div>
         </div>
 
-        <!-- Card 6: Upstream Errors -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" style="order: 6;">
+        <!-- Upstream Errors -->
+        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="ops-upstream-errors-card" style="order: 5;">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-1">
               <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.upstreamErrors') }}</span>
@@ -1400,34 +1312,34 @@ function handleToolbarRefresh() {
           <div class="mt-3 space-y-1 text-xs">
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.errorCountExcl429529') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber(overview.upstream_error_count_excl_429_529 ?? 0) }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.upstream_error_count_excl_429_529) : '—' }}</span>
             </div>
             <div class="flex justify-between">
               <span class="text-gray-500">429/529:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber((overview.upstream_429_count ?? 0) + (overview.upstream_529_count ?? 0)) }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(measured.limited_attempts) : '—' }}</span>
             </div>
           </div>
         </div>
 
         <!-- Per-request output speed, separate from system throughput. -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="output-tps-card" style="order: 7;">
+        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="output-tps-card" style="order: 6;">
           <div class="flex items-center gap-1">
             <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.outputTps') }}</span>
             <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.outputTps')" />
           </div>
           <div class="mt-2 flex flex-wrap items-baseline gap-2">
-            <div class="text-3xl font-black text-gray-900 dark:text-white" data-testid="output-tps-p50">{{ overview.output_tps?.p50?.toFixed(1) ?? '—' }}</div>
-            <span class="text-xs font-bold text-gray-400">tok/s (P50)</span>
+            <div class="text-3xl font-black text-gray-900 dark:text-white" data-testid="output-tps-p50">{{ output?.speed.p50?.toFixed(1) ?? '—' }}</div>
+            <span class="whitespace-nowrap text-xs font-bold text-gray-400">{{ unitLabel(output?.speed_unit) }} (P50)</span>
           </div>
           <div class="mt-3 grid grid-cols-1 gap-x-3 gap-y-1 text-xs 2xl:grid-cols-2">
             <div v-for="metric in ['p5', 'p10', 'avg'] as const" :key="metric" class="flex items-baseline gap-1 whitespace-nowrap">
               <span class="text-gray-500">{{ metric === 'avg' ? 'Avg' : metric.toUpperCase() }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white" :data-testid="`output-tps-${metric}`">{{ overview.output_tps?.[metric]?.toFixed(1) ?? '—' }}</span>
-              <span class="text-gray-400">tok/s</span>
+              <span class="font-bold text-gray-900 dark:text-white" :data-testid="`output-tps-${metric}`">{{ output?.speed[metric]?.toFixed(1) ?? '—' }}</span>
+              <span class="text-gray-400">{{ unitLabel(output?.speed_unit) }}</span>
             </div>
           </div>
           <div class="mt-2 text-xs text-gray-500" data-testid="output-tps-samples">
-            {{ t('admin.ops.outputTpsSamples', { count: overview.output_tps == null ? '—' : formatNumber(overview.output_tps.sample_count) }) }}
+            {{ t('admin.ops.outputTpsSamples', { count: output ? formatNumber(output.speed.sample_count) : '—' }) }}
           </div>
         </div>
       </div>

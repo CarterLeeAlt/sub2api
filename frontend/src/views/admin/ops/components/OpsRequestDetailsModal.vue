@@ -240,7 +240,7 @@ function accountLabel(row: OpsRequestDetail): string {
                 <div v-for="(row, idx) in items" :key="idx" class="space-y-2 p-4">
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="rounded-full px-2 py-1 text-[10px] font-bold" :class="kindBadgeClass(row.kind)">
-                      {{ row.kind === 'error' ? t('admin.ops.requestDetails.kind.error') : t('admin.ops.requestDetails.kind.success') }}
+                      {{ t(`admin.ops.requestDetails.kind.${row.kind}`) }}
                     </span>
                     <span class="text-xs font-medium text-gray-700 dark:text-gray-200">{{ (row.platform || 'unknown').toUpperCase() }}</span>
                     <span class="ml-auto text-[11px] text-gray-500 dark:text-gray-400">{{ formatDateTime(row.created_at) }}</span>
@@ -312,7 +312,7 @@ function accountLabel(row: OpsRequestDetail): string {
                   </td>
                   <td class="whitespace-nowrap px-4 py-3">
                     <span class="rounded-full px-2 py-1 text-[10px] font-bold" :class="kindBadgeClass(row.kind)">
-                      {{ row.kind === 'error' ? t('admin.ops.requestDetails.kind.error') : t('admin.ops.requestDetails.kind.success') }}
+                      {{ t(`admin.ops.requestDetails.kind.${row.kind}`) }}
                     </span>
                   </td>
                   <td class="whitespace-nowrap px-4 py-3 text-xs font-medium text-gray-700 dark:text-gray-200">

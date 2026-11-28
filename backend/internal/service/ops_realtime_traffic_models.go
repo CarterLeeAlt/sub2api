@@ -5,6 +5,7 @@ import "time"
 // OpsRealtimeTrafficSummary is a lightweight summary used by the Ops dashboard "Realtime Traffic" card.
 // It reports QPS/TPS current/peak/avg for the requested time window.
 type OpsRealtimeTrafficSummary struct {
+	Delivery *DeliveryWindow `json:"delivery,omitempty"`
 	// Window is a normalized label (e.g. "1min", "5min", "30min", "1h").
 	Window string `json:"window"`
 

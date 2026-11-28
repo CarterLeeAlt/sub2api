@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	"io"
 	"net"
 	"strconv"
@@ -211,7 +212,15 @@ func Relay(
 	writeUpstream := func(msgType coderws.MessageType, payload []byte) error {
 		writeCtx, cancel := context.WithTimeout(relayCtx, writeTimeout)
 		defer cancel()
-		return upstreamConn.WriteFrame(writeCtx, msgType, payload)
+		turn := isClientResponseCreateFrame(msgType, payload)
+		if turn {
+			opsdelivery.From(ctx).Attempt(200)
+		}
+		err := upstreamConn.WriteFrame(writeCtx, msgType, payload)
+		if err != nil && turn {
+			opsdelivery.From(ctx).FailAttempt(0)
+		}
+		return err
 	}
 	writeClientFrameUpstream := func(msgType coderws.MessageType, payload []byte) error {
 		isResponseCreate := isClientResponseCreateFrame(msgType, payload)

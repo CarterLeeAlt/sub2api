@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	"net/http"
 	"net/url"
 	"strings"
@@ -513,7 +514,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		writeCtx, cancel := newOpenAIWSDownstreamWriteContext(ctx, hooks, s.openAIWSWriteTimeout())
 		defer cancel()
 		message = restoreCodexToolNamesFromContext(c, message)
-		return clientConn.Write(writeCtx, coderws.MessageText, message)
+		err := clientConn.Write(writeCtx, coderws.MessageText, message)
+		opsdelivery.From(ctx).WSFrame(message, err)
+		return err
 	}
 
 	readClientMessage := func() ([]byte, error) {
@@ -1031,7 +1034,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		turnStart := time.Now()
 		wroteDownstream := false
+		opsdelivery.From(ctx).Attempt(200)
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
+			opsdelivery.From(ctx).FailAttempt(0)
 			return nil, wrapOpenAIWSIngressTurnError(
 				"write_upstream",
 				fmt.Errorf("write upstream websocket request: %w", err),
@@ -1190,6 +1195,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					result, drainErr := returnDrainIncomplete(readErr)
 					return result, drainErr
 				}
+				opsdelivery.From(ctx).FailAttempt(0)
 				return nil, wrapOpenAIWSIngressTurnError(
 					"read_upstream",
 					fmt.Errorf("read upstream websocket event: %w", readErr),

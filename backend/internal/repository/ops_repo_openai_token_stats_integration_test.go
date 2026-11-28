@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpsRepositoryGetOpenAITokenStats_WeightsRateByDuration(t *testing.T) {
+func TestOpsRepositoryGetOpenAITokenStats_DoesNotBackfillFromBilling(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
 	user := mustCreateUser(t, client, &service.User{})
@@ -52,15 +52,5 @@ VALUES
 		TopN:      10,
 	})
 	require.NoError(t, err)
-	require.Len(t, stats.Items, 2)
-
-	mixed := stats.Items[0]
-	require.Equal(t, "gpt-mixed-durations", mixed.Model)
-	require.NotNil(t, mixed.AvgTokensPerSec)
-	require.Equal(t, 40.0, *mixed.AvgTokensPerSec)
-	require.Equal(t, int64(5), mixed.RequestCount)
-	require.Equal(t, int64(217), mixed.TotalOutputTokens)
-
-	require.Equal(t, "gpt-no-valid-samples", stats.Items[1].Model)
-	require.Nil(t, stats.Items[1].AvgTokensPerSec)
+	require.Empty(t, stats.Items)
 }

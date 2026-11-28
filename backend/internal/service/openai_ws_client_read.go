@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
+	"github.com/tidwall/gjson"
 	"time"
 
 	coderws "github.com/coder/websocket"
@@ -97,6 +99,9 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 	for {
 		select {
 		case result := <-readDone:
+			if s := opsdelivery.From(controlCtx); s != nil && result.err == nil && gjson.GetBytes(result.payload, "type").String() == "response.create" {
+				s.Start(time.Now(), gjson.GetBytes(result.payload, "model").String())
+			}
 			return result.messageType, result.payload, result.err
 		case <-timeoutStart:
 			startTimeout()

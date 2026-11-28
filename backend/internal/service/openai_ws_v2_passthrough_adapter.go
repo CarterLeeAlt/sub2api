@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	"net/http"
 	"net/url"
 	"strings"
@@ -652,7 +653,9 @@ func (c *openAIWSClientFrameConn) WriteFrame(ctx context.Context, msgType coderw
 			payload = c.restoreToolNames(payload)
 		}
 	}
-	return c.conn.Write(ctx, msgType, payload)
+	err := c.conn.Write(ctx, msgType, payload)
+	opsdelivery.From(c.controlCtx).WSFrame(payload, err)
+	return err
 }
 
 func (c *openAIWSClientFrameConn) Close() error {
@@ -1186,9 +1189,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	upstreamFirstMessageSent := false
 	firstWriteCtx, cancelFirstWrite := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
+	opsdelivery.From(ctx).Attempt(200)
 	firstWriteErr := relayUpstreamFrameConn.WriteFrame(firstWriteCtx, coderws.MessageText, firstClientMessage)
 	cancelFirstWrite()
 	if firstWriteErr != nil {
+		opsdelivery.From(ctx).FailAttempt(0)
 		return wrapOpenAIWSIngressTurnError(
 			"write_upstream",
 			fmt.Errorf("write first upstream websocket request: %w", firstWriteErr),
@@ -1470,6 +1475,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	)
 
 	relayErr := relayExit.Err
+	switch relayExit.Stage {
+	case "read_upstream", "write_upstream":
+		opsdelivery.From(ctx).FailAttempt(0)
+	case "read_client", "write_client":
+		if isOpenAIWSClientDisconnectError(relayErr) {
+			opsdelivery.From(ctx).Finish(time.Now(), "cancelled")
+		}
+	}
 	var firstOutputTimeoutErr *openAIWSPassthroughFirstOutputTimeoutError
 	if errors.As(relayErr, &firstOutputTimeoutErr) {
 		deadline := firstOutputTimeoutErr.deadline

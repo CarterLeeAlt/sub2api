@@ -30,7 +30,38 @@ func (s *OpsService) GetDashboardOverview(ctx context.Context, filter *OpsDashbo
 	// Resolve query mode (requested via query param, or DB default).
 	filter.QueryMode = s.resolveOpsQueryMode(ctx, filter.QueryMode)
 
-	overview, err := s.opsRepo.GetDashboardOverview(ctx, filter)
+	var overview *OpsDashboardOverview
+	var err error
+	if reader, ok := s.opsRepo.(OpsDeliveryReader); ok {
+		var d *DeliveryWindow
+		d, err = reader.DeliveryWindow(ctx, filter, false)
+		if err != nil {
+			return nil, err
+		}
+		overview = &OpsDashboardOverview{
+			StartTime: filter.StartTime, EndTime: filter.EndTime, Platform: filter.Platform, GroupID: filter.GroupID,
+			Delivery: d, Duration: d.Duration, TTFT: d.TTFT, QPS: d.QPS,
+			SuccessCount: d.Complete, RequestCountSLA: d.Complete + d.Failed, RequestCountTotal: d.Requests,
+			ErrorCountTotal: d.Failed, ErrorCountSLA: d.Failed, BusinessLimitedCount: d.Limited,
+			UpstreamErrorCountExcl429529: d.AttemptErrors,
+		}
+		if overview.RequestCountSLA > 0 {
+			overview.SLA = float64(d.Complete) / float64(overview.RequestCountSLA)
+			overview.ErrorRate = float64(d.Failed) / float64(overview.RequestCountSLA)
+		}
+		if d.Attempts > 0 {
+			overview.UpstreamErrorRate = float64(d.AttemptErrors) / float64(d.Attempts)
+		}
+		if d.Unit == "token" {
+			overview.TokenConsumed = d.Output
+			overview.TPS = d.Rate
+		}
+		if d.SpeedUnit == "token" {
+			overview.OutputTPS = &d.Speed
+		}
+	} else {
+		overview, err = s.opsRepo.GetDashboardOverview(ctx, filter)
+	}
 	if err != nil && shouldFallbackOpsPreagg(filter, err) {
 		rawFilter := cloneOpsFilterWithMode(filter, OpsQueryModeRaw)
 		overview, err = s.opsRepo.GetDashboardOverview(ctx, rawFilter)
@@ -65,7 +96,12 @@ func (s *OpsService) GetDashboardOverview(ctx context.Context, filter *OpsDashbo
 		log.Printf("[Ops] ListJobHeartbeats failed: %v", err)
 	}
 
-	overview.HealthScore = computeDashboardHealthScore(time.Now().UTC(), overview)
+	now := time.Now().UTC()
+	overview.HealthScore = computeDashboardHealthScore(now, overview)
+	if d := overview.Delivery; d != nil && d.Seconds > 0 && overview.RequestCountSLA > 0 && !d.Missing && d.TTFT.P99 != nil && overview.SystemMetrics != nil {
+		errScore, ttftScore := opsBusinessScores(overview)
+		overview.HealthDeductions = map[string]float64{"errors": (100 - errScore) * 0.35, "ttft": (100 - ttftScore) * 0.35, "infra": (100 - computeInfraHealth(now, overview)) * 0.30}
+	}
 
 	return overview, nil
 }

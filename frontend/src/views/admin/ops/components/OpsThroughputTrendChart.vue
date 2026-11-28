@@ -6,7 +6,7 @@ import { Line } from 'vue-chartjs'
 import type { ChartComponentRef } from 'vue-chartjs'
 import type { OpsThroughputGroupBreakdownItem, OpsThroughputPlatformBreakdownItem, OpsThroughputTrendPoint } from '@/api/admin/ops'
 import type { ChartState } from '../types'
-import { formatHistoryLabel, sumNumbers } from '../utils/opsFormatters'
+import { formatHistoryLabel } from '../utils/opsFormatters'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { formatNumber } from '@/utils/format'
@@ -53,16 +53,16 @@ const colors = computed(() => ({
   text: isDarkMode.value ? '#9ca3af' : '#6b7280'
 }))
 
-const totalRequests = computed(() => sumNumbers(props.points.map((p) => p.request_count)))
+const rateUnit = computed(() => props.points.some(p => p.delivery_unit === 'token') ? 'tok/s' : t('admin.ops.charsPerSec'))
 
 const chartData = computed(() => {
-  if (!props.points.length || totalRequests.value <= 0) return null
+  if (!props.points.some(p => p.delivery_qps != null)) return null
   return {
     labels: props.points.map((p) => formatHistoryLabel(p.bucket_start, props.timeRange)),
     datasets: [
       {
         label: 'QPS',
-        data: props.points.map((p) => p.qps ?? 0),
+        data: props.points.map((p) => p.delivery_qps ?? null),
         borderColor: colors.value.blue,
         backgroundColor: colors.value.blueAlpha,
         fill: true,
@@ -71,8 +71,8 @@ const chartData = computed(() => {
         pointHitRadius: 10
       },
       {
-        label: t('admin.ops.tpsK'),
-        data: props.points.map((p) => (p.tps ?? 0) / 1000),
+        label: rateUnit.value,
+        data: props.points.map((p) => p.delivery_rate ?? null),
         borderColor: colors.value.green,
         backgroundColor: colors.value.greenAlpha,
         fill: true,
@@ -190,7 +190,7 @@ function downloadChart() {
         class="flex w-full min-w-0 flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400 sm:w-auto sm:justify-end"
       >
         <span class="flex shrink-0 items-center gap-1"><span class="h-2 w-2 rounded-full bg-blue-500"></span>QPS</span>
-        <span class="flex shrink-0 items-center gap-1"><span class="h-2 w-2 rounded-full bg-green-500"></span>{{ t('admin.ops.tpsK') }}</span>
+        <span class="flex shrink-0 items-center gap-1"><span class="h-2 w-2 rounded-full bg-green-500"></span>{{ rateUnit }}</span>
         <template v-if="!props.fullscreen">
           <button
             type="button"

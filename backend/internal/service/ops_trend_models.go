@@ -3,6 +3,9 @@ package service
 import "time"
 
 type OpsThroughputTrendPoint struct {
+	DeliveryQPS   *float64  `json:"delivery_qps"`
+	DeliveryRate  *float64  `json:"delivery_rate"`
+	DeliveryUnit  string    `json:"delivery_unit,omitempty"`
 	BucketStart   time.Time `json:"bucket_start"`
 	RequestCount  int64     `json:"request_count"`
 	TokenConsumed int64     `json:"token_consumed"`

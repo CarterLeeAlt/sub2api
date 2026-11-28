@@ -4,7 +4,13 @@ export default {
       description: 'Operational monitoring and troubleshooting',
       // Dashboard
       systemHealth: 'System Health',
-      outputTps: 'Per-request output TPS',
+      outputTps: 'Per-request output',
+      charsPerSec: 'char/s',
+      chars: 'char',
+      outputAmount: 'Output',
+      avgOutput: 'Avg output',
+      noMeasurement: 'Insufficient data',
+      covered: 'Measured {from} to {to}, covering {seconds}s. Exact token counts cover {tokens} of text.',
       outputTpsSamples: 'Valid samples: {count}',
       overview: 'Overview',
       noSystemMetrics: 'No system metrics collected yet.',
@@ -110,7 +116,7 @@ export default {
       errorCount: 'Error Count',
       upstreamErrors: 'Upstream Errors',
       errorCountExcl429529: 'Error Count (excl 429/529)',
-      sla: 'SLA (excl business limits)',
+      sla: 'SLA',
       businessLimited: 'business_limited:',
       errors: 'Errors',
       errorRate: 'error_rate:',
@@ -151,7 +157,8 @@ export default {
       // Health Score & Diagnosis
       health: 'Health',
       healthCondition: 'Health Condition',
-      healthHelp: 'Overall system health score based on SLA, error rate, and resource usage',
+      healthHelp: 'Rule-based score. — indicates missing request, latency or system data.',
+      healthDeductions: 'Rule-based score. Deductions: errors {errors}, TTFT {ttft}, system {infra}.',
       healthyStatus: 'Healthy',
       riskyStatus: 'At Risk',
       idleStatus: 'Idle',
@@ -184,9 +191,9 @@ export default {
         table: {
           model: 'Model',
           requestCount: 'Requests',
-          avgTokensPerSec: 'Avg Tokens/sec',
+          avgTokensPerSec: 'Output P50',
           avgFirstTokenMs: 'Avg First Token Latency (ms)',
-          totalOutputTokens: 'Total Output Tokens',
+          totalOutputTokens: 'Output',
           avgDurationMs: 'Avg Duration (ms)',
           requestsWithFirstToken: 'Requests With First Token'
         }
@@ -433,7 +440,10 @@ export default {
         viewError: 'View Error',
         kind: {
           success: 'SUCCESS',
-          error: 'ERROR'
+          error: 'ERROR',
+          active: 'ACTIVE',
+          cancelled: 'CANCELLED',
+          limited: 'LIMITED'
         },
         table: {
           time: 'Time',
@@ -818,9 +828,9 @@ export default {
         accountError: 'Error'
       },
       tooltips: {
-        outputTps: 'Percentiles of each valid usage record’s output tokens / total duration, including first-token wait, within the selected time, platform and group. Output may include reasoning tokens; they are not added again. P50 is the median; P5/P10 show slower requests. Higher is faster. Excludes images, Live and records without positive output or duration. Samples come from retained usage logs; — means no samples or temporarily unavailable statistics.',
-        totalRequests: 'Total number of requests (including both successful and failed requests) in the selected time window.',
-        throughputTrend: 'Requests/QPS + Tokens/TPS in the selected window.',
+        outputTps: 'Text sent after the first write divided by the time between first and last writes. Requires two or more writes.',
+        totalRequests: 'Requests counted at arrival and visible text counted at downstream write.',
+        throughputTrend: 'Request arrivals and downstream text writes per second. Gaps indicate missing measurements.',
         switchRateTrend: 'Trend of account switches / total requests over the last 5 hours (avg switches).',
         latencyHistogram: 'Request duration distribution (ms) for successful requests.',
         errorTrend: 'Error counts over time (SLA scope excludes business limits; upstream excludes 429/529).',
@@ -832,13 +842,13 @@ export default {
         db: 'Database connection pool status, including active, idle, and waiting connections.',
         redis: 'Redis connection pool status, showing active and idle connections.',
         jobs: 'Background job execution status, including last run time, success time, and error information.',
-        qps: 'Queries Per Second (QPS) and Tokens Per Second (TPS), real-time system throughput.',
+        qps: 'Latest complete 5 seconds. Peak and average include monitored idle intervals. Exact text token counts enable tok/s.',
         tokens: 'Total number of tokens processed in the current time window.',
-        sla: 'Service Level Agreement success rate, excluding business limits (e.g., insufficient balance, quota exceeded).',
-        errors: 'Error statistics, including total errors, error rate, and upstream error rate.',
-        upstreamErrors: 'Upstream error statistics, excluding rate limit errors (429/529).',
+        sla: 'Completed deliveries / (completed + failed). Client cancellations and business limits are counted separately.',
+        errors: 'Failed deliveries / (completed + failed). A truncated stream counts as failed.',
+        upstreamErrors: 'Failed attempts / all upstream attempts. 429/529 are shown separately.',
         latency: 'Request duration statistics, including p50, p90, p95, p99 percentiles.',
-        ttft: 'Time To First Token, measuring the speed of first token return in streaming responses.',
+        ttft: 'Time from request arrival to the first visible text write. Excludes heartbeats, reasoning and tool arguments.',
         health: 'System health score (0-100), considering SLA, error rate, and resource usage.'
       },
       charts: {

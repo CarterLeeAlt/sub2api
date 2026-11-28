@@ -57,9 +57,11 @@ const sampleResponse = {
     {
       model: 'gpt-4o-mini',
       request_count: 12,
-      avg_tokens_per_sec: 22.5,
+      p50: 22.5,
+      speed_unit: 'char',
+      unit: 'char',
       avg_first_token_ms: 123.45,
-      total_output_tokens: 1234,
+      output: 1234,
       avg_duration_ms: 321,
       requests_with_first_token: 10,
     },

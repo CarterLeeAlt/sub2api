@@ -225,7 +225,7 @@ function onNextPage() {
                 </div>
                 <div class="flex items-baseline justify-between gap-2">
                   <span class="text-gray-500 dark:text-gray-400">{{ t('admin.ops.openaiTokenStats.table.avgTokensPerSec') }}</span>
-                  <span class="text-gray-700 dark:text-gray-200">{{ formatRate(row.avg_tokens_per_sec) }}</span>
+                  <span class="text-gray-700 dark:text-gray-200">{{ formatRate(row.p50) }} {{ row.speed_unit === 'token' ? 'tok/s' : t('admin.ops.charsPerSec') }}</span>
                 </div>
                 <div class="flex items-baseline justify-between gap-2">
                   <span class="text-gray-500 dark:text-gray-400">{{ t('admin.ops.openaiTokenStats.table.avgFirstTokenMs') }}</span>
@@ -233,7 +233,7 @@ function onNextPage() {
                 </div>
                 <div class="flex items-baseline justify-between gap-2">
                   <span class="text-gray-500 dark:text-gray-400">{{ t('admin.ops.openaiTokenStats.table.totalOutputTokens') }}</span>
-                  <span class="text-gray-700 dark:text-gray-200">{{ formatInt(row.total_output_tokens) }}</span>
+                  <span class="text-gray-700 dark:text-gray-200">{{ formatInt(row.output) }} {{ row.unit === 'token' ? 'tok' : t('admin.ops.chars') }}</span>
                 </div>
                 <div class="flex items-baseline justify-between gap-2">
                   <span class="text-gray-500 dark:text-gray-400">{{ t('admin.ops.openaiTokenStats.table.avgDurationMs') }}</span>
@@ -266,9 +266,9 @@ function onNextPage() {
               >
                 <td class="px-2 py-2 font-medium">{{ row.model }}</td>
                 <td class="px-2 py-2">{{ formatInt(row.request_count) }}</td>
-                <td class="px-2 py-2">{{ formatRate(row.avg_tokens_per_sec) }}</td>
+                <td class="px-2 py-2">{{ formatRate(row.p50) }} {{ row.speed_unit === 'token' ? 'tok/s' : t('admin.ops.charsPerSec') }}</td>
                 <td class="px-2 py-2">{{ formatRate(row.avg_first_token_ms) }}</td>
-                <td class="px-2 py-2">{{ formatInt(row.total_output_tokens) }}</td>
+                <td class="px-2 py-2">{{ formatInt(row.output) }} {{ row.unit === 'token' ? 'tok' : t('admin.ops.chars') }}</td>
                 <td class="px-2 py-2">{{ formatInt(row.avg_duration_ms) }}</td>
                 <td class="px-2 py-2">{{ formatInt(row.requests_with_first_token) }}</td>
               </tr>

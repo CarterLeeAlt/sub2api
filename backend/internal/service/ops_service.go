@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 )
 
 var ErrOpsDisabled = infraerrors.NotFound("OPS_DISABLED", "Ops monitoring is disabled")
@@ -43,6 +44,7 @@ type OpsRuntimeSettingsRefreshHealth struct {
 
 // OpsService provides ingestion and query APIs for the Ops monitoring module.
 type OpsService struct {
+	Delivery    *opsdelivery.Collector
 	opsRepo     OpsRepository
 	settingRepo SettingRepository
 	cfg         *config.Config
@@ -335,6 +337,9 @@ func (s *OpsService) logRuntimeSettingsRefreshFailure(err error) {
 func (s *OpsService) StopRuntimeSettingsRefresh() {
 	if s == nil {
 		return
+	}
+	if s.Delivery != nil {
+		s.Delivery.Stop()
 	}
 	s.runtimeRefreshMu.Lock()
 	cancel := s.runtimeRefreshCancel

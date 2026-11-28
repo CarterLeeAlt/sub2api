@@ -84,6 +84,11 @@ func (r *opsRepository) ListRequestDetails(ctx context.Context, filter *service.
 		where = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
+	deliveryTime := "r.started_at"
+	if filter != nil && (filter.Sort == "ttft_desc" || filter.Kind == "error") {
+		deliveryTime = "r.ended_at"
+	}
+
 	cte := `
 WITH combined AS (
   SELECT
@@ -108,6 +113,7 @@ WITH combined AS (
   LEFT JOIN groups g ON g.id = ul.group_id
   LEFT JOIN accounts a ON a.id = ul.account_id
   WHERE ul.created_at >= $1 AND ul.created_at < $2
+    AND NOT EXISTS (SELECT 1 FROM ops_delivery_coverage c WHERE c.bucket=date_bin('5 seconds',ul.created_at,timestamptz 'epoch'))
 
   UNION ALL
 
@@ -134,6 +140,24 @@ WITH combined AS (
   LEFT JOIN accounts a ON a.id = o.account_id
   WHERE o.created_at >= $1 AND o.created_at < $2
     AND COALESCE(o.status_code, 0) >= 400
+    AND NOT EXISTS (SELECT 1 FROM ops_delivery_coverage c WHERE c.bucket=date_bin('5 seconds',o.created_at,timestamptz 'epoch'))
+
+  UNION ALL
+  SELECT CASE outcome WHEN 'completed' THEN 'success' WHEN 'failed' THEN 'error' ELSE outcome END,
+    delivery_time,r.request_id,r.platform,r.model,round(extract(epoch FROM ended_at-started_at)*1000)::bigint,
+    CASE WHEN NOT incomplete_measurement THEN round(first_ms)::bigint END,
+    logged.status_code,logged.id,logged.error_phase,logged.severity,logged.error_message,r.user_id,r.api_key_id,r.account_id,nullif(r.group_id,0),r.stream
+  FROM ops_delivery_requests r CROSS JOIN LATERAL (SELECT ` + deliveryTime + ` AS delivery_time) stamp
+  JOIN ops_delivery_coverage c ON c.bucket=date_bin('5 seconds',delivery_time,timestamptz 'epoch')
+  LEFT JOIN LATERAL (
+    SELECT o.id,o.status_code,o.error_phase,o.severity,o.error_message
+    FROM ops_error_logs o
+    WHERE r.outcome='failed' AND r.request_id<>'' AND o.client_request_id=r.request_id
+      AND o.created_at >= r.started_at AND o.created_at <= r.ended_at + interval '1 second'
+      AND coalesce(o.status_code,0)>=400
+    ORDER BY o.created_at DESC LIMIT 1
+  ) logged ON true
+  WHERE delivery_time >= $1 AND delivery_time < $2
 )
 `
 

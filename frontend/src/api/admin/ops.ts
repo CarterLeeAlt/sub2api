@@ -27,13 +27,34 @@ export type OpsUpstreamErrorEvent = {
   reported_headers?: Record<string, string>
 }
 
+export interface OpsDeliveryWindow {
+  seconds: number
+  from: string | null
+  to: string | null
+  unit: 'char' | 'token'
+  speed_unit: 'char' | 'token'
+  output: number
+  requests: number
+  current_available: boolean
+  missing: boolean
+  token_coverage: number | null
+  qps: OpsDashboardOverview['qps']
+  rate: OpsDashboardOverview['qps']
+  speed: NonNullable<OpsDashboardOverview['output_tps']>
+  ttft: OpsPercentiles
+  attempts: number
+  limited_attempts: number
+}
+
 export interface OpsDashboardOverview {
+  delivery?: OpsDeliveryWindow
   start_time: string
   end_time: string
   platform: string
   group_id?: number | null
 
   health_score?: number
+  health_deductions?: { errors: number; ttft: number; infra: number }
 
   system_metrics?: OpsSystemMetricsSnapshot | null
   job_heartbeats?: OpsJobHeartbeat[] | null
@@ -87,6 +108,9 @@ export interface OpsPercentiles {
 }
 
 export interface OpsThroughputTrendPoint {
+  delivery_qps?: number | null
+  delivery_rate?: number | null
+  delivery_unit?: string
   bucket_start: string
   request_count: number
   token_consumed: number
@@ -115,8 +139,8 @@ export interface OpsThroughputTrendResponse {
   top_groups?: OpsThroughputGroupBreakdownItem[]
 }
 
-export type OpsRequestKind = 'success' | 'error'
-export type OpsRequestDetailsKind = OpsRequestKind | 'all'
+export type OpsRequestKind = 'success' | 'error' | 'active' | 'cancelled' | 'limited'
+export type OpsRequestDetailsKind = 'success' | 'error' | 'all'
 export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc' | 'ttft_desc'
 
 export interface OpsRequestDetail {
@@ -226,9 +250,11 @@ export type OpsOpenAITokenStatsTimeRange = '30m' | '1h' | '1d' | '15d' | '30d'
 export interface OpsOpenAITokenStatsItem {
   model: string
   request_count: number
-  avg_tokens_per_sec?: number | null
+  p50?: number | null
+  unit: string
+  speed_unit: string
   avg_first_token_ms?: number | null
-  total_output_tokens: number
+  output: number | null
   avg_duration_ms: number
   requests_with_first_token: number
 }
@@ -430,6 +456,7 @@ export interface OpsRateSummary {
 }
 
 export interface OpsRealtimeTrafficSummary {
+  delivery?: OpsDeliveryWindow
   window: string
   start_time: string
   end_time: string

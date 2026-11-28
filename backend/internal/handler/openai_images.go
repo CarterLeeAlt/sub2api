@@ -418,6 +418,9 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				result.ImageOutputSizes = nil
 			}
 		}
+		if result != nil && result.ImageCount > 0 && err == nil {
+			c.Set(opsImageDeliveredKey, true)
+		}
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)

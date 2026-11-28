@@ -58,7 +58,7 @@ describe('Ops request latency details', () => {
     })
   })
 
-  it('opens the TTFT card with first-token sorting and successful requests', async () => {
+  it('opens TTFT details sorted by first visible write across outcomes', async () => {
     const wrapper = shallowMount(OpsDashboardHeader, {
       props: { overview: {} as OpsDashboardOverview, platform: '', groupId: null, timeRange: '1h', queryMode: 'auto', loading: false, lastUpdated: null },
     })
@@ -70,7 +70,7 @@ describe('Ops request latency details', () => {
     expect(button).toBeDefined()
     await button!.trigger('click')
     expect(wrapper.emitted('openRequestDetails')).toEqual([[
-      { title: 'admin.ops.ttftLabel', kind: 'success', sort: 'ttft_desc' },
+      { title: 'admin.ops.ttftLabel', sort: 'ttft_desc' },
     ]])
     wrapper.unmount()
   })

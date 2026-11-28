@@ -34,6 +34,11 @@ func computeDashboardHealthScore(now time.Time, overview *OpsDashboardOverview) 
 // computeBusinessHealth calculates business health score (0-100)
 // Components: Error Rate (50%) + TTFT (50%)
 func computeBusinessHealth(overview *OpsDashboardOverview) float64 {
+	errorScore, ttftScore := opsBusinessScores(overview)
+	return errorScore*0.5 + ttftScore*0.5
+}
+
+func opsBusinessScores(overview *OpsDashboardOverview) (float64, float64) {
 	// Error rate score: 1% → 100, 10% → 0 (linear)
 	// Combines request errors and upstream errors
 	errorScore := 100.0
@@ -63,7 +68,7 @@ func computeBusinessHealth(overview *OpsDashboardOverview) float64 {
 	}
 
 	// Weighted combination: 50% error rate + 50% TTFT
-	return errorScore*0.5 + ttftScore*0.5
+	return errorScore, ttftScore
 }
 
 // computeInfraHealth calculates infrastructure health score (0-100)

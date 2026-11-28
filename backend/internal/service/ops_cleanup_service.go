@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/robfig/cron/v3"
@@ -346,6 +347,17 @@ func (s *OpsCleanupService) runCleanupOnce(ctx context.Context) (opsCleanupDelet
 			return out, err
 		}
 		*t.counter = n
+	}
+	// Delete coverage with its measurements so a removed interval cannot appear idle.
+	if effective.HourlyMetricsRetentionDays >= 0 {
+		cutoff := now.AddDate(0, 0, -effective.HourlyMetricsRetentionDays).Truncate(opsdelivery.Window)
+		if _, err := s.db.ExecContext(ctx, `
+WITH coverage AS (DELETE FROM ops_delivery_coverage WHERE bucket < $1),
+     buckets AS (DELETE FROM ops_delivery_buckets WHERE bucket < $1)
+DELETE FROM ops_delivery_requests
+WHERE ended_at < $1 OR (ended_at IS NULL AND started_at < $1 - interval '1 day')`, cutoff); err != nil {
+			return out, err
+		}
 	}
 
 	// Channel monitor 每日维护（聚合昨日明细 + 软删过期明细/聚合）。

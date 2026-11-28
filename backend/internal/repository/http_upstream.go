@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	"io"
 	"log/slog"
 	"net"
@@ -311,6 +312,13 @@ func doUpstreamRequest(client *http.Client, req *http.Request, drainTimeouts ...
 	}
 	ctx, cancel := pkghttputil.NewUpstreamAttemptContext(req.Context(), drainTimeout)
 	resp, err := servertiming.Do(client, req.WithContext(ctx))
+	if delivery := opsdelivery.From(req.Context()); delivery != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		delivery.Attempt(status)
+	}
 	if err != nil {
 		cancel()
 		return resp, err

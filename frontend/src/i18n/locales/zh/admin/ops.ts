@@ -4,7 +4,13 @@ export default {
       description: '运维监控与排障',
       // Dashboard
       systemHealth: '系统健康',
-      outputTps: '单次输出 TPS',
+      outputTps: '单次输出',
+      charsPerSec: '字符/秒',
+      chars: '字符',
+      outputAmount: '输出量',
+      avgOutput: '平均输出',
+      noMeasurement: '数据不足',
+      covered: '采集范围 {from} 至 {to}，共 {seconds} 秒。正文 Token 明细覆盖 {tokens}。',
       outputTpsSamples: '有效样本：{count}',
       overview: '概览',
       noSystemMetrics: '尚未收集系统指标。',
@@ -110,7 +116,7 @@ export default {
       errorCount: '错误数',
       upstreamErrors: '上游错误',
       errorCountExcl429529: '错误数（排除429/529）',
-      sla: 'SLA（排除业务限制）',
+      sla: 'SLA',
       businessLimited: '业务限制：',
       errors: '错误',
       errorRate: '错误率：',
@@ -151,7 +157,8 @@ export default {
       // Health Score & Diagnosis
       health: '健康',
       healthCondition: '健康状况',
-      healthHelp: '基于 SLA、错误率和资源使用情况的系统整体健康评分',
+      healthHelp: '规则评分。缺少必要的请求、时延或系统数据时显示 —。',
+      healthDeductions: '规则评分。扣分：错误率 {errors}，TTFT {ttft}，系统 {infra}。',
       healthyStatus: '健康',
       riskyStatus: '风险',
       idleStatus: '待机',
@@ -168,7 +175,7 @@ export default {
         custom: '自定义'
       },
       openaiTokenStats: {
-        title: 'Token 请求统计',
+        title: '模型输出',
         viewModeTopN: 'TopN',
         viewModePagination: '分页',
         prevPage: '上一页',
@@ -180,9 +187,9 @@ export default {
         table: {
           model: '模型',
           requestCount: '请求数',
-          avgTokensPerSec: '平均 Tokens/秒',
+          avgTokensPerSec: '单次输出 P50',
           avgFirstTokenMs: '平均首 Token 延迟(ms)',
-          totalOutputTokens: '输出 Token 总数',
+          totalOutputTokens: '输出量',
           avgDurationMs: '平均时长(ms)',
           requestsWithFirstToken: '首 Token 样本数'
         }
@@ -433,7 +440,10 @@ export default {
         viewError: '查看错误',
         kind: {
           success: '成功',
-          error: '失败'
+          error: '失败',
+          active: '进行中',
+          cancelled: '取消',
+          limited: '受限'
         },
         table: {
           time: '时间',
@@ -819,14 +829,14 @@ export default {
         accountError: '异常'
       },
       tooltips: {
-        outputTps: '每条有效用量记录的输出 Token ÷ 总耗时（含首字等待），再按当前时间、平台和分组计算分位数。输出可含推理 Token，不重复相加。P50 为中位数，P5/P10 反映较慢请求；数值越高越快。排除图片、Live、无有效输出或耗时的记录。样本来自仍保留的使用明细；无样本或统计暂不可用时显示 —。',
-        totalRequests: '当前时间窗口内的总请求数和Token消耗量。',
-        throughputTrend: '当前窗口内的请求/QPS 与 token/TPS 趋势。',
+        outputTps: '首批之后的正文量 ÷ 首末两批的发送间隔。至少两次写出才计入样本。',
+        totalRequests: '请求按进入网关计数，正文按写出时间计量。',
+        throughputTrend: '请求按到达、正文按网关写出时间分桶，缺少采集的时段留空。',
         switchRateTrend: '近5小时内账号切换次数 / 请求总数的趋势（平均切换次数）。',
         latencyHistogram: '成功请求的请求时长分布（毫秒）。',
         errorTrend: '错误趋势（SLA 口径排除业务限制；上游错误率排除 429/529）。',
         errorDistribution: '按状态码统计的错误分布（SLA 口径，排除业务限制）。',
-        upstreamErrors: '上游服务返回的错误，包括API提供商的错误响应（排除429/529限流错误）。',
+        upstreamErrors: '失败尝试占全部上游尝试的比例。429/529 另列。',
         goroutines:
           'Go 运行时的协程数量（轻量级线程）。没有绝对"安全值"，建议以历史基线为准。经验参考：<2000 常见；2000-8000 需关注；>8000 且伴随队列上升时，优先排查阻塞/泄漏。',
         cpu: 'CPU 使用率，显示系统处理器的负载情况。',
@@ -834,12 +844,12 @@ export default {
         db: '数据库连接池状态，包括活跃连接、空闲连接和等待连接数。',
         redis: 'Redis 连接池状态，显示活跃和空闲的连接数。',
         jobs: '后台任务执行状态，包括最近运行时间、成功时间和错误信息。',
-        qps: '每秒查询数（QPS）和每秒Token数（TPS），实时显示系统吞吐量。',
+        qps: '请求按到达、正文按写出计数。当前为最近完整 5 秒，峰值和平均含已采集的空闲时段。正文有完整 Token 明细时显示 tok/s。',
         tokens: '当前时间窗口内处理的总Token数量。',
-        sla: '服务等级协议达成率，排除业务限制（如余额不足、配额超限）的成功请求占比。',
-        errors: '错误统计，包括总错误数、错误率和上游错误率。',
+        sla: '完整交付数 ÷（完整交付数 + 服务失败数）。客户端取消、业务限制另计。',
+        errors: '服务失败数 ÷（完整交付数 + 服务失败数）。流式响应提前中断计失败。',
         latency: '请求时长统计，包括 p50、p90、p95、p99 等百分位数。',
-        ttft: '首 Token 延迟（Time To First Token），衡量流式响应的首 Token 返回速度。',
+        ttft: '请求进入网关至首批非空正文写出的时间。排除心跳、推理和工具参数。',
         health: '系统健康评分（0-100），综合考虑 SLA、错误率和资源使用情况。'
       },
       charts: {

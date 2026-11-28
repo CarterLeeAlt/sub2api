@@ -145,6 +145,9 @@ ORDER BY bucket ASC`
 
 	// Fill missing buckets with zeros so charts render continuous timelines.
 	points = fillOpsThroughputBuckets(start, end, bucketSeconds, points)
+	if err := r.addDeliveryTrend(ctx, filter, bucketSeconds, points); err != nil {
+		return nil, err
+	}
 
 	var byPlatform []*service.OpsThroughputPlatformBreakdownItem
 	var topGroups []*service.OpsThroughputGroupBreakdownItem
@@ -186,37 +189,14 @@ ORDER BY bucket ASC`
 
 func (r *opsRepository) getThroughputBreakdownByPlatform(ctx context.Context, start, end time.Time) ([]*service.OpsThroughputPlatformBreakdownItem, error) {
 	q := `
-WITH usage_totals AS (
-  SELECT COALESCE(NULLIF(g.platform,''), a.platform) AS platform,
-         COUNT(*) AS success_count,
-         COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS token_consumed
-  FROM usage_logs ul
-  LEFT JOIN groups g ON g.id = ul.group_id
-  LEFT JOIN accounts a ON a.id = ul.account_id
-  WHERE ul.created_at >= $1 AND ul.created_at < $2
-  GROUP BY 1
-),
-error_totals AS (
-  SELECT platform,
-         COUNT(*) AS error_count
-  FROM ops_error_logs
-  WHERE created_at >= $1 AND created_at < $2
-    AND COALESCE(status_code, 0) >= 400
-    AND is_count_tokens = FALSE  -- 排除 count_tokens 请求的错误
-  GROUP BY 1
-),
-combined AS (
-  SELECT COALESCE(u.platform, e.platform) AS platform,
-         COALESCE(u.success_count, 0) AS success_count,
-         COALESCE(e.error_count, 0) AS error_count,
-         COALESCE(u.token_consumed, 0) AS token_consumed
-  FROM usage_totals u
-  FULL OUTER JOIN error_totals e ON u.platform = e.platform
-)
-SELECT platform, (success_count + error_count) AS request_count, token_consumed
-FROM combined
-WHERE platform IS NOT NULL AND platform <> ''
-ORDER BY request_count DESC`
+SELECT r.platform, count(*) AS request_count
+FROM ops_delivery_requests r
+JOIN ops_delivery_coverage c ON c.bucket=date_bin('5 seconds',r.started_at,timestamptz 'epoch')
+WHERE c.bucket >= date_bin('5 seconds',$1::timestamptz,timestamptz 'epoch')
+  AND c.bucket < date_bin('5 seconds',$2::timestamptz,timestamptz 'epoch')
+  AND r.platform <> ''
+GROUP BY r.platform
+ORDER BY request_count DESC, r.platform`
 
 	rows, err := r.db.QueryContext(ctx, q, start, end)
 	if err != nil {
@@ -228,18 +208,12 @@ ORDER BY request_count DESC`
 	for rows.Next() {
 		var platform string
 		var requests int64
-		var tokens sql.NullInt64
-		if err := rows.Scan(&platform, &requests, &tokens); err != nil {
+		if err := rows.Scan(&platform, &requests); err != nil {
 			return nil, err
 		}
-		tokenConsumed := int64(0)
-		if tokens.Valid {
-			tokenConsumed = tokens.Int64
-		}
 		items = append(items, &service.OpsThroughputPlatformBreakdownItem{
-			Platform:      platform,
-			RequestCount:  requests,
-			TokenConsumed: tokenConsumed,
+			Platform:     platform,
+			RequestCount: requests,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -257,42 +231,15 @@ func (r *opsRepository) getThroughputTopGroupsByPlatform(ctx context.Context, st
 	}
 
 	q := `
-WITH usage_totals AS (
-  SELECT ul.group_id AS group_id,
-         g.name AS group_name,
-         COUNT(*) AS success_count,
-         COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS token_consumed
-  FROM usage_logs ul
-  JOIN groups g ON g.id = ul.group_id
-  WHERE ul.created_at >= $1 AND ul.created_at < $2
-    AND g.platform = $3
-  GROUP BY 1, 2
-),
-error_totals AS (
-  SELECT group_id,
-         COUNT(*) AS error_count
-  FROM ops_error_logs
-  WHERE created_at >= $1 AND created_at < $2
-    AND platform = $3
-    AND group_id IS NOT NULL
-    AND COALESCE(status_code, 0) >= 400
-    AND is_count_tokens = FALSE  -- 排除 count_tokens 请求的错误
-  GROUP BY 1
-),
-combined AS (
-  SELECT COALESCE(u.group_id, e.group_id) AS group_id,
-         COALESCE(u.group_name, g2.name, '') AS group_name,
-         COALESCE(u.success_count, 0) AS success_count,
-         COALESCE(e.error_count, 0) AS error_count,
-         COALESCE(u.token_consumed, 0) AS token_consumed
-  FROM usage_totals u
-  FULL OUTER JOIN error_totals e ON u.group_id = e.group_id
-  LEFT JOIN groups g2 ON g2.id = COALESCE(u.group_id, e.group_id)
-)
-SELECT group_id, group_name, (success_count + error_count) AS request_count, token_consumed
-FROM combined
-WHERE group_id IS NOT NULL
-ORDER BY request_count DESC
+SELECT r.group_id, g.name, count(*) AS request_count
+FROM ops_delivery_requests r
+JOIN ops_delivery_coverage c ON c.bucket=date_bin('5 seconds',r.started_at,timestamptz 'epoch')
+LEFT JOIN groups g ON g.id=r.group_id
+WHERE c.bucket >= date_bin('5 seconds',$1::timestamptz,timestamptz 'epoch')
+  AND c.bucket < date_bin('5 seconds',$2::timestamptz,timestamptz 'epoch')
+  AND r.platform = $3 AND r.group_id > 0
+GROUP BY r.group_id,g.name
+ORDER BY request_count DESC, r.group_id
 LIMIT $4`
 
 	rows, err := r.db.QueryContext(ctx, q, start, end, platform, limit)
@@ -306,23 +253,17 @@ LIMIT $4`
 		var groupID int64
 		var groupName sql.NullString
 		var requests int64
-		var tokens sql.NullInt64
-		if err := rows.Scan(&groupID, &groupName, &requests, &tokens); err != nil {
+		if err := rows.Scan(&groupID, &groupName, &requests); err != nil {
 			return nil, err
-		}
-		tokenConsumed := int64(0)
-		if tokens.Valid {
-			tokenConsumed = tokens.Int64
 		}
 		name := ""
 		if groupName.Valid {
 			name = groupName.String
 		}
 		items = append(items, &service.OpsThroughputGroupBreakdownItem{
-			GroupID:       groupID,
-			GroupName:     name,
-			RequestCount:  requests,
-			TokenConsumed: tokenConsumed,
+			GroupID:      groupID,
+			GroupName:    name,
+			RequestCount: requests,
 		})
 	}
 	if err := rows.Err(); err != nil {

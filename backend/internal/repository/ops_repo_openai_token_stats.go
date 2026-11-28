@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -31,27 +32,25 @@ func (r *opsRepository) GetOpenAITokenStats(ctx context.Context, filter *service
 		GroupID:   filter.GroupID,
 	}
 
-	join, where, baseArgs, next := buildUsageWhere(dashboardFilter, dashboardFilter.StartTime, dashboardFilter.EndTime, 1)
+	baseArgs := []any{dashboardFilter.StartTime.Truncate(opsdelivery.Window), dashboardFilter.EndTime.Truncate(opsdelivery.Window), dashboardFilter.Platform, dashboardFilter.GroupID}
+	next := 5
 
 	baseCTE := `
-WITH stats AS (
-  SELECT
-    ul.model AS model,
-    COUNT(*)::bigint AS request_count,
-    ROUND(
-      1000.0 * (SUM(ul.output_tokens) FILTER (WHERE ul.duration_ms > 0 AND ul.output_tokens > 0))
-      / (SUM(ul.duration_ms) FILTER (WHERE ul.duration_ms > 0 AND ul.output_tokens > 0)),
-      2
-    )::float8 AS avg_tokens_per_sec,
-    ROUND(AVG(ul.first_token_ms)::numeric, 2)::float8 AS avg_first_token_ms,
-    COALESCE(SUM(ul.output_tokens), 0)::bigint AS total_output_tokens,
-    COALESCE(ROUND(AVG(ul.duration_ms)::numeric, 0), 0)::bigint AS avg_duration_ms,
-    COUNT(CASE WHEN ul.first_token_ms IS NOT NULL THEN 1 END)::bigint AS requests_with_first_token
-  FROM usage_logs ul
-  ` + join + `
-  ` + where + `
-  GROUP BY ul.model
-)
+WITH covered AS (SELECT bucket FROM ops_delivery_coverage WHERE bucket >= $1 AND bucket < $2), events AS (
+ SELECT r.model,1 n,0 chars,0 tokens,0 unknown,NULL::float8 first_ms,NULL::float8 duration,NULL::float8 char_rate,NULL::float8 token_rate,false missing
+ FROM ops_delivery_requests r JOIN covered ON bucket=date_bin('5 seconds',started_at,timestamptz 'epoch') WHERE started_at >= $1 AND started_at < $2 ` + deliveryScope + `
+ UNION ALL
+ SELECT r.model,0,b.chars,b.tokens,b.unknown_chars,NULL,NULL,NULL,NULL,r.incomplete_measurement
+ FROM ops_delivery_buckets b JOIN covered USING(bucket) JOIN ops_delivery_requests r ON r.id=b.id WHERE b.bucket >= $1 AND b.bucket < $2 ` + deliveryScope + `
+ UNION ALL
+ SELECT r.model,0,0,0,0,first_ms,extract(epoch FROM ended_at-started_at)*1000,(chars-first_chars)*1000.0/nullif(span_ms,0),CASE WHEN unknown_chars=0 THEN (tokens-first_tokens)*1000.0/nullif(span_ms,0) END,r.incomplete_measurement
+ FROM ops_delivery_requests r JOIN covered ON bucket=date_bin('5 seconds',ended_at,timestamptz 'epoch') WHERE ended_at >= $1 AND ended_at < $2 ` + deliveryScope + `
+), stats AS (
+ SELECT model,sum(n) request_count,CASE WHEN NOT bool_or(missing) THEN percentile_cont(.5) within group(order by token_rate) END token_p50,
+ CASE WHEN NOT bool_or(missing) THEN percentile_cont(.5) within group(order by char_rate) END char_p50, count(token_rate)=count(char_rate) exact_speed,
+ avg(first_ms) avg_first_token_ms,CASE WHEN NOT bool_or(missing) THEN sum(tokens) END output_tokens,
+ CASE WHEN NOT bool_or(missing) THEN sum(chars) END output_chars,sum(unknown)=0 AND sum(chars)>0 exact_output,
+ coalesce(round(avg(duration)),0)::bigint avg_duration_ms,count(first_ms) requests_with_first_token FROM events GROUP BY model)
 `
 
 	countSQL := baseCTE + `SELECT COUNT(*) FROM stats`
@@ -64,11 +63,11 @@ WITH stats AS (
 SELECT
   model,
   request_count,
-  avg_tokens_per_sec,
+  CASE WHEN exact_speed THEN token_p50 ELSE char_p50 END,
   avg_first_token_ms,
-  total_output_tokens,
+  CASE WHEN exact_output THEN output_tokens ELSE output_chars END,
   avg_duration_ms,
-  requests_with_first_token
+  requests_with_first_token, exact_speed,exact_output
 FROM stats
 ORDER BY request_count DESC, model ASC`
 
@@ -95,26 +94,36 @@ ORDER BY request_count DESC, model ASC`
 		item := &service.OpsOpenAITokenStatsItem{}
 		var avgTPS sql.NullFloat64
 		var avgFirstToken sql.NullFloat64
+		var exactSpeed, exactOutput bool
 		if err := rows.Scan(
 			&item.Model,
 			&item.RequestCount,
 			&avgTPS,
 			&avgFirstToken,
-			&item.TotalOutputTokens,
+			&item.Output,
 			&item.AvgDurationMs,
 			&item.RequestsWithFirstToken,
+			&exactSpeed, &exactOutput,
 		); err != nil {
 			return nil, err
 		}
 		if avgTPS.Valid {
 			v := avgTPS.Float64
-			item.AvgTokensPerSec = &v
+			item.P50 = &v
 		}
 		if avgFirstToken.Valid {
 			v := avgFirstToken.Float64
 			item.AvgFirstTokenMs = &v
 		}
 		items = append(items, item)
+		item.SpeedUnit = "char"
+		item.Unit = "char"
+		if exactSpeed {
+			item.SpeedUnit = "token"
+		}
+		if exactOutput {
+			item.Unit = "token"
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

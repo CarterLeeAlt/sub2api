@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	"os"
 	"time"
 
@@ -819,6 +820,9 @@ func ProvideOpsService(
 	svc.authCacheInvalidationWorker = authCacheInvalidationWorker
 	svc.apiKeyService = apiKeyService
 	svc.StartRuntimeSettingsRefresh(context.Background())
+	if store, ok := opsRepo.(opsdelivery.Store); ok {
+		svc.Delivery = opsdelivery.NewCollector(store, func() bool { return svc.IsMonitoringEnabled(context.Background()) })
+	}
 	return svc
 }
 

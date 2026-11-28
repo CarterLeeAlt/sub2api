@@ -20,6 +20,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opsdelivery"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -31,6 +32,7 @@ const (
 	opsAccountIDKey              = "ops_account_id"
 	opsRoutingCapacityLimitedKey = "ops_routing_capacity_limited"
 	opsDedicatedErrorRecordedKey = "ops_dedicated_error_recorded"
+	opsImageDeliveredKey         = "ops_image_delivered"
 
 	opsUpstreamModelKey = service.OpsUpstreamModelKey
 	opsRequestTypeKey   = "ops_request_type"
@@ -446,6 +448,7 @@ func setOpsRequestContext(c *gin.Context, model string, stream bool) {
 	model = strings.TrimSpace(model)
 	c.Set(opsModelKey, model)
 	c.Set(opsStreamKey, stream)
+	setDeliveryDimensions(c, model)
 	if c.Request != nil && model != "" {
 		ctx := context.WithValue(c.Request.Context(), ctxkey.Model, model)
 		c.Request = c.Request.WithContext(ctx)
@@ -479,7 +482,29 @@ func setOpsSelectedAccount(c *gin.Context, accountID int64, platform ...string) 
 			}
 		}
 		c.Request = c.Request.WithContext(ctx)
+		setDeliveryDimensions(c, c.GetString(opsModelKey))
 	}
+}
+
+func setDeliveryDimensions(c *gin.Context, model string) {
+	if c.Request == nil {
+		return
+	}
+	ctx := c.Request.Context()
+	session := opsdelivery.From(ctx)
+	if session == nil {
+		return
+	}
+	key := getOpsAPIKey(c)
+	var group, user, keyID int64
+	if key != nil {
+		user, keyID = key.UserID, key.ID
+		if key.GroupID != nil {
+			group = *key.GroupID
+		}
+	}
+	session.Dimensions(resolveOpsPlatform(ctx, key, guessPlatformFromPath(c.Request.URL.Path)), group, model)
+	session.Identity(user, keyID, c.GetInt64(opsAccountIDKey), c.GetBool(opsStreamKey) || strings.EqualFold(c.GetHeader("Upgrade"), "websocket"))
 }
 
 func markOpsRoutingCapacityLimited(c *gin.Context) {
@@ -519,6 +544,9 @@ func isOpsNoAvailableAccountError(err error) bool {
 }
 
 type opsCaptureWriter struct {
+	delivery       *opsdelivery.Body
+	deliveryMu     sync.Mutex
+	deliveryFailed bool
 	// Handles are never pooled. A generation binds each handle to exactly one
 	// pooled state lease, so a stale handle cannot reach a later request.
 	state      *opsCaptureWriterState
@@ -818,7 +846,9 @@ func (w *opsCaptureWriter) Write(b []byte) (int, error) {
 	}
 	state.mu.Unlock()
 	defer finishDelegatedCall(state)
-	return rw.Write(b)
+	n, err := rw.Write(b)
+	w.observeDelivery(rw, b, n, err)
+	return n, err
 }
 
 func (w *opsCaptureWriter) WriteString(s string) (int, error) {
@@ -831,7 +861,25 @@ func (w *opsCaptureWriter) WriteString(s string) (int, error) {
 	}
 	state.mu.Unlock()
 	defer finishDelegatedCall(state)
-	return rw.WriteString(s)
+	n, err := rw.WriteString(s)
+	if w.delivery != nil {
+		w.observeDelivery(rw, []byte(s), n, err)
+	}
+	return n, err
+}
+
+func (w *opsCaptureWriter) observeDelivery(rw gin.ResponseWriter, b []byte, n int, err error) {
+	if w.delivery == nil {
+		return
+	}
+	w.deliveryMu.Lock()
+	defer w.deliveryMu.Unlock()
+	if err != nil {
+		w.deliveryFailed = true
+	}
+	if n > 0 && rw.Status() < 400 {
+		w.delivery.Write(time.Now(), rw.Header().Get("Content-Type"), b[:n])
+	}
 }
 
 var _ gin.ResponseWriter = (*opsCaptureWriter)(nil)
@@ -1078,6 +1126,37 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		originalWriter := c.Writer
 		w := acquireOpsCaptureWriter(originalWriter)
+		var session *opsdelivery.Session
+		ws := strings.EqualFold(c.GetHeader("Upgrade"), "websocket")
+		if ops != nil && ops.Delivery != nil && (c.Request.Method == http.MethodPost || ws) && !strings.HasSuffix(c.Request.URL.Path, "count_tokens") && !strings.HasSuffix(c.Request.URL.Path, "input_tokens") && ops.IsMonitoringEnabled(c.Request.Context()) {
+			ctx := c.Request.Context()
+			requestID, _ := ctx.Value(ctxkey.ClientRequestID).(string)
+			ctx, session = opsdelivery.WithSession(ctx, ops.Delivery, requestID)
+			c.Request = c.Request.WithContext(ctx)
+			path := c.Request.URL.Path
+			w.delivery = &opsdelivery.Body{Session: session, ImageOnly: strings.HasSuffix(path, "/images/generations") || strings.HasSuffix(path, "/images/edits")}
+			if !ws {
+				session.Start(time.Now(), "")
+			}
+			defer func() {
+				setDeliveryDimensions(c, c.GetString(opsModelKey))
+				w.deliveryMu.Lock()
+				defer w.deliveryMu.Unlock()
+				if p := recover(); p != nil {
+					session.Finish(time.Now(), "failed")
+					panic(p)
+				}
+				streamFailure := len(service.GetOpsStreamErrors(c)) > 0
+				outcome := w.delivery.Outcome(originalWriter.Status(), w.deliveryFailed || errors.Is(ctx.Err(), context.Canceled), service.HasOpsClientBusinessLimited(c), streamFailure || ws)
+				if w.delivery.ImageOnly && outcome == "completed" && originalWriter.Status() == http.StatusOK && !c.GetBool(opsImageDeliveredKey) {
+					outcome = "failed"
+				}
+				if outcome == "failed" && (w.delivery.StreamFailed() || streamFailure) {
+					session.FailAttempt(0)
+				}
+				session.Finish(time.Now(), outcome)
+			}()
+		}
 		w.setContext(c)
 		defer func() {
 			// Restore the original writer before returning so outer middlewares
