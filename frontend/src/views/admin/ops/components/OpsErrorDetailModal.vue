@@ -173,6 +173,11 @@
         </div>
       </div>
 
+      <div v-if="detail.phase === 'routing' && detail.type === 'no_available_accounts'" class="rounded-xl bg-gray-50 p-4 dark:bg-dark-900">
+        <h3 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.ops.errorDetail.selectionReason') }}</h3>
+        <p class="mt-1 break-words text-xs text-gray-600 dark:text-gray-400">{{ detail.message?.includes('(pool=') ? detail.message : t('admin.ops.errorDetail.selectionReasonUnavailable') }}</p>
+      </div>
+
       <div class="rounded-xl bg-gray-50 p-6 dark:bg-dark-900">
         <h3 class="text-sm font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ t('admin.ops.errorDetail.diagnosticPayloads') }}</h3>
         <div v-if="!diagnosticPayloadSections.length" class="mt-4 text-sm text-gray-500 dark:text-gray-400">{{ t('common.noData') }}</div>

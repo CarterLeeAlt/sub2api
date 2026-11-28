@@ -102,7 +102,7 @@
 
         <template #cell-category="{ row }">
           <span class="text-sm text-gray-900 dark:text-white">
-            {{ t('usage.errors.categories.' + mapErrorCategory(row.phase, row.type)) }}
+            {{ getCategoryLabel(row) }}
           </span>
         </template>
 
@@ -227,6 +227,18 @@ const columns = computed<Column[]>(() => {
     ...visibleColumns.filter((c) => c.key !== 'created_at' && c.key !== 'message'),
   ]
 })
+
+function getCategoryLabel(log: OpsErrorLog): string {
+  const owner = log.error_owner?.trim().toLowerCase()
+  const ownerKey = owner === 'client' || owner === 'provider' || owner === 'platform' ? owner : 'unknown'
+  const reason = log.phase === 'routing' && log.type === 'no_available_accounts'
+    ? t('admin.ops.errorLog.noAvailableAccounts')
+    : t('usage.errors.categories.' + mapErrorCategory(log.phase, log.type))
+  return t('admin.ops.errorLog.categoryWithOwner', {
+    owner: t(`admin.ops.errorDetails.owner.${ownerKey}`),
+    reason,
+  })
+}
 
 function isUpstreamRow(log: OpsErrorLog): boolean {
   const phase = String(log.phase || '').toLowerCase()

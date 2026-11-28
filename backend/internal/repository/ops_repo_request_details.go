@@ -21,8 +21,8 @@ func (r *opsRepository) ListRequestDetails(ctx context.Context, filter *service.
 	conditions := make([]string, 0, 16)
 	args := make([]any, 0, 24)
 
-	// Placeholders $1/$2 reserved for time window inside the CTE.
-	args = append(args, startTime.UTC(), endTime.UTC())
+	measuredTTFT := filter != nil && filter.Sort == "ttft_desc"
+	args = append(args, startTime.UTC(), endTime.UTC(), measuredTTFT)
 
 	addCondition := func(condition string, values ...any) {
 		conditions = append(conditions, condition)
@@ -84,11 +84,6 @@ func (r *opsRepository) ListRequestDetails(ctx context.Context, filter *service.
 		where = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	deliveryTime := "r.started_at"
-	if filter != nil && (filter.Sort == "ttft_desc" || filter.Kind == "error") {
-		deliveryTime = "r.ended_at"
-	}
-
 	cte := `
 WITH combined AS (
   SELECT
@@ -113,7 +108,7 @@ WITH combined AS (
   LEFT JOIN groups g ON g.id = ul.group_id
   LEFT JOIN accounts a ON a.id = ul.account_id
   WHERE ul.created_at >= $1 AND ul.created_at < $2
-    AND NOT EXISTS (SELECT 1 FROM ops_delivery_coverage c WHERE c.bucket=date_bin('5 seconds',ul.created_at,timestamptz 'epoch'))
+    AND NOT $3::boolean
 
   UNION ALL
 
@@ -121,7 +116,7 @@ WITH combined AS (
     'error'::TEXT AS kind,
     o.created_at AS created_at,
     COALESCE(NULLIF(o.request_id,''), NULLIF(o.client_request_id,''), '') AS request_id,
-    COALESCE(NULLIF(o.platform, ''), NULLIF(g.platform, ''), NULLIF(a.platform, ''), '') AS platform,
+     COALESCE(o.platform, '') AS platform,
     o.model AS model,
     o.duration_ms AS duration_ms,
     o.time_to_first_token_ms AS first_token_ms,
@@ -136,19 +131,18 @@ WITH combined AS (
     o.group_id AS group_id,
     o.stream AS stream
   FROM ops_error_logs o
-  LEFT JOIN groups g ON g.id = o.group_id
-  LEFT JOIN accounts a ON a.id = o.account_id
   WHERE o.created_at >= $1 AND o.created_at < $2
     AND COALESCE(o.status_code, 0) >= 400
-    AND NOT EXISTS (SELECT 1 FROM ops_delivery_coverage c WHERE c.bucket=date_bin('5 seconds',o.created_at,timestamptz 'epoch'))
+    AND o.is_count_tokens = FALSE
+    AND NOT $3::boolean
 
   UNION ALL
   SELECT CASE outcome WHEN 'completed' THEN 'success' WHEN 'failed' THEN 'error' ELSE outcome END,
-    delivery_time,r.request_id,r.platform,r.model,round(extract(epoch FROM ended_at-started_at)*1000)::bigint,
-    CASE WHEN NOT incomplete_measurement THEN round(first_ms)::bigint END,
+     r.ended_at,r.request_id,r.platform,r.model,round(extract(epoch FROM ended_at-started_at)*1000)::bigint,
+     round(first_ms)::bigint,
     logged.status_code,logged.id,logged.error_phase,logged.severity,logged.error_message,r.user_id,r.api_key_id,r.account_id,nullif(r.group_id,0),r.stream
-  FROM ops_delivery_requests r CROSS JOIN LATERAL (SELECT ` + deliveryTime + ` AS delivery_time) stamp
-  JOIN ops_delivery_coverage c ON c.bucket=date_bin('5 seconds',delivery_time,timestamptz 'epoch')
+   FROM ops_delivery_requests r
+   JOIN ops_delivery_coverage c ON c.bucket=date_bin('5 seconds',r.ended_at,timestamptz 'epoch')
   LEFT JOIN LATERAL (
     SELECT o.id,o.status_code,o.error_phase,o.severity,o.error_message
     FROM ops_error_logs o
@@ -157,7 +151,8 @@ WITH combined AS (
       AND coalesce(o.status_code,0)>=400
     ORDER BY o.created_at DESC LIMIT 1
   ) logged ON true
-  WHERE delivery_time >= $1 AND delivery_time < $2
+   WHERE $3::boolean AND r.ended_at >= $1 AND r.ended_at < $2
+     AND r.first_ms IS NOT NULL AND NOT r.incomplete_measurement
 )
 `
 

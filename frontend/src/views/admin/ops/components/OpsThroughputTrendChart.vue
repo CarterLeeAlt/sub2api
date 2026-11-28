@@ -56,13 +56,13 @@ const colors = computed(() => ({
 const rateUnit = computed(() => props.points.some(p => p.delivery_unit === 'token') ? 'tok/s' : t('admin.ops.charsPerSec'))
 
 const chartData = computed(() => {
-  if (!props.points.some(p => p.delivery_qps != null)) return null
+  if (!props.points.length) return null
   return {
     labels: props.points.map((p) => formatHistoryLabel(p.bucket_start, props.timeRange)),
     datasets: [
       {
         label: 'QPS',
-        data: props.points.map((p) => p.delivery_qps ?? null),
+        data: props.points.map((p) => p.qps),
         borderColor: colors.value.blue,
         backgroundColor: colors.value.blueAlpha,
         fill: true,

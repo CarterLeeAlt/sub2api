@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -33,6 +32,9 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Codex models manifest is only available for OpenAI and Composite groups")
 		return
 	}
+	finishObservation := observeOpenAIModelDiscovery(c)
+	defer finishObservation()
+	var pinnedFailure error
 
 	ifNoneMatch := c.GetHeader("If-None-Match")
 	// 固定账号分支：开启后只用选定账号拉取 manifest，不经过调度器；
@@ -49,18 +51,18 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 				return
 			}
 			if !apiKey.Group.CodexModelsManifestConfig.FallbackToScheduler {
-				if errors.Is(pinnedErr, service.ErrNoPinnedCodexModelsAccounts) {
-					h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available pinned OpenAI accounts")
-					return
-				}
-				h.errorResponse(c, infraerrors.Code(pinnedErr), "upstream_error", infraerrors.Message(pinnedErr))
+				writeOpenAIModelDiscoveryError(c, pinnedErr, "No available pinned OpenAI accounts")
 				return
+			}
+			if !errors.Is(pinnedErr, service.ErrNoPinnedCodexModelsAccounts) {
+				pinnedFailure = pinnedErr
 			}
 			// 回退开启：跌入下方调度器循环。
 		} else {
 			// 让 ops 错误日志携带实际拉取成功的首个固定账号。
 			setOpsSelectedAccount(c, pinnedAccount.ID, pinnedAccount.Platform)
 			if err := h.gatewayService.MergeGroupConfiguredCodexModels(c.Request.Context(), apiKey.Group, pinnedManifest, ifNoneMatch); err != nil {
+				c.Set(opsModelDiscoveryPhaseKey, "internal")
 				h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
 				return
 			}
@@ -105,11 +107,14 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			if c.Request.Context().Err() != nil {
 				return
 			}
-			if lastUpstreamErr != nil {
-				h.errorResponse(c, infraerrors.Code(lastUpstreamErr), "upstream_error", infraerrors.Message(lastUpstreamErr))
-				return
+			if errors.Is(err, service.ErrNoAvailableAccounts) {
+				if lastUpstreamErr != nil {
+					err = lastUpstreamErr
+				} else if pinnedFailure != nil {
+					err = pinnedFailure
+				}
 			}
-			h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available OpenAI accounts")
+			writeOpenAIModelDiscoveryError(c, err, "No available OpenAI accounts")
 			return
 		}
 		// 让 ops 错误日志携带实际选中的上游账号，便于定位失效账号（#4544）。
@@ -128,18 +133,21 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 				lastUpstreamErr = err
 				continue
 			}
-			h.errorResponse(c, infraerrors.Code(err), "upstream_error", infraerrors.Message(err))
+			writeOpenAIModelDiscoveryError(c, err, "No available OpenAI accounts")
 			return
 		}
 		if err := h.gatewayService.CompleteAPIKeyCodexModelsManifestForClient(manifest, account); err != nil {
+			c.Set(opsModelDiscoveryPhaseKey, "internal")
 			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to complete Codex models manifest")
 			return
 		}
 		if err := service.ApplyPinnedCodexModelsMapping(manifest, account, apiKey.Group); err != nil {
+			c.Set(opsModelDiscoveryPhaseKey, "internal")
 			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to apply model mappings")
 			return
 		}
 		if err := h.gatewayService.MergeGroupConfiguredCodexModels(c.Request.Context(), apiKey.Group, manifest, ifNoneMatch); err != nil {
+			c.Set(opsModelDiscoveryPhaseKey, "internal")
 			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
 			return
 		}

@@ -234,6 +234,7 @@ func (h *OpsHandler) ListRequestErrors(c *gin.Context) {
 	}
 
 	filter := &service.OpsErrorLogFilter{Page: page, PageSize: pageSize}
+	filter.DashboardRequestCounts = c.Query("dashboard_counts") == "true"
 	if !startTime.IsZero() {
 		filter.StartTime = &startTime
 	}
@@ -386,7 +387,7 @@ func (h *OpsHandler) ListRequestErrorUpstreamErrors(c *gin.Context) {
 		filter.EndTime = &endTime
 	}
 	filter.View = "all"
-	filter.ErrorPhasesAny = []string{"upstream", "account_auth"}
+	filter.ErrorPhasesAny = []string{"upstream", "account_auth", "network"}
 	// Provider-health list includes recovered inference and credential rows.
 	filter.IncludeRecoveredUpstream = true
 	filter.Owner = "provider"
@@ -470,10 +471,11 @@ func (h *OpsHandler) ListUpstreamErrors(c *gin.Context) {
 	}
 
 	filter.View = parseOpsViewParam(c)
-	filter.ErrorPhasesAny = []string{"upstream", "account_auth"}
+	filter.ErrorPhasesAny = []string{"upstream", "account_auth", "network"}
 	// Provider-health list includes recovered inference and credential rows.
 	filter.IncludeRecoveredUpstream = true
 	filter.Owner = "provider"
+	filter.Phase = strings.TrimSpace(c.Query("phase"))
 	filter.Source = strings.TrimSpace(c.Query("error_source"))
 	filter.Query = strings.TrimSpace(c.Query("q"))
 

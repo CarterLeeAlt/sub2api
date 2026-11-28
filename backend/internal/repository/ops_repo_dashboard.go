@@ -183,8 +183,8 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 		RequestCountSLA:      requestCountSLA,
 		TokenConsumed:        tokenConsumed,
 
-		SLA:                          roundTo4DP(sla),
-		ErrorRate:                    roundTo4DP(errorRate),
+		SLA:                          sla,
+		ErrorRate:                    errorRate,
 		UpstreamErrorRate:            roundTo4DP(upstreamErrorRate),
 		UpstreamErrorCountExcl429529: upstreamExcl,
 		Upstream429Count:             upstream429,

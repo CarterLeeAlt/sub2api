@@ -3301,9 +3301,22 @@ func TestFetchCodexModelsManifestOAuth401MarksAccountUnschedulable(t *testing.T)
 	account := newCodexModelsTestAccount()
 	account.Credentials["refresh_token"] = "test-refresh-token"
 
-	_, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
+	var attempts []OpsUpstreamErrorEvent
+	ctx := ObserveOpenAIModelFailures(context.Background(), func(event *OpsUpstreamErrorEvent, _ string) {
+		if event != nil {
+			attempts = append(attempts, *event)
+		}
+	})
+	_, err := s.FetchCodexModelsManifest(ctx, account, "0.137.0", "")
 	require.Error(t, err)
 	require.True(t, IsRetryableCodexModelsManifestError(err), "manifest 401 should allow account failover")
+	require.Equal(t, "account_auth", OpenAIModelsErrorPhase(err))
+	status, accountID, _ := OpenAIModelsErrorAttribution(err)
+	require.Equal(t, http.StatusUnauthorized, status)
+	require.Equal(t, account.ID, accountID)
+	require.Len(t, attempts, 1)
+	require.Equal(t, "account_auth", attempts[0].Stage)
+	require.Equal(t, http.StatusUnauthorized, attempts[0].UpstreamStatusCode)
 	require.Equal(t, 1, repo.setTempUnschedCalls, "OAuth 401 should temp-unschedule the account")
 	require.Equal(t, 0, repo.setErrorCalls)
 	require.False(t, s.isOpenAIAccountRuntimeBlocked(account), "conditional persistence publishes the scheduling state")

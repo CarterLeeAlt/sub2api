@@ -276,8 +276,14 @@ function getThresholdColorClass(level: ThresholdLevel): string {
 // --- Realtime / Overview labels ---
 
 const measured = computed(() => overview.value?.delivery?.seconds ? overview.value.delivery : null)
-const output = computed(() => measured.value?.missing ? null : measured.value)
-const totalRequestsLabel = computed(() => measured.value ? formatNumber(measured.value.requests) : '—')
+const hasFullDeliveryCoverage = computed(() => {
+  const snapshot = overview.value
+  if (!snapshot || !measured.value) return false
+  const durationMs = Date.parse(snapshot.end_time) - Date.parse(snapshot.start_time)
+  return durationMs > 0 && measured.value.seconds * 1000 >= durationMs
+})
+const output = computed(() => hasFullDeliveryCoverage.value && !measured.value?.missing ? measured.value : null)
+const totalRequestsLabel = computed(() => overview.value ? formatNumber(overview.value.request_count_total) : '—')
 function unitLabel(unit?: string, rate = true) {
   if (unit === 'token') return rate ? 'tok/s' : 'tok'
   return t(rate ? 'admin.ops.charsPerSec' : 'admin.ops.chars')
@@ -352,26 +358,31 @@ function realtimeLabel(metric: 'qps' | 'rate', stat: 'current' | 'peak' | 'avg')
   if (!d?.seconds || (stat === 'current' && !d.current_available) || (metric === 'rate' && d.missing)) return '—'
   return d[metric][stat].toFixed(1)
 }
-const qpsAvgLabel = computed(() => measured.value?.qps.avg.toFixed(1) ?? '—')
+const qpsAvgLabel = computed(() => {
+  const snapshot = overview.value
+  if (!snapshot) return '—'
+  const seconds = (Date.parse(snapshot.end_time) - Date.parse(snapshot.start_time)) / 1000
+  return seconds > 0 ? (snapshot.request_count_total / seconds).toFixed(2) : '—'
+})
 const tpsAvgLabel = computed(() => output.value ? `${output.value.rate.avg.toFixed(1)} ${unitLabel(output.value.unit)}` : '—')
 
 const slaPercent = computed(() => {
   const v = overview.value?.sla
-  if (!measured.value || typeof v !== 'number') return null
+  if (typeof v !== 'number') return null
   if ((overview.value?.request_count_sla ?? 0) <= 0) return null
   return v * 100
 })
 
 const errorRatePercent = computed(() => {
   const v = overview.value?.error_rate
-  if (!measured.value || !overview.value?.request_count_sla || typeof v !== 'number') return null
+  if (!overview.value?.request_count_sla || typeof v !== 'number') return null
   return v * 100
 })
 
 const upstreamErrorRatePercent = computed(() => {
-  const v = overview.value?.upstream_error_rate
-  if (!measured.value?.attempts || typeof v !== 'number') return null
-  return v * 100
+  const delivery = measured.value
+  if (!hasFullDeliveryCoverage.value || !delivery?.attempts) return null
+  return delivery.attempt_errors / delivery.attempts * 100
 })
 
 
@@ -956,6 +967,9 @@ function handleToolbarRefresh() {
       </div>
     </div>
 
+    <p v-if="overview && !hasFullDeliveryCoverage" class="text-xs text-gray-600 dark:text-gray-300">
+      {{ t('admin.ops.incompleteHistory') }}
+    </p>
     <div v-if="overview" class="grid grid-cols-1 gap-6 lg:grid-cols-12">
       <!-- Left: Health + Realtime -->
       <div :class="['rounded-2xl bg-gray-50 dark:bg-dark-900 lg:col-span-5', props.fullscreen ? 'p-6' : 'p-4']">
@@ -1162,6 +1176,7 @@ function handleToolbarRefresh() {
               v-if="!props.fullscreen"
               class="text-[10px] font-bold text-blue-500 hover:underline"
               type="button"
+              :disabled="loading"
               @click="openDetails({ title: t('admin.ops.requestDetails.title') })"
             >
               {{ t('admin.ops.requestDetails.details') }}
@@ -1199,7 +1214,8 @@ function handleToolbarRefresh() {
               v-if="!props.fullscreen"
               class="text-[10px] font-bold text-blue-500 hover:underline"
               type="button"
-              @click="openDetails({ title: t('admin.ops.requestDetails.title'), kind: 'error' })"
+              :disabled="loading"
+              @click="openErrorDetails('request')"
             >
               {{ t('admin.ops.requestDetails.details') }}
             </button>
@@ -1213,7 +1229,7 @@ function handleToolbarRefresh() {
           <div class="mt-3 text-xs">
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.exceptions') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.error_count_sla) : '—' }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber(overview.error_count_sla) }}</span>
             </div>
           </div>
         </div>
@@ -1229,6 +1245,7 @@ function handleToolbarRefresh() {
               v-if="!props.fullscreen"
               class="text-[10px] font-bold text-blue-500 hover:underline"
               type="button"
+              :disabled="loading || output?.ttft.p99_ms == null"
               @click="openDetails({ title: t('admin.ops.ttftLabel'), sort: 'ttft_desc' })"
             >
               {{ t('admin.ops.requestDetails.details') }}
@@ -1236,7 +1253,7 @@ function handleToolbarRefresh() {
           </div>
           <div class="mt-2 flex items-baseline gap-2">
             <div class="text-3xl font-black" :class="getThresholdColorClass(getTTFTThresholdLevel(ttftP99Ms))">
-              {{ ttftP99Ms ?? '-' }}
+              {{ ttftP99Ms ?? '—' }}
             </div>
             <span class="text-xs font-bold text-gray-400">ms (P99)</span>
           </div>
@@ -1276,7 +1293,7 @@ function handleToolbarRefresh() {
               <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.requestErrors') }}</span>
               <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.errors')" />
             </div>
-            <button v-if="!props.fullscreen" class="text-[10px] font-bold text-blue-500 hover:underline" type="button" @click="openErrorDetails('request')">
+            <button v-if="!props.fullscreen" class="text-[10px] font-bold text-blue-500 hover:underline" type="button" :disabled="loading" @click="openErrorDetails('request')">
               {{ t('admin.ops.requestDetails.details') }}
             </button>
           </div>
@@ -1286,11 +1303,11 @@ function handleToolbarRefresh() {
           <div class="mt-3 space-y-1 text-xs">
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.errorCount') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.error_count_sla) : '—' }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber(overview.error_count_sla) }}</span>
             </div>
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.businessLimited') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.business_limited_count) : '—' }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ formatNumber(overview.business_limited_count) }}</span>
             </div>
           </div>
         </div>
@@ -1307,16 +1324,16 @@ function handleToolbarRefresh() {
             </button>
           </div>
           <div class="mt-2 text-3xl font-black" :class="getThresholdColorClass(getUpstreamErrorRateThresholdLevel(upstreamErrorRatePercent))">
-            {{ upstreamErrorRatePercent == null ? '-' : `${upstreamErrorRatePercent.toFixed(2)}%` }}
+            {{ upstreamErrorRatePercent == null ? '—' : `${upstreamErrorRatePercent.toFixed(2)}%` }}
           </div>
           <div class="mt-3 space-y-1 text-xs">
             <div class="flex justify-between">
               <span class="text-gray-500">{{ t('admin.ops.errorCountExcl429529') }}:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(overview.upstream_error_count_excl_429_529) : '—' }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ hasFullDeliveryCoverage && measured ? formatNumber(measured.attempt_errors) : '—' }}</span>
             </div>
             <div class="flex justify-between">
               <span class="text-gray-500">429/529:</span>
-              <span class="font-bold text-gray-900 dark:text-white">{{ measured ? formatNumber(measured.limited_attempts) : '—' }}</span>
+              <span class="font-bold text-gray-900 dark:text-white">{{ hasFullDeliveryCoverage && measured ? formatNumber(measured.limited_attempts) : '—' }}</span>
             </div>
           </div>
         </div>

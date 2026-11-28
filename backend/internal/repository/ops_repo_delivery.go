@@ -83,6 +83,9 @@ func (r *opsRepository) addDeliveryTrend(ctx context.Context, f *service.OpsDash
 func (r *opsRepository) DeliveryWindow(ctx context.Context, f *service.OpsDashboardFilter, realtime bool) (*service.DeliveryWindow, error) {
 	end := f.EndTime.UTC().Truncate(opsdelivery.Window)
 	start := f.StartTime.UTC().Truncate(opsdelivery.Window)
+	if !realtime && start.Before(f.StartTime) {
+		start = start.Add(opsdelivery.Window)
+	}
 	args := []any{start, end, f.Platform, f.GroupID}
 	d := &service.DeliveryWindow{Unit: "char", SpeedUnit: "char"}
 	const window = deliverySeries + `

@@ -102,18 +102,22 @@ func TestBuildOpsErrorLogsWhere_CyberPolicyStatusExemption(t *testing.T) {
 		t.Fatalf("upstream phase with IncludeRecoveredUpstream must not add any status_code clause\nfull: %s", whereRecovered)
 	}
 
-	// account_auth uses the same explicit provider-health opt-in but remains a
-	// distinct phase from inference upstream errors.
-	whereAccountAuth, _ := buildOpsErrorLogsWhere(&service.OpsErrorLogFilter{Phase: "account_auth", IncludeRecoveredUpstream: true})
-	if strings.Contains(whereAccountAuth, "status_code") {
-		t.Fatalf("account_auth phase with IncludeRecoveredUpstream must expose recovered rows\nfull: %s", whereAccountAuth)
-	}
-	if !strings.Contains(whereAccountAuth, "e.error_phase = $") {
-		t.Fatalf("account_auth recovered filter must retain its explicit phase\nfull: %s", whereAccountAuth)
+	for _, phase := range []string{"account_auth", "network"} {
+		whereRecoveredPhase, _ := buildOpsErrorLogsWhere(&service.OpsErrorLogFilter{Phase: phase, IncludeRecoveredUpstream: true})
+		if strings.Contains(whereRecoveredPhase, "status_code") {
+			t.Fatalf("%s phase with IncludeRecoveredUpstream must expose recovered rows\nfull: %s", phase, whereRecoveredPhase)
+		}
+		if !strings.Contains(whereRecoveredPhase, "e.error_phase = $") {
+			t.Fatalf("%s recovered filter must retain its explicit phase\nfull: %s", phase, whereRecoveredPhase)
+		}
+		whereRequestPhase, _ := buildOpsErrorLogsWhere(&service.OpsErrorLogFilter{Phase: phase})
+		if !strings.Contains(whereRequestPhase, "COALESCE(e.status_code, 0) >= 400") {
+			t.Fatalf("%s request-error filter must exclude recovered successes\nfull: %s", phase, whereRequestPhase)
+		}
 	}
 
 	whereProviderHealth, _ := buildOpsErrorLogsWhere(&service.OpsErrorLogFilter{
-		ErrorPhasesAny:           []string{"upstream", "account_auth"},
+		ErrorPhasesAny:           []string{"upstream", "account_auth", "network"},
 		IncludeRecoveredUpstream: true,
 	})
 	if strings.Contains(whereProviderHealth, "status_code") {

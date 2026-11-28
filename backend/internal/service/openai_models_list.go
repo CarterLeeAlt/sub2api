@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -306,7 +307,11 @@ func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, 
 	}
 	results, err := s.fetchPinnedOpenAIModels(ctx, group, fetch)
 	if err != nil && ctx.Err() == nil && group != nil && group.CodexModelsManifestConfig.FallbackToScheduler {
+		pinnedErr := err
 		results, err = s.fetchScheduledOpenAIModels(ctx, group, maxAccountSwitches, fetch)
+		if OpenAIModelsErrorPhase(err) == "routing" && OpenAIModelsErrorPhase(pinnedErr) != "routing" {
+			err = pinnedErr
+		}
 	}
 	if err != nil {
 		return nil, nil, err
@@ -399,10 +404,10 @@ func (s *OpenAIGatewayService) fetchScheduledOpenAIModels(ctx context.Context, g
 		}
 		account, err := s.SelectAccountForModelWithExclusions(ctx, &group.ID, "", "", excluded)
 		if err != nil {
-			if lastErr != nil {
+			if lastErr != nil && errors.Is(err, ErrNoAvailableAccounts) {
 				return nil, lastErr
 			}
-			return nil, ErrNoPinnedCodexModelsAccounts
+			return nil, err
 		}
 		response, err := fetch(ctx, account)
 		if err == nil {

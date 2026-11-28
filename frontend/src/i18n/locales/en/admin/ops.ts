@@ -10,6 +10,7 @@ export default {
       outputAmount: 'Output',
       avgOutput: 'Avg output',
       noMeasurement: 'Insufficient data',
+      incompleteHistory: 'Incomplete delivery coverage for the selected window. Text output, TTFT and upstream attempts show “—”.',
       covered: 'Measured {from} to {to}, covering {seconds}s. Exact token counts cover {tokens} of text.',
       outputTpsSamples: 'Valid samples: {count}',
       overview: 'Overview',
@@ -294,6 +295,8 @@ export default {
         typeAuth: 'Auth',
         typeAccountAuth: 'Account Auth',
         typeRouting: 'Routing',
+        categoryWithOwner: '{owner} · {reason}',
+        noAvailableAccounts: 'No available accounts',
         typeInternal: 'Internal',
         endpoint: 'Endpoint',
         requestType: 'Type',
@@ -313,7 +316,8 @@ export default {
         owner: {
           provider: 'Provider',
           client: 'Client',
-          platform: 'Platform'
+          platform: 'Platform',
+          unknown: 'Unknown owner'
         },
         phase: {
           request: 'Request',
@@ -329,6 +333,8 @@ export default {
       },
       // Error Detail Modal
       errorDetail: {
+        selectionReason: 'Account selection',
+        selectionReasonUnavailable: 'Not recorded',
         title: 'Error Detail',
         titleWithId: 'Error #{id}',
         noErrorSelected: 'No error selected.',
@@ -829,8 +835,8 @@ export default {
       },
       tooltips: {
         outputTps: 'Text sent after the first write divided by the time between first and last writes. Requires two or more writes.',
-        totalRequests: 'Requests counted at arrival and visible text counted at downstream write.',
-        throughputTrend: 'Request arrivals and downstream text writes per second. Gaps indicate missing measurements.',
+        totalRequests: 'Logged successes and failures in the selected window. Visible text is counted when written downstream.',
+        throughputTrend: 'QPS uses request logs in the selected window. Text is bucketed by downstream write time, with unmeasured intervals left blank.',
         switchRateTrend: 'Trend of account switches / total requests over the last 5 hours (avg switches).',
         latencyHistogram: 'Request duration distribution (ms) for successful requests.',
         errorTrend: 'Error counts over time (SLA scope excludes business limits; upstream excludes 429/529).',
@@ -844,8 +850,8 @@ export default {
         jobs: 'Background job execution status, including last run time, success time, and error information.',
         qps: 'Latest complete 5 seconds. Peak and average include monitored idle intervals. Exact text token counts enable tok/s.',
         tokens: 'Total number of tokens processed in the current time window.',
-        sla: 'Completed deliveries / (completed + failed). Client cancellations and business limits are counted separately.',
-        errors: 'Failed deliveries / (completed + failed). A truncated stream counts as failed.',
+        sla: 'For the selected window: logged successes / (logged successes + failures counted in SLA). Business limits are counted separately.',
+        errors: 'For the selected window: failures counted in SLA / (logged successes + failures counted in SLA).',
         upstreamErrors: 'Failed attempts / all upstream attempts. 429/529 are shown separately.',
         latency: 'Request duration statistics, including p50, p90, p95, p99 percentiles.',
         ttft: 'Time from request arrival to the first visible text write. Excludes heartbeats, reasoning and tool arguments.',

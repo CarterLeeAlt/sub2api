@@ -25,6 +25,7 @@ import (
 type codexModelsFailoverAccountRepo struct {
 	service.AccountRepository
 	accounts []service.Account
+	listErr  error
 }
 
 func (r codexModelsFailoverAccountRepo) GetByID(_ context.Context, id int64) (*service.Account, error) {
@@ -44,7 +45,7 @@ func (r codexModelsFailoverAccountRepo) ListSchedulableByPlatform(_ context.Cont
 			accounts = append(accounts, account)
 		}
 	}
-	return accounts, nil
+	return accounts, r.listErr
 }
 
 func (r codexModelsFailoverAccountRepo) ListSchedulableByGroupID(_ context.Context, _ int64) ([]service.Account, error) {
@@ -52,7 +53,7 @@ func (r codexModelsFailoverAccountRepo) ListSchedulableByGroupID(_ context.Conte
 }
 
 func (r codexModelsFailoverAccountRepo) ListByGroup(_ context.Context, _ int64) ([]service.Account, error) {
-	return append([]service.Account(nil), r.accounts...), nil
+	return append([]service.Account(nil), r.accounts...), r.listErr
 }
 
 func (r codexModelsFailoverAccountRepo) ListModelAvailabilityCandidates(_ context.Context, _ *int64, _ []string, _ bool) ([]service.Account, error) {
@@ -66,6 +67,7 @@ type codexModelsFailoverHTTPUpstream struct {
 	firstErr    error
 	firstStatus int
 	firstBody   string
+	successBody string
 	statuses    map[int64]int
 }
 
@@ -102,11 +104,15 @@ func (u *codexModelsFailoverHTTPUpstream) Do(_ *http.Request, _ string, accountI
 			)),
 		}, nil
 	}
+	body := u.successBody
+	if body == "" {
+		body = `{"models":[{"slug":"gpt-5.6-sol"}]}`
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Status:     "200 OK",
 		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader(`{"models":[{"slug":"gpt-5.6-sol"}]}`)),
+		Body:       io.NopCloser(strings.NewReader(body)),
 	}, nil
 }
 
@@ -129,6 +135,115 @@ func TestCodexModelsCanceledRequestDoesNotWriteResponse(t *testing.T) {
 
 	if c.Writer.Written() {
 		t.Fatalf("canceled request wrote an HTTP response: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestOpenAIModelDiscoveryOpsAttribution(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name                               string
+		pinned, standard, fallback         bool
+		accounts, response, upstreamStatus int
+		transportError                     error
+		queryError                         bool
+		attempts                           int
+		requestedModel                     string
+		phase, kind, owner, endpoint       string
+	}{
+		{name: "empty scheduler", response: 503, phase: "routing", kind: service.OpsNoAvailableAccounts, owner: "platform"},
+		{name: "empty pinned Codex", pinned: true, response: 503, phase: "routing", kind: service.OpsNoAvailableAccounts, owner: "platform"},
+		{name: "empty pinned standard", pinned: true, standard: true, response: 503, phase: "routing", kind: service.OpsNoAvailableAccounts, owner: "platform"},
+		{name: "empty pinned standard with fallback", pinned: true, standard: true, fallback: true, response: 503, phase: "routing", kind: service.OpsNoAvailableAccounts, owner: "platform"},
+		{name: "scheduler query fails", queryError: true, response: 500, phase: "internal", kind: "api_error", owner: "platform"},
+		{name: "pinned query fails", pinned: true, queryError: true, response: 500, phase: "internal", kind: "api_error", owner: "platform"},
+		{name: "pinned standard query fails with fallback", pinned: true, standard: true, fallback: true, queryError: true, response: 500, phase: "internal", kind: "api_error", owner: "platform"},
+		{name: "provider returns the same message", accounts: 1, response: 502, upstreamStatus: 503, phase: "upstream", kind: "upstream_error", owner: "provider", endpoint: "/v1/models"},
+		{name: "pinned 503 followed by scheduler retry on same account", pinned: true, fallback: true, accounts: 1, response: 502, upstreamStatus: 503, attempts: 2, phase: "upstream", kind: "upstream_error", owner: "provider", endpoint: "/v1/models"},
+		{name: "pinned 503 followed by successful scheduler fallback", pinned: true, fallback: true, accounts: 2, response: 200, upstreamStatus: 503, attempts: 2, phase: "upstream", kind: "upstream_error", owner: "provider", endpoint: "/v1/models"},
+		{name: "standard model lookup preserves upstream 429", pinned: true, standard: true, accounts: 1, response: 502, upstreamStatus: 429, phase: "upstream", kind: "upstream_error", owner: "provider", endpoint: "/v1/models"},
+		{name: "absent model after partial pinned fetch failure", pinned: true, standard: true, accounts: 2, requestedModel: "missing-model", response: 404, phase: "request", kind: "invalid_request_error", owner: "client", endpoint: "/v1/models"},
+		{name: "provider connection fails", accounts: 1, response: 502, transportError: io.ErrUnexpectedEOF, phase: "network", kind: "upstream_error", owner: "provider", endpoint: "/v1/models"},
+		{name: "request recovers after upstream failure", accounts: 2, response: 200, upstreamStatus: 503, phase: "upstream", kind: "upstream_error", owner: "provider", endpoint: "/v1/models"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setupOpsErrorLogTestQueue(t, 4)
+			handler, upstream, groupID := newCodexModelsFailoverTestHandlerWithAccountCount(503, test.accounts, 3)
+			upstream.firstErr = test.transportError
+			if test.upstreamStatus > 0 {
+				upstream.firstStatus = test.upstreamStatus
+			}
+			if test.queryError {
+				repo := codexModelsFailoverAccountRepo{listErr: errors.New("account database unavailable")}
+				cfg := &config.Config{RunMode: config.RunModeSimple}
+				handler.gatewayService = service.NewOpenAIGatewayService(
+					repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil,
+					upstream, nil, nil, nil, nil, nil, nil, nil, nil,
+				)
+			}
+			group := &service.Group{ID: groupID, Platform: service.PlatformOpenAI}
+			if test.pinned {
+				group.CodexModelsManifestConfig = service.GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: []int64{1}, FallbackToScheduler: test.fallback}
+			}
+			if test.requestedModel != "" {
+				group.CodexModelsManifestConfig.AccountIDs = []int64{1, 2}
+				upstream.successBody = `{"object":"list","data":[{"id":"gpt-5.6-sol","object":"model"}]}`
+			}
+			router := gin.New()
+			router.Use(OpsErrorLoggerMiddleware(&service.OpsService{}))
+			serveModels := func(c *gin.Context) {
+				c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{GroupID: &groupID, Group: group})
+				if test.standard {
+					(&GatewayHandler{openAIGatewayService: handler.gatewayService}).pinnedOpenAIModels(c, group)
+					return
+				}
+				handler.CodexModels(c)
+			}
+			router.GET("/v1/models", serveModels)
+			router.GET("/v1/models/:model", serveModels)
+			recorder := httptest.NewRecorder()
+			path := "/v1/models?client_version=0.144.0"
+			if test.standard {
+				path = "/v1/models/gpt-5.6-sol"
+			}
+			if test.requestedModel != "" {
+				path = "/v1/models/" + test.requestedModel
+			}
+			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+			require.Equal(t, test.response, recorder.Code, recorder.Body.String())
+			require.Len(t, opsErrorLogQueue, 1)
+			entry := (<-opsErrorLogQueue).entry
+			require.Equal(t, test.phase, entry.ErrorPhase)
+			require.Equal(t, test.kind, entry.ErrorType)
+			require.Equal(t, test.owner, entry.ErrorOwner)
+			require.Equal(t, test.response, entry.StatusCode)
+			require.Equal(t, test.endpoint, entry.UpstreamEndpoint)
+			require.False(t, entry.IsBusinessLimited)
+			if test.owner == "platform" {
+				require.Nil(t, entry.AccountID)
+				require.Nil(t, entry.UpstreamStatusCode)
+				require.Nil(t, entry.UpstreamErrorsJSON)
+				require.Empty(t, upstream.calls())
+			} else {
+				if test.upstreamStatus > 0 {
+					require.NotNil(t, entry.UpstreamStatusCode)
+					require.Equal(t, test.upstreamStatus, *entry.UpstreamStatusCode)
+				} else {
+					require.Nil(t, entry.UpstreamStatusCode)
+				}
+				require.NotNil(t, entry.UpstreamErrorsJSON)
+				events, err := service.ParseOpsUpstreamErrors(*entry.UpstreamErrorsJSON)
+				require.NoError(t, err)
+				require.Len(t, events, max(1, test.attempts))
+				attemptStatus := test.upstreamStatus
+				if test.requestedModel != "" {
+					attemptStatus = http.StatusServiceUnavailable
+				}
+				for _, event := range events {
+					require.EqualValues(t, 1, event.AccountID)
+					require.Equal(t, attemptStatus, event.UpstreamStatusCode)
+				}
+			}
+		})
 	}
 }
 

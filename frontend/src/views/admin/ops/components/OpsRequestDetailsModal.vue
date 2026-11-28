@@ -23,6 +23,8 @@ interface Props {
   timeRange: string
   customStartTime?: string | null
   customEndTime?: string | null
+  windowStart?: string
+  windowEnd?: string
   preset: OpsRequestDetailsPreset
   platform?: string
   groupId?: number | null
@@ -69,6 +71,9 @@ const rangeLabel = computed(() => {
 })
 
 function buildTimeParams(): Pick<OpsRequestDetailsParams, 'start_time' | 'end_time'> {
+  if (props.windowStart && props.windowEnd) {
+    return { start_time: props.windowStart, end_time: props.windowEnd }
+  }
   if (props.timeRange === 'custom' && props.customStartTime && props.customEndTime) {
     return { start_time: props.customStartTime, end_time: props.customEndTime }
   }
@@ -128,6 +133,8 @@ watch(
 
 watch(
   () => [
+    props.windowStart,
+    props.windowEnd,
     props.timeRange,
     props.customStartTime,
     props.customEndTime,

@@ -60,12 +60,12 @@ func TestOpsDeliveryPostgres(t *testing.T) {
 	require.EqualValues(t, 90, *stats.Items[0].Output)
 	require.EqualValues(t, 20, *stats.Items[0].P50)
 
-	t.Run("request details and breakdown use recorded deliveries", func(t *testing.T) {
+	t.Run("TTFT details and historical request counts use their respective sources", func(t *testing.T) {
 		_, err := db.ExecContext(ctx, `
 CREATE TEMP TABLE groups (id bigint,name text,platform text);
 CREATE TEMP TABLE accounts (id bigint,platform text);
 CREATE TEMP TABLE usage_logs (created_at timestamptz,request_id text,model text,duration_ms int,first_token_ms int,user_id bigint,api_key_id bigint,account_id bigint,group_id bigint,stream bool);
-CREATE TEMP TABLE ops_error_logs (id bigint,created_at timestamptz,request_id text,client_request_id text,platform text,model text,duration_ms int,time_to_first_token_ms int,status_code int,error_phase text,severity text,error_message text,user_id bigint,api_key_id bigint,account_id bigint,group_id bigint,stream bool)`)
+CREATE TEMP TABLE ops_error_logs (id bigint,created_at timestamptz,request_id text,client_request_id text,platform text,model text,duration_ms int,time_to_first_token_ms int,status_code int,error_phase text,severity text,error_message text,user_id bigint,api_key_id bigint,account_id bigint,group_id bigint,stream bool,is_count_tokens bool)`)
 		require.NoError(t, err)
 		items, total, err := repo.ListRequestDetails(ctx, &service.OpsRequestDetailFilter{StartTime: &f.StartTime, EndTime: &f.EndTime, GroupID: &group, Sort: "ttft_desc"})
 		require.NoError(t, err)
@@ -73,15 +73,22 @@ CREATE TEMP TABLE ops_error_logs (id bigint,created_at timestamptz,request_id te
 		require.Equal(t, id, items[0].RequestID)
 		require.EqualValues(t, 2000, *items[0].FirstTokenMs)
 		require.EqualValues(t, 5000, *items[0].DurationMs)
+		_, err = db.ExecContext(ctx, `INSERT INTO groups (id,name,platform) VALUES ($1,'OpenAI','openai')`, group)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, `INSERT INTO usage_logs (created_at,request_id,group_id,stream) VALUES ($1,$2,$3,true)`, end, id, group)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, `INSERT INTO ops_error_logs (id,created_at,request_id,platform,group_id,status_code,is_count_tokens,stream) VALUES
+ (1,$1,'models-failed','openai',$2,503,false,false), (2,$1,'probe-failed','openai',$2,503,true,false),
+ (3,$1,'retry-recovered','openai',$2,200,false,false), (4,$3,'later-error','openai',$2,503,false,false)`, end, group, f.EndTime)
+		require.NoError(t, err)
+		items, total, err = repo.ListRequestDetails(ctx, &service.OpsRequestDetailFilter{StartTime: &f.StartTime, EndTime: &f.EndTime, GroupID: &group})
+		require.NoError(t, err)
+		require.EqualValues(t, 2, total)
+		require.ElementsMatch(t, []string{id, "models-failed"}, []string{items[0].RequestID, items[1].RequestID})
 		groups, err := repo.getThroughputTopGroupsByPlatform(ctx, f.StartTime, f.EndTime, "openai", 100)
 		require.NoError(t, err)
-		for _, item := range groups {
-			if item.GroupID == group {
-				require.EqualValues(t, 1, item.RequestCount)
-				return
-			}
-		}
-		t.Fatal("measured request was missing from the group breakdown")
+		require.Len(t, groups, 1)
+		require.EqualValues(t, 2, groups[0].RequestCount)
 	})
 
 	t.Run("exact percentiles across hours", func(t *testing.T) {

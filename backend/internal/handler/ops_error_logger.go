@@ -1222,7 +1222,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		}
 
 		// Skip logging if the error should be filtered based on settings
-		if shouldSkipOpsErrorLog(c.Request.Context(), ops, parsed.Message, string(body), c.Request.URL.Path) {
+		if shouldSkipOpsErrorLog(ops, parsed.Message, string(body), c.Request.URL.Path, c.GetString(opsModelDiscoveryPhaseKey)) {
 			return
 		}
 		if shouldSkipOpsClientClosed(c, ops, status) {
@@ -1273,6 +1273,11 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		normalizedType := normalizeOpsErrorType(parsed.ErrorType, parsed.Code)
 
 		phase, isBusinessLimited, errorOwner, errorSource := classifyOpsErrorLog(c, normalizedType, parsed.Message, parsed.Code, status)
+		upstreamEndpoint := opsLoggedUpstreamEndpoint(c, platform)
+		message := parsed.Message
+		if detail := c.GetString(opsModelDiscoveryReasonKey); detail != "" {
+			message = truncateString(detail, 2048)
+		}
 
 		entry := &service.OpsInsertErrorLogInput{
 			RequestID:       requestID,
@@ -1289,7 +1294,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			}(),
 			Stream:           stream,
 			InboundEndpoint:  GetInboundEndpoint(c),
-			UpstreamEndpoint: GetUpstreamEndpoint(c, platform),
+			UpstreamEndpoint: upstreamEndpoint,
 			RequestedModel:   modelName,
 			UpstreamModel: func() string {
 				if v, ok := c.Get(opsUpstreamModelKey); ok {
@@ -1320,7 +1325,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			IsBusinessLimited: isBusinessLimited,
 			IsCountTokens:     isCountTokensRequest(c),
 
-			ErrorMessage: parsed.Message,
+			ErrorMessage: message,
 			// Sanitize each SSE data payload before the body enters the async queue.
 			ErrorBody:   sanitizeOpsSSEDataForPersistence(body),
 			ErrorSource: errorSource,
@@ -1424,7 +1429,12 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 	entry.ErrorMessage = "Recovered upstream error"
 	if lastStage == string(service.GatewayFailureStageAccountAuth) {
 		entry.ErrorPhase = string(service.GatewayFailureStageAccountAuth)
+		entry.ErrorSource = "gateway"
 		entry.ErrorMessage = "Recovered account authentication failure"
+	} else if lastStage == "network" {
+		entry.ErrorPhase = "network"
+		entry.ErrorSource = "gateway"
+		entry.ErrorMessage = "Recovered upstream connection failure"
 	} else if lastStatus > 0 {
 		entry.ErrorMessage += " " + strconv.Itoa(lastStatus)
 	}
@@ -1461,7 +1471,7 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 		requestContext = c.Request.Context()
 	}
 	entry.Platform = resolveOpsPlatform(requestContext, apiKey, fallbackPlatform)
-	entry.UpstreamEndpoint = GetUpstreamEndpoint(c, entry.Platform)
+	entry.UpstreamEndpoint = opsLoggedUpstreamEndpoint(c, entry.Platform)
 	if apiKey != nil {
 		entry.APIKeyID = &apiKey.ID
 		entry.APIKeyPrefix = keyPrefix(apiKey.Key, 8)
@@ -1528,7 +1538,7 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	}
 
 	// 复用与 status>=400 分支相同的设置过滤（context canceled / 无可用账号等）。
-	if shouldSkipOpsErrorLog(c.Request.Context(), ops, streamErr.Message, streamErr.Message, c.Request.URL.Path) {
+	if shouldSkipOpsErrorLog(ops, streamErr.Message, streamErr.Message, c.Request.URL.Path, "") {
 		return
 	}
 
@@ -1759,8 +1769,7 @@ func applyOpsLatencyFieldsFromContext(c *gin.Context, entry *service.OpsInsertEr
 }
 
 // applyOpsUpstreamFieldsFromContext captures attempt-level upstream context.
-// A final account_auth event owns the top-level status and forces it to zero;
-// prior inference statuses remain available in UpstreamErrors.
+// Model discovery records its terminal attribution separately from the attempts.
 func applyOpsUpstreamFieldsFromContext(c *gin.Context, entry *service.OpsInsertErrorLogInput) {
 	if c == nil || entry == nil {
 		return
@@ -1795,9 +1804,20 @@ func applyOpsUpstreamFieldsFromContext(c *gin.Context, entry *service.OpsInsertE
 	}
 	if v, ok := c.Get(service.OpsUpstreamErrorsKey); ok {
 		if events, ok := v.([]*service.OpsUpstreamErrorEvent); ok && len(events) > 0 {
-			applyOpsUpstreamErrorEvents(entry, events)
+			if c.GetString(opsModelDiscoveryPhaseKey) != "" {
+				entry.UpstreamErrors = events
+			} else {
+				applyOpsUpstreamErrorEvents(entry, events)
+			}
 		}
 	}
+}
+
+func opsLoggedUpstreamEndpoint(c *gin.Context, platform string) string {
+	if endpoint, ok := c.Get(opsModelDiscoveryEndpointKey); ok {
+		return endpoint.(string)
+	}
+	return GetUpstreamEndpoint(c, platform)
 }
 
 func applyOpsUpstreamErrorEvents(entry *service.OpsInsertErrorLogInput, events []*service.OpsUpstreamErrorEvent) {
@@ -1816,11 +1836,11 @@ func applyOpsUpstreamErrorEvents(entry *service.OpsInsertErrorLogInput, events [
 	entry.UpstreamStatusCode = nil
 	entry.UpstreamErrorMessage = nil
 	entry.UpstreamErrorDetail = nil
-	if last.Stage == string(service.GatewayFailureStageAccountAuth) {
-		code := 0
-		entry.UpstreamStatusCode = &code
-	} else if last.UpstreamStatusCode > 0 {
+	if last.UpstreamStatusCode > 0 {
 		code := last.UpstreamStatusCode
+		entry.UpstreamStatusCode = &code
+	} else if last.Stage == string(service.GatewayFailureStageAccountAuth) {
+		code := 0
 		entry.UpstreamStatusCode = &code
 	}
 	if message := strings.TrimSpace(last.Message); message != "" {
@@ -2214,7 +2234,7 @@ func guessPlatformFromPath(path string) string {
 // classification if accepted blindly.
 func isKnownOpsErrorType(t string) bool {
 	switch t {
-	case "invalid_request_error",
+	case service.OpsNoAvailableAccounts, "invalid_request_error",
 		"authentication_error",
 		"permission_error",
 		"model_not_found",
@@ -2300,6 +2320,11 @@ func classifyOpsSeverity(errType string, status int) string {
 }
 
 func classifyOpsErrorLog(c *gin.Context, errType, message, code string, status int) (phase string, isBusinessLimited bool, errorOwner string, errorSource string) {
+	if c != nil {
+		if phase := c.GetString(opsModelDiscoveryPhaseKey); phase != "" {
+			return phase, false, classifyOpsErrorOwner(phase, message), classifyOpsErrorSource(phase, message)
+		}
+	}
 	phase = classifyOpsPhase(errType, message, code)
 	if service.IsOpsRequestScopedError(c) {
 		// 失败由请求内容决定：只按错误类型分类，上游错误上下文不参与归因。
@@ -2535,13 +2560,12 @@ func strconvItoa(v int) string {
 
 // shouldSkipOpsErrorLog determines if an error should be skipped from logging based on settings.
 // Returns true for errors that should be filtered according to OpsAdvancedSettings.
-func shouldSkipOpsErrorLog(ctx context.Context, ops *service.OpsService, message, body, requestPath string) bool {
+func shouldSkipOpsErrorLog(ops *service.OpsService, message, body, requestPath, modelDiscoveryPhase string) bool {
 	if ops == nil {
 		return false
 	}
 
 	// Get advanced settings to check filter configuration
-	_ = ctx
 	settings := ops.OpsAdvancedSettingsSnapshot()
 
 	msgLower := strings.ToLower(message)
@@ -2561,7 +2585,8 @@ func shouldSkipOpsErrorLog(ctx context.Context, ops *service.OpsService, message
 
 	// Check if "no available accounts" errors should be ignored
 	if settings.IgnoreNoAvailableAccounts {
-		if strings.Contains(msgLower, opsErrNoAvailableAccounts) || strings.Contains(bodyLower, opsErrNoAvailableAccounts) {
+		if modelDiscoveryPhase == "routing" || (modelDiscoveryPhase == "" &&
+			(strings.Contains(msgLower, opsErrNoAvailableAccounts) || strings.Contains(bodyLower, opsErrNoAvailableAccounts))) {
 			return true
 		}
 	}

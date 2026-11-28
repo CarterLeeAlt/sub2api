@@ -114,6 +114,8 @@
         <OpsErrorDetailsModal
           :show="showErrorDetails"
           :time-range="timeRange"
+          :window-start="overview?.start_time"
+          :window-end="overview?.end_time"
           :custom-start-time="customStartTime"
           :custom-end-time="customEndTime"
           :platform="platform"
@@ -129,6 +131,8 @@
         <OpsRequestDetailsModal
           v-model="showRequestDetails"
           :time-range="timeRange"
+          :window-start="overview?.start_time"
+          :window-end="overview?.end_time"
           :custom-start-time="customStartTime"
           :custom-end-time="customEndTime"
           :preset="requestDetailsPreset"
@@ -195,6 +199,7 @@ const loading = ref(true)
 const hasLoadedOnce = ref(false)
 const errorMessage = ref('')
 const lastUpdated = ref<Date | null>(new Date())
+const historyAnchor = ref(new Date())
 
 const timeRange = ref<TimeRange>(DEFAULT_OPS_TIME_RANGE)
 const platform = ref<string>('')
@@ -564,7 +569,7 @@ function handleBackToList() {
 
 function buildApiParams() {
   const params: any = {
-    ...buildOpsTimeParams(timeRange.value, customStartTime.value, customEndTime.value),
+    ...buildOpsTimeParams(timeRange.value, customStartTime.value, customEndTime.value, historyAnchor.value),
     platform: platform.value || undefined,
     group_id: groupId.value ?? undefined,
     mode: queryMode.value
@@ -740,6 +745,7 @@ async function fetchData() {
   dashboardFetchSeq += 1
   const fetchSeq = dashboardFetchSeq
   dashboardFetchController = new AbortController()
+  historyAnchor.value = new Date(Math.floor(Date.now() / 5000) * 5000)
 
   loading.value = true
   errorMessage.value = ''

@@ -9,7 +9,11 @@ vi.mock('vue-i18n', async (importOriginal) => {
   const actual = await importOriginal<typeof import('vue-i18n')>()
   return {
     ...actual,
-    useI18n: () => ({ t: (key: string) => key }),
+    useI18n: () => ({
+      t: (key: string, params?: { owner: string; reason: string }) => key === 'admin.ops.errorLog.categoryWithOwner' && params
+        ? `${params.owner} · ${params.reason}`
+        : key,
+    }),
   }
 })
 
@@ -72,6 +76,22 @@ describe('OpsErrorLogTable user/api-key/account columns', () => {
 
     expect(wrapper.text()).toContain('old-key')
     expect(wrapper.text()).toContain('admin.ops.errorLog.keyDeletedBadge')
+  })
+})
+
+describe('OpsErrorLogTable category', () => {
+  it.each([
+    ['routing', 'no_available_accounts', 'platform', 'platform', 'admin.ops.errorLog.noAvailableAccounts'],
+    ['routing', 'api_error', 'platform', 'platform', 'usage.errors.categories.service_unavailable'],
+    ['upstream', 'upstream_error', 'provider', 'provider', 'usage.errors.categories.upstream'],
+    ['request', 'invalid_request_error', 'client', 'client', 'usage.errors.categories.invalid_request'],
+    ['routing', 'no_available_accounts', '', 'unknown', 'admin.ops.errorLog.noAvailableAccounts'],
+  ])('shows owner and reason for %s / %s / %s', async (phase, type, owner, ownerKey, reasonKey) => {
+    const wrapper = mountTable({ phase, type, error_owner: owner })
+    await wrapper.setProps({ visibleColumnKeys: ['category'] })
+
+    expect(wrapper.get('tbody td').text()).toBe(`admin.ops.errorDetails.owner.${ownerKey} · ${reasonKey}`)
+    wrapper.unmount()
   })
 })
 

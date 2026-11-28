@@ -10,6 +10,7 @@ export default {
       outputAmount: '输出量',
       avgOutput: '平均输出',
       noMeasurement: '数据不足',
+      incompleteHistory: '所选时段交付采集不完整，正文、TTFT 和上游尝试指标显示「—」。',
       covered: '采集范围 {from} 至 {to}，共 {seconds} 秒。正文 Token 明细覆盖 {tokens}。',
       outputTpsSamples: '有效样本：{count}',
       overview: '概览',
@@ -294,6 +295,8 @@ export default {
         typeAuth: '认证',
         typeAccountAuth: '账号认证',
         typeRouting: '路由',
+        categoryWithOwner: '{owner} · {reason}',
+        noAvailableAccounts: '无可用账号',
         typeInternal: '内部',
         endpoint: '端点',
         requestType: '类型',
@@ -313,7 +316,8 @@ export default {
         owner: {
           provider: '服务商',
           client: '客户端',
-          platform: '平台'
+          platform: '平台',
+          unknown: '归属未知'
         },
         phase: {
           request: '请求',
@@ -329,6 +333,8 @@ export default {
       },
       // Error Detail Modal
       errorDetail: {
+        selectionReason: '选号原因',
+        selectionReasonUnavailable: '未记录',
         title: '错误详情',
         titleWithId: '错误 #{id}',
         noErrorSelected: '未选择错误。',
@@ -830,8 +836,8 @@ export default {
       },
       tooltips: {
         outputTps: '首批之后的正文量 ÷ 首末两批的发送间隔。至少两次写出才计入样本。',
-        totalRequests: '请求按进入网关计数，正文按写出时间计量。',
-        throughputTrend: '请求按到达、正文按网关写出时间分桶，缺少采集的时段留空。',
+        totalRequests: '所选时段的成功用量记录与失败日志合计。正文按写出时间计量。',
+        throughputTrend: 'QPS 按所选时段的请求日志分桶统计。正文按网关写出时间分桶，缺少采集的时段留空。',
         switchRateTrend: '近5小时内账号切换次数 / 请求总数的趋势（平均切换次数）。',
         latencyHistogram: '成功请求的请求时长分布（毫秒）。',
         errorTrend: '错误趋势（SLA 口径排除业务限制；上游错误率排除 429/529）。',
@@ -846,8 +852,8 @@ export default {
         jobs: '后台任务执行状态，包括最近运行时间、成功时间和错误信息。',
         qps: '请求按到达、正文按写出计数。当前为最近完整 5 秒，峰值和平均含已采集的空闲时段。正文有完整 Token 明细时显示 tok/s。',
         tokens: '当前时间窗口内处理的总Token数量。',
-        sla: '完整交付数 ÷（完整交付数 + 服务失败数）。客户端取消、业务限制另计。',
-        errors: '服务失败数 ÷（完整交付数 + 服务失败数）。流式响应提前中断计失败。',
+        sla: '按所选时段的日志统计。成功数 ÷（成功数 + 计入 SLA 的失败数）。业务限制另计。',
+        errors: '按所选时段的日志统计。计入 SLA 的失败数 ÷（成功数 + 计入 SLA 的失败数）。',
         latency: '请求时长统计，包括 p50、p90、p95、p99 等百分位数。',
         ttft: '请求进入网关至首批非空正文写出的时间。排除心跳、推理和工具参数。',
         health: '系统健康评分（0-100），综合考虑 SLA、错误率和资源使用情况。'

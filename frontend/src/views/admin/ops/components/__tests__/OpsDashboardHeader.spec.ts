@@ -11,7 +11,9 @@ vi.mock('vue-i18n', async () => ({
   useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => params ? `${key}:${JSON.stringify(params)}` : key })
 }))
 
-const overview = { tps: { avg: 242.7 } } as OpsDashboardOverview
+const overview = {
+  start_time: '2026-11-28T08:00:00Z', end_time: '2026-11-28T08:01:00Z', tps: { avg: 242.7 }
+} as OpsDashboardOverview
 function withSpeed(speed: OpsDashboardOverview['output_tps']): OpsDashboardOverview {
   if (!speed) return overview
   const rates = { current: 0, avg: 0, peak: 0 }
@@ -53,4 +55,27 @@ describe('OpsDashboardHeader output TPS', () => {
     wrapper.unmount()
   })
 
+})
+
+describe('OpsDashboardHeader historical coverage', () => {
+  it('uses full-window SLA and request totals with partial delivery data', async () => {
+    const wrapper = mountHeader({
+      ...withSpeed({ p50: 55, sample_count: 4 }),
+      start_time: '2026-11-27T08:01:00Z',
+      request_count_total: 4034,
+      request_count_sla: 3866,
+      error_count_sla: 141,
+      business_limited_count: 168,
+      sla: 3725 / 3866,
+      error_rate: 141 / 3866,
+    })
+    const sla = wrapper.get('[data-testid="ops-sla-card"]')
+    expect(sla.text()).toContain('96.353%')
+    expect(sla.text()).toContain('141')
+    expect(wrapper.get('[data-testid="ops-request-errors-card"]').text()).toContain('3.65%')
+    expect(wrapper.get('[data-testid="output-tps-p50"]').text()).toBe('—')
+    await sla.get('button').trigger('click')
+    expect(wrapper.emitted('openErrorDetails')).toEqual([['request']])
+    wrapper.unmount()
+  })
 })

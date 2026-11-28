@@ -59,8 +59,14 @@ describe('Ops request latency details', () => {
   })
 
   it('opens TTFT details sorted by first visible write across outcomes', async () => {
+    const overview = {
+      start_time: '2026-09-10T00:00:00Z',
+      end_time: '2026-09-10T01:00:00Z',
+      request_count_total: 1,
+      delivery: { seconds: 3600, unit: 'char', output: 0, rate: { avg: 0 }, ttft: { p99_ms: 800 }, speed: { sample_count: 0 } },
+    } as OpsDashboardOverview
     const wrapper = shallowMount(OpsDashboardHeader, {
-      props: { overview: {} as OpsDashboardOverview, platform: '', groupId: null, timeRange: '1h', queryMode: 'auto', loading: false, lastUpdated: null },
+      props: { overview, platform: '', groupId: null, timeRange: '1h', queryMode: 'auto', loading: false, lastUpdated: null },
     })
     await flushPromises()
     const button = wrapper.findAll('button').find((item) =>

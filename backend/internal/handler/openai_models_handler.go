@@ -2,9 +2,9 @@ package handler
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -15,6 +15,8 @@ func (h *GatewayHandler) pinnedOpenAIModels(c *gin.Context, group *service.Group
 	if c.Request.Context().Err() != nil {
 		return
 	}
+	finishObservation := observeOpenAIModelDiscovery(c)
+	defer finishObservation()
 	if h.openAIGatewayService == nil {
 		writeOpenAIModelsError(c, http.StatusInternalServerError, "api_error", "OpenAI model discovery is not configured")
 		return
@@ -30,15 +32,73 @@ func (h *GatewayHandler) pinnedOpenAIModels(c *gin.Context, group *service.Group
 		return
 	}
 	if err != nil {
-		if errors.Is(err, service.ErrNoPinnedCodexModelsAccounts) {
-			writeOpenAIModelsError(c, http.StatusServiceUnavailable, "upstream_error", "No available OpenAI model discovery accounts")
-			return
-		}
-		writeOpenAIModelsError(c, infraerrors.Code(err), "upstream_error", infraerrors.Message(err))
+		writeOpenAIModelDiscoveryError(c, err, "No available OpenAI model discovery accounts")
 		return
 	}
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 	writeOpenAIModelsResponse(c, response)
+	switch c.Writer.Status() {
+	case http.StatusNotFound:
+		c.Set(opsModelDiscoveryPhaseKey, "request")
+	case http.StatusBadGateway:
+		c.Set(opsModelDiscoveryPhaseKey, "internal")
+	}
+}
+
+const (
+	opsModelDiscoveryEndpointKey = "ops_model_discovery_endpoint"
+	opsModelDiscoveryPhaseKey    = "ops_model_discovery_phase"
+	opsModelDiscoveryReasonKey   = "ops_model_discovery_reason"
+)
+
+func observeOpenAIModelDiscovery(c *gin.Context) func() {
+	c.Set(opsModelDiscoveryEndpointKey, "")
+	var mu sync.Mutex
+	var events []service.OpsUpstreamErrorEvent
+	var endpoint string
+	ctx := service.ObserveOpenAIModelFailures(c.Request.Context(), func(event *service.OpsUpstreamErrorEvent, path string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if event != nil {
+			events = append(events, *event)
+			endpoint = path
+		} else if endpoint == "" {
+			endpoint = path
+		}
+	})
+	c.Request = c.Request.WithContext(ctx)
+	return func() {
+		if !c.Writer.Written() {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, event := range events {
+			service.RecordOpenAIModelsUpstreamError(c, event)
+		}
+		if endpoint != "" && c.GetString(opsModelDiscoveryEndpointKey) == "" {
+			c.Set(opsModelDiscoveryEndpointKey, endpoint)
+		}
+	}
+}
+
+func writeOpenAIModelDiscoveryError(c *gin.Context, err error, noAccountMessage string) {
+	phase := service.OpenAIModelsErrorPhase(err)
+	c.Set(opsModelDiscoveryPhaseKey, phase)
+	switch phase {
+	case "routing":
+		c.Set(opsModelDiscoveryReasonKey, service.OpenAIModelsSelectionDetail(err))
+		service.SetOpsLocalErrorType(c, service.OpsNoAvailableAccounts, "")
+		writeOpenAIModelsError(c, http.StatusServiceUnavailable, "api_error", noAccountMessage)
+	case "internal":
+		writeOpenAIModelsError(c, infraerrors.Code(err), "api_error", infraerrors.Message(err))
+	default:
+		status, accountID, endpoint := service.OpenAIModelsErrorAttribution(err)
+		c.Set(opsModelDiscoveryEndpointKey, endpoint)
+		setOpsSelectedAccount(c, accountID, service.PlatformOpenAI)
+		service.SetOpsUpstreamError(c, status, infraerrors.Message(err), "")
+		writeOpenAIModelsError(c, infraerrors.Code(err), "upstream_error", infraerrors.Message(err))
+	}
 }
 
 func writeOpenAIModelsError(c *gin.Context, status int, errorType, message string) {

@@ -133,7 +133,8 @@ type OpsErrorLogFilter struct {
 	ModelFuzzy bool
 
 	// ExcludeCountTokens drops count_tokens probe errors (is_count_tokens=true).
-	ExcludeCountTokens bool
+	ExcludeCountTokens     bool
+	DashboardRequestCounts bool // Use the same HTTP status and probe exclusions as the dashboard totals.
 
 	// IncludeRecoveredUpstream explicitly exempts provider-health phases
 	// (upstream and account_auth) from the status>=400 guard. Ops provider

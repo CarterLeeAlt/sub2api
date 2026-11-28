@@ -1529,11 +1529,15 @@ func codexModelWithVisibility(rawModel json.RawMessage, visibility string) (json
 }
 
 type codexModelsManifestUpstreamError struct {
-	err        error
-	retryable  bool
-	statusCode int
-	headers    http.Header
-	body       []byte
+	err         error
+	retryable   bool
+	transport   bool
+	accountAuth bool
+	accountID   int64
+	endpoint    string
+	statusCode  int
+	headers     http.Header
+	body        []byte
 }
 
 func (e *codexModelsManifestUpstreamError) Error() string { return e.err.Error() }
@@ -1842,6 +1846,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 			s.handleCodexModelsManifestAccountAuthError(fetchCtx, account, credAccount, fetchErr)
 			return manifest, fetchErr
 		}
+		recordOpenAIModelFetch(fetchCtx, request, fetchErr)
 		expectedTaskID := strings.TrimSpace(credAccount.GetCredential("task_id"))
 		if recoverErr := s.recoverAgentIdentityTask(fetchCtx, credAccount, expectedTaskID); recoverErr != nil {
 			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "agent identity task recovery failed: %v", recoverErr)
@@ -1910,7 +1915,13 @@ func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, requ
 	if state == openAIModelsCacheFresh {
 		return openAIModelsResponseForClient(manifest, ifNoneMatch), nil
 	}
-	resultCh := s.refreshCachedOpenAIModels(cacheKey, request, fetch)
+	refreshCtx := context.Background()
+	if state != openAIModelsCacheStale {
+		if observe, ok := ctx.Value(openAIModelsObserverKey{}).(func(*OpsUpstreamErrorEvent, string)); ok {
+			refreshCtx = ObserveOpenAIModelFailures(refreshCtx, observe)
+		}
+	}
+	resultCh := s.refreshCachedOpenAIModels(refreshCtx, cacheKey, request, fetch)
 	if state == openAIModelsCacheStale {
 		return openAIModelsResponseForClient(manifest, ifNoneMatch), nil
 	}
@@ -1929,20 +1940,21 @@ func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, requ
 	}
 }
 
-func (s *OpenAIGatewayService) refreshCachedOpenAIModels(cacheKey string, request openAIModelsRequest, fetch func(ctx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error)) <-chan singleflight.Result {
+func (s *OpenAIGatewayService) refreshCachedOpenAIModels(refreshCtx context.Context, cacheKey string, request openAIModelsRequest, fetch func(ctx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error)) <-chan singleflight.Result {
 	return s.openAIModelsCache.refresh.DoChan(cacheKey, func() (any, error) {
 		cached, state := s.openAIModelsCache.get(cacheKey, time.Now())
 		// 调用方读缓存之后、进入 singleflight 之前，上一轮刷新可能已写入新鲜结果：直接复用，不重复请求上游。
 		if state == openAIModelsCacheFresh {
 			return cached, nil
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), codexModelsManifestRequestTimeout)
+		ctx, cancel := context.WithTimeout(refreshCtx, codexModelsManifestRequestTimeout)
 		defer cancel()
 		ifNoneMatch := ""
 		if cached != nil {
 			ifNoneMatch = cached.upstreamETag
 		}
 		manifest, err := fetch(ctx, ifNoneMatch)
+		err = recordOpenAIModelFetch(ctx, request, err)
 		if err != nil {
 			return nil, err
 		}
@@ -2003,6 +2015,7 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 		return nil, &codexModelsManifestUpstreamError{
 			err:       infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "codex models manifest request failed: %v", err),
 			retryable: isRetryableCodexModelsManifestTransportError(err),
+			transport: true,
 		}
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -2021,11 +2034,12 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 			message = resp.Status
 		}
 		return nil, &codexModelsManifestUpstreamError{
-			err:        infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "codex models manifest upstream error %d: %s", resp.StatusCode, message),
-			statusCode: resp.StatusCode,
-			headers:    resp.Header.Clone(),
-			body:       body,
-			retryable:  isRetryableCodexModelsManifestStatus(resp.StatusCode, request.useAPIKeyUpstream),
+			err:         infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "codex models manifest upstream error %d: %s", resp.StatusCode, message),
+			statusCode:  resp.StatusCode,
+			accountAuth: !request.useAPIKeyUpstream && resp.StatusCode == http.StatusUnauthorized,
+			headers:     resp.Header.Clone(),
+			body:        body,
+			retryable:   isRetryableCodexModelsManifestStatus(resp.StatusCode, request.useAPIKeyUpstream),
 		}
 	}
 
@@ -2033,8 +2047,10 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 	body, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
 	if err != nil {
 		return nil, &codexModelsManifestUpstreamError{
-			err:       infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "read codex models manifest response: %v", err),
-			retryable: isRetryableCodexModelsManifestTransportError(err),
+			err:        infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "read codex models manifest response: %v", err),
+			retryable:  isRetryableCodexModelsManifestTransportError(err),
+			transport:  true,
+			statusCode: resp.StatusCode,
 		}
 	}
 	if int64(len(body)) > bodyLimit {

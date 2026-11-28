@@ -43,6 +43,7 @@ export interface OpsDeliveryWindow {
   speed: NonNullable<OpsDashboardOverview['output_tps']>
   ttft: OpsPercentiles
   attempts: number
+  attempt_errors: number
   limited_attempts: number
 }
 

@@ -12,6 +12,8 @@ interface Props {
   timeRange: string
   customStartTime?: string | null
   customEndTime?: string | null
+  windowStart?: string
+  windowEnd?: string
   platform?: string
   groupId?: number | null
   errorType: 'request' | 'upstream'
@@ -32,6 +34,7 @@ const rows = ref<OpsErrorLog[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(10)
+let fetchGeneration = 0
 
 const q = ref('')
 const statusCode = ref<number | 'other' | null>(null)
@@ -82,7 +85,9 @@ const phaseSelectOptions = computed(() => {
     { value: 'network', label: t('admin.ops.errorDetails.phase.network') || 'network' },
     { value: 'internal', label: t('admin.ops.errorDetails.phase.internal') || 'internal' }
   ]
-  return options
+  return props.errorType === 'upstream'
+    ? options.filter(option => ['', 'account_auth', 'upstream', 'network'].includes(option.value))
+    : options
 })
 
 function close() {
@@ -102,6 +107,7 @@ function onSort(nextSortBy: string, nextSortOrder: 'asc' | 'desc') {
 async function fetchErrorLogs() {
   if (!props.show) return
 
+  const generation = ++fetchGeneration
   loading.value = true
   try {
     const params: Record<string, any> = {
@@ -111,7 +117,10 @@ async function fetchErrorLogs() {
       sort_by: sortBy.value,
       sort_order: sortOrder.value
     }
-    Object.assign(params, buildOpsTimeParams(props.timeRange, props.customStartTime, props.customEndTime))
+    Object.assign(params, props.windowStart && props.windowEnd
+      ? { start_time: props.windowStart, end_time: props.windowEnd }
+      : buildOpsTimeParams(props.timeRange, props.customStartTime, props.customEndTime))
+    if (props.errorType === 'request') params.dashboard_counts = true
 
     const platform = String(props.platform || '').trim()
     if (platform) params.platform = platform
@@ -131,21 +140,23 @@ async function fetchErrorLogs() {
     const res = props.errorType === 'upstream'
       ? await opsAPI.listUpstreamErrors(params)
       : await opsAPI.listRequestErrors(params)
+    if (generation !== fetchGeneration) return
     rows.value = res.items || []
     total.value = res.total || 0
   } catch (err) {
+    if (generation !== fetchGeneration) return
     console.error('[OpsErrorDetailsModal] Failed to fetch error logs', err)
     rows.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (generation === fetchGeneration) loading.value = false
   }
 }
 
   function resetFilters() {
     q.value = ''
     statusCode.value = null
-    phase.value = props.errorType === 'upstream' ? 'upstream' : ''
+    phase.value = ''
     errorOwner.value = ''
     viewMode.value = 'errors'
     page.value = 1
@@ -165,7 +176,7 @@ watch(
 )
 
 watch(
-  () => [props.timeRange, props.customStartTime, props.customEndTime, props.platform, props.groupId] as const,
+  () => [props.windowStart, props.windowEnd, props.timeRange, props.customStartTime, props.customEndTime, props.platform, props.groupId] as const,
   () => {
     if (!props.show) return
     page.value = 1

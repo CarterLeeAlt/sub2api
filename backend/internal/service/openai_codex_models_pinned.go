@@ -165,7 +165,7 @@ type pinnedOpenAIModelsResult struct {
 // failure policy between ordinary model lists and Codex manifests.
 func (s *OpenAIGatewayService) fetchPinnedOpenAIModels(ctx context.Context, group *Group, fetch func(context.Context, *Account) (*OpenAIModelsResponse, error)) ([]pinnedOpenAIModelsResult, error) {
 	if s == nil || s.accountRepo == nil || group == nil {
-		return nil, ErrNoPinnedCodexModelsAccounts
+		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_MODELS_ACCOUNTS_NOT_CONFIGURED", "OpenAI model discovery accounts are not configured")
 	}
 	cfg := group.CodexModelsManifestConfig
 	if group.Platform != PlatformOpenAI || !cfg.Enabled || len(cfg.AccountIDs) == 0 {

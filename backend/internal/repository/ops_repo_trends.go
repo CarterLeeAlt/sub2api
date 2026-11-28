@@ -123,12 +123,10 @@ ORDER BY bucket ASC`
 			switchCount = switches.Int64
 		}
 
-		denom := float64(bucketSeconds)
-		if denom <= 0 {
-			denom = 60
-		}
-		qps := roundTo1DP(float64(requests) / denom)
-		tps := roundTo1DP(float64(tokenConsumed) / denom)
+		bucketEnd := bucket.Add(time.Duration(bucketSeconds) * time.Second)
+		denom := minTime(bucketEnd, end).Sub(maxTime(bucket, start)).Seconds()
+		qps := safeDivideFloat64(float64(requests), denom)
+		tps := roundTo1DP(safeDivideFloat64(float64(tokenConsumed), denom))
 
 		points = append(points, &service.OpsThroughputTrendPoint{
 			BucketStart:   bucket.UTC(),
@@ -188,15 +186,11 @@ ORDER BY bucket ASC`
 }
 
 func (r *opsRepository) getThroughputBreakdownByPlatform(ctx context.Context, start, end time.Time) ([]*service.OpsThroughputPlatformBreakdownItem, error) {
-	q := `
-SELECT r.platform, count(*) AS request_count
-FROM ops_delivery_requests r
-JOIN ops_delivery_coverage c ON c.bucket=date_bin('5 seconds',r.started_at,timestamptz 'epoch')
-WHERE c.bucket >= date_bin('5 seconds',$1::timestamptz,timestamptz 'epoch')
-  AND c.bucket < date_bin('5 seconds',$2::timestamptz,timestamptz 'epoch')
-  AND r.platform <> ''
-GROUP BY r.platform
-ORDER BY request_count DESC, r.platform`
+	q := throughputRequestLogRows + `
+SELECT platform, count(*) AS request_count
+FROM request_rows WHERE platform <> ''
+GROUP BY platform
+ORDER BY request_count DESC, platform`
 
 	rows, err := r.db.QueryContext(ctx, q, start, end)
 	if err != nil {
@@ -230,15 +224,11 @@ func (r *opsRepository) getThroughputTopGroupsByPlatform(ctx context.Context, st
 		limit = 10
 	}
 
-	q := `
+	q := throughputRequestLogRows + `
 SELECT r.group_id, g.name, count(*) AS request_count
-FROM ops_delivery_requests r
-JOIN ops_delivery_coverage c ON c.bucket=date_bin('5 seconds',r.started_at,timestamptz 'epoch')
-LEFT JOIN groups g ON g.id=r.group_id
-WHERE c.bucket >= date_bin('5 seconds',$1::timestamptz,timestamptz 'epoch')
-  AND c.bucket < date_bin('5 seconds',$2::timestamptz,timestamptz 'epoch')
-  AND r.platform = $3 AND r.group_id > 0
-GROUP BY r.group_id,g.name
+FROM request_rows r LEFT JOIN groups g ON g.id = r.group_id
+WHERE r.platform = $3 AND r.group_id > 0
+GROUP BY r.group_id, g.name
 ORDER BY request_count DESC, r.group_id
 LIMIT $4`
 
@@ -271,6 +261,19 @@ LIMIT $4`
 	}
 	return items, nil
 }
+
+const throughputRequestLogRows = `
+WITH request_rows AS (
+  SELECT COALESCE(NULLIF(g.platform,''), a.platform) AS platform, ul.group_id
+  FROM usage_logs ul
+  LEFT JOIN groups g ON g.id = ul.group_id
+  LEFT JOIN accounts a ON a.id = ul.account_id
+  WHERE ul.created_at >= $1 AND ul.created_at < $2
+  UNION ALL
+  SELECT platform, group_id FROM ops_error_logs
+  WHERE created_at >= $1 AND created_at < $2 AND is_count_tokens = FALSE AND status_code >= 400
+)
+`
 
 func opsBucketExprForUsage(bucketSeconds int) string {
 	switch bucketSeconds {

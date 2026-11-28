@@ -896,13 +896,15 @@ func buildOpsErrorLogsWhere(filter *service.OpsErrorLogFilter) (string, []any) {
 		resolvedFilter = filter.Resolved
 	}
 	// Keep list endpoints scoped to client errors unless the caller explicitly opts
-	// into recovered provider-health rows (upstream/account_auth). Request-error
+	// into recovered provider-health rows (upstream/account_auth/network). Request-error
 	// endpoints never set the opt-in and retain this guard.
 	// cyber_policy is exempt from the status >= 400 guard: streaming cyber hits arrive with
 	// status 200 (the SSE stream opened successfully before upstream returned response.failed),
 	// but they are always client-visible blocked requests that belong in admin + user error
 	// lists.  Without the exemption the entire streaming-path cyber sink would be invisible.
-	if !opsFilterIncludesRecoveredProviderRows(filter, phaseFilter) {
+	if filter.DashboardRequestCounts {
+		clauses = append(clauses, "COALESCE(e.status_code, 0) >= 400", "e.is_count_tokens = FALSE")
+	} else if !opsFilterIncludesRecoveredProviderRows(filter, phaseFilter) {
 		clauses = append(clauses, "(COALESCE(e.status_code, 0) >= 400 OR e.error_type = 'cyber_policy')")
 	}
 
@@ -1035,7 +1037,7 @@ func opsFilterIncludesRecoveredProviderRows(filter *service.OpsErrorLogFilter, p
 		return false
 	}
 	if phaseFilter != "" {
-		return phaseFilter == "upstream" || phaseFilter == "account_auth"
+		return phaseFilter == "upstream" || phaseFilter == "account_auth" || phaseFilter == "network"
 	}
 	if len(filter.ErrorPhasesAny) == 0 {
 		return false
@@ -1043,7 +1045,7 @@ func opsFilterIncludesRecoveredProviderRows(filter *service.OpsErrorLogFilter, p
 	sawProviderPhase := false
 	for _, rawPhase := range filter.ErrorPhasesAny {
 		switch strings.TrimSpace(strings.ToLower(rawPhase)) {
-		case "upstream", "account_auth":
+		case "upstream", "account_auth", "network":
 			sawProviderPhase = true
 		default:
 			return false
