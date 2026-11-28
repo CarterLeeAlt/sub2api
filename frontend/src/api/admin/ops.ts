@@ -855,7 +855,10 @@ export interface OpsSystemLog {
   extra?: Record<string, any>
 }
 
-export type OpsSystemLogListResponse = PaginatedResponse<OpsSystemLog>
+export interface OpsSystemLogListResponse extends PaginatedResponse<OpsSystemLog> {
+  start_time: string
+  end_time: string
+}
 
 export interface OpsSystemLogQuery {
   page?: number
@@ -876,20 +879,9 @@ export interface OpsSystemLogQuery {
   q?: string
 }
 
-export interface OpsSystemLogCleanupRequest {
-  start_time?: string
-  end_time?: string
-  host?: string
-  level?: string
-  component?: string
-  request_id?: string
-  client_request_id?: string
-  user_id?: number | null
-  api_key_id?: number | null
-  account_id?: number | null
-  platform?: string
-  model?: string
-  q?: string
+export interface OpsSystemLogCleanupRequest extends Omit<OpsSystemLogQuery, 'page' | 'page_size' | 'time_range'> {
+  start_time: string
+  end_time: string
 }
 
 export interface OpsSystemLogSinkHealth {

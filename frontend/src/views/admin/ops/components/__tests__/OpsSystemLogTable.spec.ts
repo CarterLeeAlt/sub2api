@@ -76,6 +76,8 @@ const sinkHealth = {
   avg_write_delay_ms: 0,
 }
 
+const queryBounds = { start_time: '2026-11-28T04:00:00.123Z', end_time: '2026-11-28T05:00:00.456Z' }
+
 describe('OpsSystemLogTable host support', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -94,6 +96,7 @@ describe('OpsSystemLogTable host support', () => {
       total: 1,
       page: 1,
       page_size: 20,
+      ...queryBounds,
     })
     mockCleanupSystemLogs.mockResolvedValue({ deleted: 1 })
     mockGetSystemLogSinkHealth.mockResolvedValue(sinkHealth)
@@ -130,7 +133,8 @@ describe('OpsSystemLogTable host support', () => {
     await cleanupButton!.trigger('click')
     await flushPromises()
 
-    expect(mockCleanupSystemLogs).toHaveBeenCalledWith(expect.objectContaining({ host: 'api-node-2' }))
+    expect(mockCleanupSystemLogs).toHaveBeenCalledWith(expect.objectContaining({ host: 'api-node-2', ...queryBounds }))
+    expect(mockCleanupSystemLogs.mock.calls[0]?.[0]).not.toHaveProperty('time_range')
   })
 
   it('keeps database access-log persistence opt-in', async () => {
@@ -157,6 +161,123 @@ describe('OpsSystemLogTable host support', () => {
   })
 })
 
+describe('system log search and health', () => {
+  const mountTable = (platformFilter = '') => mount(OpsSystemLogTable, {
+    props: { platformFilter },
+    global: { stubs: { Select: SelectStub, Pagination: PaginationStub } },
+  })
+  const button = (wrapper: ReturnType<typeof mountTable>, key: string) =>
+    wrapper.findAll('button').find(item => item.text() === `admin.ops.systemLogs.${key}`)!
+  const input = (wrapper: ReturnType<typeof mountTable>, key: string) =>
+    wrapper.findAll('label').find(item => item.text() === `admin.ops.systemLogs.${key}`)!.find('input')
+  const result = (message = 'request failed', extra?: Record<string, unknown>) => ({
+    items: [{ id: 1, created_at: queryBounds.start_time, level: 'warn', message, extra }],
+    total: 1, page: 1, page_size: 20, ...queryBounds,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    mockListSystemLogs.mockResolvedValue(result())
+    mockGetRuntimeLogConfig.mockResolvedValue(runtimeConfig)
+    mockGetSystemLogSinkHealth.mockResolvedValue(sinkHealth)
+    mockCleanupSystemLogs.mockResolvedValue({ deleted: 1 })
+  })
+
+  it('requires searching edited filters before cleanup and honors cancel and confirm', async () => {
+    const wrapper = mountTable()
+    await flushPromises()
+
+    const cleanup = button(wrapper, 'cleanCurrentFilters')
+    await input(wrapper, 'keyword').setValue('timeout')
+    expect(cleanup.attributes('disabled')).toBeDefined()
+    await wrapper.setProps({ refreshToken: 1 })
+    await flushPromises()
+    expect(mockListSystemLogs.mock.lastCall?.[0].q).toBeUndefined()
+    expect(mockCleanupSystemLogs).not.toHaveBeenCalled()
+
+    await button(wrapper, 'search').trigger('click')
+    await flushPromises()
+    expect(cleanup.attributes('disabled')).toBeUndefined()
+    vi.mocked(window.confirm).mockReturnValueOnce(false)
+    await cleanup.trigger('click')
+    expect(mockCleanupSystemLogs).not.toHaveBeenCalled()
+    await cleanup.trigger('click')
+    await flushPromises()
+    expect(mockCleanupSystemLogs).toHaveBeenCalledOnce()
+    expect(mockCleanupSystemLogs).toHaveBeenCalledWith(expect.objectContaining({ q: 'timeout', ...queryBounds }))
+    wrapper.unmount()
+  })
+
+  it('updates the search when the top platform changes or is cleared', async () => {
+    const wrapper = mountTable('openai')
+    await flushPromises()
+    expect(mockListSystemLogs.mock.lastCall?.[0].platform).toBe('openai')
+    await wrapper.setProps({ platformFilter: 'anthropic' })
+    await flushPromises()
+    expect(mockListSystemLogs.mock.lastCall?.[0].platform).toBe('anthropic')
+    await wrapper.setProps({ platformFilter: '' })
+    await flushPromises()
+    expect(mockListSystemLogs.mock.lastCall?.[0].platform).toBeUndefined()
+    expect((input(wrapper, 'platform').element as HTMLInputElement).value).toBe('')
+    wrapper.unmount()
+  })
+
+  it('ignores a slower previous search and blocks cleanup after a failed query', async () => {
+    const wrapper = mountTable()
+    await flushPromises()
+    let finishOld: (response: ReturnType<typeof result>) => void = () => {}
+    mockListSystemLogs.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+    await input(wrapper, 'keyword').setValue('old')
+    await button(wrapper, 'search').trigger('click')
+    expect(button(wrapper, 'cleanCurrentFilters').attributes('disabled')).toBeDefined()
+    mockListSystemLogs.mockResolvedValueOnce(result('latest entry'))
+    await input(wrapper, 'keyword').setValue('latest')
+    await button(wrapper, 'search').trigger('click')
+    await flushPromises()
+    finishOld(result('obsolete entry'))
+    await flushPromises()
+    expect(wrapper.text()).toContain('latest entry')
+    expect(wrapper.text()).not.toContain('obsolete entry')
+
+    mockListSystemLogs.mockRejectedValueOnce(new Error('query failed'))
+    await button(wrapper, 'search').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.ops.systemLogs.loadFailed')
+    expect(wrapper.text()).not.toContain('latest entry')
+    expect(button(wrapper, 'cleanCurrentFilters').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('separates unavailable health from measured zeroes and recovers on refresh', async () => {
+    mockGetSystemLogSinkHealth.mockRejectedValueOnce(new Error('not available'))
+    const wrapper = mountTable()
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.ops.systemLogs.healthLoadFailed')
+    expect(wrapper.text()).not.toContain('admin.ops.systemLogs.failed')
+
+    await button(wrapper, 'refreshHealth').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.ops.systemLogs.failed 0')
+    expect(wrapper.text()).not.toContain('admin.ops.systemLogs.healthLoadFailed')
+
+    mockGetSystemLogSinkHealth.mockRejectedValueOnce(new Error('lost connection'))
+    await button(wrapper, 'refreshHealth').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.ops.systemLogs.healthLoadFailed')
+    expect(wrapper.text()).not.toContain('admin.ops.systemLogs.queue')
+    wrapper.unmount()
+  })
+
+  it('renders upstream status and switch count when the log has these fields', async () => {
+    mockListSystemLogs.mockResolvedValueOnce(result('switching account', { upstream_status: 503, switch_count: 0 }))
+    const wrapper = mountTable()
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.ops.systemLogs.upstreamStatus')
+    expect(wrapper.text()).toContain('admin.ops.systemLogs.switchCount')
+    wrapper.unmount()
+  })
+})
 
 describe('rolling log retention settings', () => {
   const mountTable = () => mount(OpsSystemLogTable, {

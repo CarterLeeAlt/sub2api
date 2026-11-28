@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import LogRetentionSelect from './LogRetentionSelect.vue'
-import { opsAPI, type OpsRuntimeLogConfig, type OpsSystemLog, type OpsSystemLogSinkHealth } from '@/api/admin/ops'
+import { opsAPI, type OpsRuntimeLogConfig, type OpsSystemLog, type OpsSystemLogCleanupRequest, type OpsSystemLogQuery, type OpsSystemLogSinkHealth } from '@/api/admin/ops'
 import Pagination from '@/components/common/Pagination.vue'
 import Select from '@/components/common/Select.vue'
 import { useAppStore } from '@/stores'
@@ -28,15 +28,14 @@ const logs = ref<OpsSystemLog[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
+const cleanupScope = ref<OpsSystemLogCleanupRequest | null>(null)
+const cleaning = ref(false)
+const listFailed = ref(false)
+let listRequest = 0
 
-const health = ref<OpsSystemLogSinkHealth>({
-  queue_depth: 0,
-  queue_capacity: 0,
-  dropped_count: 0,
-  write_failed_count: 0,
-  written_count: 0,
-  avg_write_delay_ms: 0
-})
+const health = ref<OpsSystemLogSinkHealth | null>(null)
+const healthLoading = ref(false)
+const healthFailed = ref(false)
 
 const runtimeLoading = ref(false)
 const runtimeConfigLoaded = ref(false)
@@ -53,8 +52,8 @@ const runtimeConfig = reactive<OpsRuntimeLogConfig>({
   request_retention_days: 90
 })
 
-const filters = reactive({
-  time_range: '1h' as '5m' | '30m' | '1h' | '6h' | '24h' | '7d' | '30d',
+const initialFilters = () => ({
+  time_range: '1h' as NonNullable<OpsSystemLogQuery['time_range']>,
   start_time: '',
   end_time: '',
   host: '',
@@ -65,10 +64,14 @@ const filters = reactive({
   user_id: '',
   api_key_id: '',
   account_id: '',
-  platform: '',
+  platform: props.platformFilter,
   model: '',
   q: ''
 })
+const filters = reactive(initialFilters())
+const appliedFilters = ref({ ...filters })
+const canCleanup = computed(() => !loading.value && !cleaning.value && cleanupScope.value !== null &&
+  total.value > 0 && JSON.stringify(filters) === JSON.stringify(appliedFilters.value))
 
 const runtimeLevelOptions = [
   { value: 'debug', label: 'debug' },
@@ -147,6 +150,11 @@ const formatSystemLogDetail = (row: OpsSystemLog) => {
   if (protocol) accessParts.push(`proto=${protocol}`)
   if (accessParts.length > 0) parts.push(accessParts.join(' '))
 
+  const upstreamStatus = getExtraString(extra, 'upstream_status')
+  const switchCount = getExtraString(extra, 'switch_count')
+  if (upstreamStatus) parts.push(t('admin.ops.systemLogs.upstreamStatus', { status: upstreamStatus }))
+  if (switchCount) parts.push(t('admin.ops.systemLogs.switchCount', { count: switchCount }))
+
   const corrParts: string[] = []
   if (row.request_id) corrParts.push(`req=${row.request_id}`)
   if (row.client_request_id) corrParts.push(`client_req=${row.client_request_id}`)
@@ -169,64 +177,72 @@ const formatSystemLogDetail = (row: OpsSystemLog) => {
 const toRFC3339 = (value: string) => {
   if (!value) return undefined
   const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return undefined
+  if (Number.isNaN(d.getTime())) throw new Error(t('admin.ops.systemLogs.invalidFilterTime'))
   return d.toISOString()
 }
 
-const buildQuery = () => {
-  const query: Record<string, any> = {
-    page: page.value,
-    page_size: pageSize.value,
-    time_range: filters.time_range
+const filterID = (raw: string, field: string) => {
+  const value = raw.trim()
+  if (!value) return undefined
+  const id = Number(value)
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id <= 0) {
+    throw new Error(t('admin.ops.systemLogs.invalidFilterId', { field }))
   }
-
-  if (filters.time_range === '30d') {
-    query.time_range = '30d'
-  }
-  if (filters.start_time) query.start_time = toRFC3339(filters.start_time)
-  if (filters.end_time) query.end_time = toRFC3339(filters.end_time)
-  if (filters.host.trim()) query.host = filters.host.trim()
-  if (filters.level.trim()) query.level = filters.level.trim()
-  if (filters.component.trim()) query.component = filters.component.trim()
-  if (filters.request_id.trim()) query.request_id = filters.request_id.trim()
-  if (filters.client_request_id.trim()) query.client_request_id = filters.client_request_id.trim()
-  if (filters.user_id.trim()) {
-    const v = Number.parseInt(filters.user_id.trim(), 10)
-    if (Number.isFinite(v) && v > 0) query.user_id = v
-  }
-  if (filters.api_key_id.trim()) {
-    const v = Number.parseInt(filters.api_key_id.trim(), 10)
-    if (Number.isFinite(v) && v > 0) query.api_key_id = v
-  }
-  if (filters.account_id.trim()) {
-    const v = Number.parseInt(filters.account_id.trim(), 10)
-    if (Number.isFinite(v) && v > 0) query.account_id = v
-  }
-  if (filters.platform.trim()) query.platform = filters.platform.trim()
-  if (filters.model.trim()) query.model = filters.model.trim()
-  if (filters.q.trim()) query.q = filters.q.trim()
-  return query
+  return id
 }
 
+const buildFilterQuery = (selected: typeof filters): OpsSystemLogQuery => ({
+  time_range: selected.time_range,
+  start_time: toRFC3339(selected.start_time),
+  end_time: toRFC3339(selected.end_time),
+  host: selected.host.trim() || undefined,
+  level: selected.level.trim() || undefined,
+  component: selected.component.trim() || undefined,
+  request_id: selected.request_id.trim() || undefined,
+  client_request_id: selected.client_request_id.trim() || undefined,
+  user_id: filterID(selected.user_id, 'user_id'),
+  api_key_id: filterID(selected.api_key_id, t('admin.ops.systemLogs.keyId')),
+  account_id: filterID(selected.account_id, 'account_id'),
+  platform: selected.platform.trim() || undefined,
+  model: selected.model.trim() || undefined,
+  q: selected.q.trim() || undefined
+})
+
 const fetchLogs = async () => {
+  const request = ++listRequest
   loading.value = true
+  listFailed.value = false
+  cleanupScope.value = null
   try {
-    const res = await opsAPI.listSystemLogs(buildQuery())
-    logs.value = res.items || []
-    total.value = res.total || 0
-  } catch (err: any) {
+    const { time_range, ...conditions } = buildFilterQuery(appliedFilters.value)
+    const res = await opsAPI.listSystemLogs({ ...conditions, time_range, page: page.value, page_size: pageSize.value })
+    if (request !== listRequest) return
+    logs.value = res.items
+    total.value = res.total
+    cleanupScope.value = { ...conditions, start_time: res.start_time, end_time: res.end_time }
+  } catch (err) {
+    if (request !== listRequest) return
+    logs.value = []
+    total.value = 0
+    listFailed.value = true
     console.error('[OpsSystemLogTable] Failed to fetch logs', err)
-    appStore.showError(err?.response?.data?.detail || t('admin.ops.systemLogs.loadFailed'))
+    appStore.showError(extractApiErrorMessage(err, t('admin.ops.systemLogs.loadFailed')))
   } finally {
-    loading.value = false
+    if (request === listRequest) loading.value = false
   }
 }
 
 const fetchHealth = async () => {
+  if (healthLoading.value) return
+  healthLoading.value = true
+  healthFailed.value = false
   try {
     health.value = await opsAPI.getSystemLogSinkHealth()
   } catch {
-    // 忽略健康数据读取失败，不影响主流程。
+    health.value = null
+    healthFailed.value = true
+  } finally {
+    healthLoading.value = false
   }
 }
 
@@ -308,63 +324,41 @@ const resetRuntimeConfig = async () => {
 }
 
 const cleanupCurrentFilter = async () => {
-  const ok = window.confirm(t('admin.ops.systemLogs.cleanupConfirm'))
-  if (!ok) return
+  const payload = cleanupScope.value
+  if (!payload || !canCleanup.value) return
+  if (!window.confirm(t('admin.ops.systemLogs.cleanupConfirm', {
+    start: formatTime(payload.start_time), end: formatTime(payload.end_time), count: total.value
+  }))) return
+
+  cleaning.value = true
   try {
-    const payload = {
-      start_time: toRFC3339(filters.start_time),
-      end_time: toRFC3339(filters.end_time),
-      host: filters.host.trim() || undefined,
-      level: filters.level.trim() || undefined,
-      component: filters.component.trim() || undefined,
-      request_id: filters.request_id.trim() || undefined,
-      client_request_id: filters.client_request_id.trim() || undefined,
-      user_id: filters.user_id.trim() ? Number.parseInt(filters.user_id.trim(), 10) : undefined,
-      api_key_id: filters.api_key_id.trim() ? Number.parseInt(filters.api_key_id.trim(), 10) : undefined,
-      account_id: filters.account_id.trim() ? Number.parseInt(filters.account_id.trim(), 10) : undefined,
-      platform: filters.platform.trim() || undefined,
-      model: filters.model.trim() || undefined,
-      q: filters.q.trim() || undefined
-    }
     const res = await opsAPI.cleanupSystemLogs(payload)
     appStore.showSuccess(t('admin.ops.systemLogs.cleanupSuccess', { count: res.deleted || 0 }))
     page.value = 1
     await Promise.all([fetchLogs(), fetchHealth()])
-  } catch (err: any) {
+  } catch (err) {
     console.error('[OpsSystemLogTable] Failed to cleanup logs', err)
     appStore.showError(
       extractApiErrorMessage(err, t('admin.ops.systemLogs.cleanupFailed'), {
-        OPS_SYSTEM_LOG_CLEANUP_FILTER_REQUIRED: t('admin.ops.systemLogs.cleanupFilterRequired')
+        OPS_SYSTEM_LOG_CLEANUP_RANGE_REQUIRED: t('admin.ops.systemLogs.cleanupRangeRequired'),
+        OPS_SYSTEM_LOG_CLEANUP_INVALID_RANGE: t('admin.ops.systemLogs.cleanupInvalidRange')
       })
     )
+  } finally {
+    cleaning.value = false
   }
 }
 
 const resetFilters = () => {
-  filters.time_range = '1h'
-  filters.start_time = ''
-  filters.end_time = ''
-  filters.host = ''
-  filters.level = ''
-  filters.component = ''
-  filters.request_id = ''
-  filters.client_request_id = ''
-  filters.user_id = ''
-  filters.api_key_id = ''
-  filters.account_id = ''
-  filters.platform = props.platformFilter || ''
-  filters.model = ''
-  filters.q = ''
-  page.value = 1
-  fetchLogs()
+  Object.assign(filters, initialFilters())
+  applyFilters()
 }
 
 watch(() => props.platformFilter, (v) => {
-  if (v && !filters.platform) {
-    filters.platform = v
-    page.value = 1
-    fetchLogs()
-  }
+  filters.platform = v
+  appliedFilters.value = { ...appliedFilters.value, platform: v }
+  page.value = 1
+  fetchLogs()
 })
 
 watch(() => props.refreshToken, () => {
@@ -384,6 +378,14 @@ const onPageSizeChange = (next: number) => {
 }
 
 const applyFilters = () => {
+  try {
+    buildFilterQuery(filters)
+  } catch (err) {
+    if (!(err instanceof Error)) throw err
+    appStore.showError(err.message)
+    return
+  }
+  appliedFilters.value = { ...filters }
   page.value = 1
   fetchLogs()
 }
@@ -391,11 +393,10 @@ const applyFilters = () => {
 const hasData = computed(() => logs.value.length > 0)
 
 onMounted(async () => {
-  if (props.platformFilter) {
-    filters.platform = props.platformFilter
-  }
   await Promise.all([fetchLogs(), fetchHealth(), loadRuntimeConfig()])
 })
+
+onBeforeUnmount(() => { listRequest += 1 })
 </script>
 
 <template>
@@ -405,7 +406,9 @@ onMounted(async () => {
         <h3 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.ops.systemLogs.title') }}</h3>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.description') }}</p>
       </div>
-      <div class="flex flex-wrap items-center gap-2 text-xs">
+      <p v-if="healthLoading" class="text-xs text-gray-500" role="status">{{ t('common.loading') }}</p>
+      <p v-else-if="healthFailed" class="text-xs text-red-600 dark:text-red-400" role="status">{{ t('admin.ops.systemLogs.healthLoadFailed') }}</p>
+      <div v-else-if="health" class="flex flex-wrap items-center gap-2 text-xs">
         <span class="rounded-md bg-gray-100 px-2 py-1 text-gray-700 dark:bg-dark-700 dark:text-gray-200">{{ t('admin.ops.systemLogs.queue') }} {{ health.queue_depth }}/{{ health.queue_capacity }}</span>
         <span class="rounded-md bg-gray-100 px-2 py-1 text-gray-700 dark:bg-dark-700 dark:text-gray-200">{{ t('admin.ops.systemLogs.written') }} {{ health.written_count }}</span>
         <span class="rounded-md bg-amber-100 px-2 py-1 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">{{ t('admin.ops.systemLogs.dropped') }} {{ health.dropped_count }}</span>
@@ -473,7 +476,7 @@ onMounted(async () => {
         </div>
       </div>
       <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.persistAccessLogsHint') }}</p>
-      <p v-if="health.last_error" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t('admin.ops.systemLogs.latestWriteError') }} {{ health.last_error }}</p>
+      <p v-if="!healthLoading && health?.last_error" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t('admin.ops.systemLogs.latestWriteError') }} {{ health.last_error }}</p>
     </div>
 
     <div class="mb-4 grid grid-cols-1 gap-3 md:grid-cols-5">
@@ -538,12 +541,13 @@ onMounted(async () => {
     <div class="mb-3 flex flex-wrap gap-2">
       <button type="button" class="btn btn-primary btn-sm" @click="applyFilters">{{ t('admin.ops.systemLogs.search') }}</button>
       <button type="button" class="btn btn-secondary btn-sm" @click="resetFilters">{{ t('common.reset') }}</button>
-      <button type="button" class="btn btn-danger btn-sm" @click="cleanupCurrentFilter">{{ t('admin.ops.systemLogs.cleanCurrentFilters') }}</button>
-      <button type="button" class="btn btn-secondary btn-sm" @click="fetchHealth">{{ t('admin.ops.systemLogs.refreshHealth') }}</button>
+      <button type="button" class="btn btn-danger btn-sm" :disabled="!canCleanup" @click="cleanupCurrentFilter">{{ t('admin.ops.systemLogs.cleanCurrentFilters') }}</button>
+      <button type="button" class="btn btn-secondary btn-sm" :disabled="healthLoading" @click="fetchHealth">{{ t('admin.ops.systemLogs.refreshHealth') }}</button>
     </div>
 
     <div class="overflow-hidden rounded-xl border border-gray-200 dark:border-dark-700">
       <div v-if="loading" class="px-4 py-8 text-center text-sm text-gray-500">{{ t('common.loading') }}</div>
+      <div v-else-if="listFailed" class="px-4 py-8 text-center text-sm text-red-600 dark:text-red-400" role="status">{{ t('admin.ops.systemLogs.loadFailed') }}</div>
       <div v-else-if="!hasData" class="px-4 py-8 text-center text-sm text-gray-500">{{ t('admin.ops.systemLogs.empty') }}</div>
       <div v-else-if="!isDesktopViewport" class="divide-y divide-gray-100 dark:divide-dark-800">
         <div v-for="row in logs" :key="row.id" class="space-y-1.5 p-3">

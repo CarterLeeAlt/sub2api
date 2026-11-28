@@ -695,6 +695,8 @@ func (h *OpsHandler) UpdateErrorResolution(c *gin.Context) {
 	response.Success(c, gin.H{"ok": true})
 }
 
+const maxOpsTimeRange = 30 * 24 * time.Hour
+
 func parseOpsTimeRange(c *gin.Context, defaultRange string) (time.Time, time.Time, error) {
 	startStr := strings.TrimSpace(c.Query("start_time"))
 	endStr := strings.TrimSpace(c.Query("end_time"))
@@ -730,7 +732,7 @@ func parseOpsTimeRange(c *gin.Context, defaultRange string) (time.Time, time.Tim
 		if start.After(end) {
 			return time.Time{}, time.Time{}, fmt.Errorf("invalid time range: start_time must be <= end_time")
 		}
-		if end.Sub(start) > 30*24*time.Hour {
+		if end.Sub(start) > maxOpsTimeRange {
 			return time.Time{}, time.Time{}, fmt.Errorf("invalid time range: max window is 30 days")
 		}
 		return start, end, nil
@@ -748,7 +750,7 @@ func parseOpsTimeRange(c *gin.Context, defaultRange string) (time.Time, time.Tim
 
 	end = time.Now()
 	start = end.Add(-dur)
-	if end.Sub(start) > 30*24*time.Hour {
+	if end.Sub(start) > maxOpsTimeRange {
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid time range: max window is 30 days")
 	}
 	return start, end, nil

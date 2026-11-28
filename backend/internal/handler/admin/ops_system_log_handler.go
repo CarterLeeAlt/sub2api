@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -96,7 +97,15 @@ func (h *OpsHandler) ListSystemLogs(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Paginated(c, result.Logs, int64(result.Total), result.Page, result.PageSize)
+	response.Success(c, struct {
+		response.PaginatedData
+		StartTime time.Time `json:"start_time"`
+		EndTime   time.Time `json:"end_time"`
+	}{
+		PaginatedData: response.NewPaginatedData(result.Logs, int64(result.Total), result.Page, result.PageSize),
+		StartTime:     start.UTC(),
+		EndTime:       end.UTC(),
+	})
 }
 
 // CleanupSystemLogs deletes indexed system logs by filter.
@@ -151,6 +160,22 @@ func (h *OpsHandler) CleanupSystemLogs(c *gin.Context) {
 		response.BadRequest(c, "Invalid api_key_id")
 		return
 	}
+	if req.UserID != nil && *req.UserID <= 0 {
+		response.BadRequest(c, "Invalid user_id")
+		return
+	}
+	if req.AccountID != nil && *req.AccountID <= 0 {
+		response.BadRequest(c, "Invalid account_id")
+		return
+	}
+	if start == nil || end == nil || start.IsZero() || end.IsZero() {
+		response.ErrorFrom(c, infraerrors.BadRequest("OPS_SYSTEM_LOG_CLEANUP_RANGE_REQUIRED", "Cleanup requires a start time and an end time"))
+		return
+	}
+	if !start.Before(*end) || end.Sub(*start) > maxOpsTimeRange {
+		response.ErrorFrom(c, infraerrors.BadRequest("OPS_SYSTEM_LOG_CLEANUP_INVALID_RANGE", "Cleanup time range must be greater than zero and at most 30 days"))
+		return
+	}
 
 	filter := &service.OpsSystemLogCleanupFilter{
 		StartTime:       start,
@@ -187,5 +212,10 @@ func (h *OpsHandler) GetSystemLogIngestionHealth(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, h.opsService.GetSystemLogSinkHealth())
+	health := h.opsService.GetSystemLogSinkHealth()
+	if health.QueueCapacity == 0 {
+		response.Error(c, http.StatusServiceUnavailable, "System log ingestion unavailable")
+		return
+	}
+	response.Success(c, health)
 }

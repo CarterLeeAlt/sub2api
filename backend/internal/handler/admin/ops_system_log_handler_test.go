@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -165,7 +166,7 @@ func TestOpsSystemLogHandler_CleanupUnauthorized(t *testing.T) {
 	r := newOpsSystemLogTestRouter(h, false)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"request_id":"r1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"request_id":"r1","start_time":"2026-11-28T00:00:00Z","end_time":"2026-11-28T01:00:00Z"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
@@ -221,7 +222,7 @@ func TestOpsSystemLogHandler_CleanupServiceUnavailable(t *testing.T) {
 	r := newOpsSystemLogTestRouter(h, true)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"request_id":"r1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"request_id":"r1","start_time":"2026-11-28T00:00:00Z","end_time":"2026-11-28T01:00:00Z"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
@@ -235,7 +236,7 @@ func TestOpsSystemLogHandler_CleanupAcceptsAPIKeyID(t *testing.T) {
 	r := newOpsSystemLogTestRouter(h, true)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"api_key_id":123}`))
+	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"api_key_id":123,"start_time":"2026-11-28T00:00:00Z","end_time":"2026-11-28T01:00:00Z"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
@@ -249,8 +250,25 @@ func TestOpsSystemLogHandler_CleanupAcceptsHost(t *testing.T) {
 	h := NewOpsHandler(svc)
 	r := newOpsSystemLogTestRouter(h, true)
 
+	listed := httptest.NewRecorder()
+	r.ServeHTTP(listed, httptest.NewRequest(http.MethodGet, "/logs?host=api-node-1&time_range=30m", nil))
+	var envelope responseEnvelope
+	var scope struct {
+		Start time.Time `json:"start_time"`
+		End   time.Time `json:"end_time"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &envelope); err != nil || listed.Code != http.StatusOK {
+		t.Fatalf("list response: %s, err=%v", listed.Body, err)
+	}
+	if err := json.Unmarshal(envelope.Data, &scope); err != nil || scope.End.Sub(scope.Start) != 30*time.Minute {
+		t.Fatalf("list range: %+v, err=%v", scope, err)
+	}
+	payload, err := json.Marshal(map[string]any{"host": "api-node-1", "start_time": scope.Start, "end_time": scope.End})
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"host":"api-node-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -258,6 +276,32 @@ func TestOpsSystemLogHandler_CleanupAcceptsHost(t *testing.T) {
 	}
 	if repo.cleanupFilter == nil || repo.cleanupFilter.Host != "api-node-1" {
 		t.Fatalf("host filter = %+v, want api-node-1", repo.cleanupFilter)
+	}
+	if !repo.cleanupFilter.StartTime.Equal(*repo.listFilter.StartTime) || !repo.cleanupFilter.EndTime.Equal(*repo.listFilter.EndTime) {
+		t.Fatalf("cleanup range differs from list: %+v vs %+v", repo.cleanupFilter, repo.listFilter)
+	}
+}
+
+func TestOpsSystemLogHandler_CleanupRejectsUnsafeRange(t *testing.T) {
+	for name, payload := range map[string]string{
+		"missing":         `{"level":"warn"}`,
+		"one endpoint":    `{"start_time":"2026-11-28T00:00:00Z","level":"warn"}`,
+		"inverted":        `{"start_time":"2026-11-28T01:00:00Z","end_time":"2026-11-28T00:00:00Z"}`,
+		"too long":        `{"start_time":"2026-10-28T00:00:00Z","end_time":"2026-11-28T00:00:00Z"}`,
+		"invalid account": `{"start_time":"2026-11-28T00:00:00Z","end_time":"2026-11-28T01:00:00Z","account_id":-1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := &opsSystemLogCaptureRepo{}
+			svc := service.NewOpsService(repo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			r := newOpsSystemLogTestRouter(NewOpsHandler(svc), true)
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(payload))
+			req.Header.Set("Content-Type", "application/json")
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest || repo.cleanupFilter != nil {
+				t.Fatalf("expected rejection before deletion, got %d: %s", w.Code, w.Body)
+			}
+		})
 	}
 }
 
@@ -314,6 +358,12 @@ func TestOpsSystemLogHandler_HealthUnavailableAndMonitoringDisabled(t *testing.T
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d, want 503", w.Code)
+	}
+	r = newOpsSystemLogTestRouter(NewOpsHandler(service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)), false)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/logs/health", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing sink status=%d, want 503", w.Code)
 	}
 
 	svc := service.NewOpsService(nil, nil, &config.Config{

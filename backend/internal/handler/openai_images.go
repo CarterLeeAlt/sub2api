@@ -82,6 +82,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	}
 
 	reqLog = reqLog.With(
+		zap.String("platform", openAICompatibleRequestPlatform(c.Request.Context(), apiKey)),
 		zap.String("model", clientRequestModel),
 		zap.String("routing_model", routingModel),
 		zap.Bool("stream", parsed.Stream),
