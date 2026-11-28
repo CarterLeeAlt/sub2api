@@ -1,37 +1,7 @@
 # Model Pricing Data
 
-This directory contains a local copy of the mirrored model pricing data as a fallback mechanism.
+The server embeds `model_prices_and_context_window.json` from this directory. On startup it loads the last usable cached catalog or uses the embedded prices immediately. The configured fallback file fills missing models before the embedded catalog does. The override file has the highest priority.
 
-## Source
-The original file is maintained by the LiteLLM project and mirrored into the `price-mirror` branch of this repository via GitHub Actions:
-- Mirror branch (configurable via `PRICE_MIRROR_REPO`): https://raw.githubusercontent.com/<your-repo>/price-mirror/model_prices_and_context_window.json
-- Upstream source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+By default the server checks the [upstream pricing repository](https://github.com/Wei-Shaw/model-price-repo) at startup and every ten minutes. When prices change, it downloads the new catalog and caches it for the next startup. Set `pricing.remote_url` to an empty string for local pricing only.
 
-## Purpose
-This local copy serves as a fallback when the remote file cannot be downloaded due to:
-- Network restrictions
-- Firewall rules
-- DNS resolution issues
-- GitHub being blocked in certain regions
-- Docker container network limitations
-
-## Update Process
-The pricingService will:
-1. First attempt to download the latest version from GitHub
-2. If download fails, use this local copy as fallback
-3. Log a warning when using the fallback file
-
-## Manual Update
-To manually update this file with the latest pricing data (if automation is unavailable):
-```bash
-curl -s https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json -o model_prices_and_context_window.json
-```
-
-## File Format
-The file contains JSON data with model pricing information including:
-- Model names and identifiers
-- Input/output token costs
-- Context window sizes
-- Model capabilities
-
-Last updated: 2025-08-10
+To update the prices bundled with future builds, edit the local JSON file. It uses the [LiteLLM pricing format](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).

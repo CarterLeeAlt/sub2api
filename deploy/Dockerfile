@@ -83,7 +83,7 @@ RUN VERSION_VALUE="${VERSION}" && \
 FROM ${ALPINE_IMAGE}
 
 # Labels
-LABEL maintainer="Wei-Shaw <github.com/Wei-Shaw>"
+LABEL maintainer="CarterLeeAlt <github.com/CarterLeeAlt>"
 LABEL description="Sub2API - AI API Gateway Platform"
 LABEL org.opencontainers.image.source="https://github.com/CarterLeeAlt/sub2api"
 
@@ -104,7 +104,7 @@ WORKDIR /app
 
 # Copy binary and runtime fallback resources from builder
 COPY --from=backend-builder /app/sub2api /app/sub2api
-COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources
+COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources/model-pricing /app/resources/model-pricing
 
 # Create data directory
 RUN mkdir -p /app/data && chown -R sub2api:sub2api /app

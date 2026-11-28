@@ -2,6 +2,7 @@ package service
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"compress/gzip"
 	"context"
@@ -523,6 +524,28 @@ func (s *UpdateService) verifyChecksum(ctx context.Context, filePath, checksumUR
 }
 
 func (s *UpdateService) extractBinary(archivePath, destPath string) error {
+	if strings.HasSuffix(archivePath, ".zip") {
+		archive, err := zip.OpenReader(archivePath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = archive.Close() }()
+		for _, file := range archive.File {
+			if strings.TrimPrefix(file.Name, "./") != "sub2api.exe" || !file.Mode().IsRegular() {
+				continue
+			}
+			if file.UncompressedSize64 > maxDownloadSize {
+				return fmt.Errorf("binary too large: %d bytes", file.UncompressedSize64)
+			}
+			binary, err := file.Open()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = binary.Close() }()
+			return writeReleaseBinary(destPath, binary)
+		}
+		return fmt.Errorf("sub2api.exe not found in ZIP archive")
+	}
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return err
@@ -570,42 +593,33 @@ func (s *UpdateService) extractBinary(archivePath, destPath string) error {
 			// Only extract the specific binary we need
 			if baseName == "sub2api" || baseName == "sub2api.exe" {
 				// Additional security: limit file size (max 500MB)
-				const maxBinarySize = 500 * 1024 * 1024
-				if hdr.Size > maxBinarySize {
-					return fmt.Errorf("binary too large: %d bytes (max %d)", hdr.Size, maxBinarySize)
+				if hdr.Size > maxDownloadSize {
+					return fmt.Errorf("binary too large: %d bytes (max %d)", hdr.Size, maxDownloadSize)
 				}
-
-				out, err := os.Create(destPath)
-				if err != nil {
-					return err
-				}
-
-				// Use LimitReader to prevent decompression bombs
-				limited := io.LimitReader(tr, maxBinarySize)
-				if _, err := io.Copy(out, limited); err != nil {
-					_ = out.Close()
-					return err
-				}
-				if err := out.Close(); err != nil {
-					return err
-				}
-				return nil
+				return writeReleaseBinary(destPath, tr)
 			}
 		}
 		return fmt.Errorf("binary not found in archive")
 	}
 
 	// Direct copy for non-tar files (with size limit)
-	const maxBinarySize = 500 * 1024 * 1024
+	return writeReleaseBinary(destPath, reader)
+}
+
+func writeReleaseBinary(destPath string, reader io.Reader) error {
 	out, err := os.Create(destPath)
 	if err != nil {
 		return err
 	}
 
-	limited := io.LimitReader(reader, maxBinarySize)
-	if _, err := io.Copy(out, limited); err != nil {
+	written, err := io.Copy(out, io.LimitReader(reader, maxDownloadSize+1))
+	if err != nil {
 		_ = out.Close()
 		return err
+	}
+	if written > maxDownloadSize {
+		_ = out.Close()
+		return fmt.Errorf("binary too large (max %d bytes)", maxDownloadSize)
 	}
 	return out.Close()
 }

@@ -36,7 +36,8 @@ FRONTEND_CRITICAL_VITEST := \
 	src/components/admin/channel/__tests__/PricingEntryCard.modelDefaultPrice.spec.ts
 
 # 一键编译前后端
-build: build-backend build-frontend
+build: build-frontend
+	@$(MAKE) -C backend build GOFLAGS="$(GOFLAGS) -tags=embed"
 
 # 编译后端（复用 backend/Makefile）
 build-backend:

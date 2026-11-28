@@ -6,13 +6,75 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/resources"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPricingFollowsUpstreamAndRestartsOffline(t *testing.T) {
+	cfg := &config.Config{Pricing: config.PricingConfig{
+		DataDir: t.TempDir(), RemoteURL: "https://example.com/prices.json",
+		HashURL: "https://example.com/prices.sha256", HashCheckIntervalMinutes: 10,
+	}}
+	synctest.Test(t, func(t *testing.T) {
+		remote := &stubPricingRemoteClient{body: hotReloadCatalogJSON}
+		remote.hash = fmt.Sprintf("%x", sha256.Sum256([]byte(remote.body)))
+		svc := NewPricingService(cfg, remote)
+		require.NoError(t, svc.Initialize())
+		defer svc.Stop()
+		synctest.Wait()
+		require.Equal(t, 1e-6, svc.GetIdentifiedModelPricing("remote-model").InputCostPerToken)
+
+		remote.body = `{` + hotReloadModelJSON("remote-model", 3e-6, 6e-6) + `}`
+		remote.hash = fmt.Sprintf("%x", sha256.Sum256([]byte(remote.body)))
+		time.Sleep(10 * time.Minute)
+		synctest.Wait()
+		require.Equal(t, 3e-6, svc.GetIdentifiedModelPricing("remote-model").InputCostPerToken)
+		require.Equal(t, 2, remote.downloads)
+	})
+
+	offline := &failingHashRemoteClient{}
+	restarted := NewPricingService(cfg, offline)
+	require.NoError(t, restarted.Initialize())
+	restarted.Stop()
+	require.Equal(t, 3e-6, restarted.GetIdentifiedModelPricing("remote-model").InputCostPerToken)
+	hashCalls, downloads := offline.counts()
+	require.Equal(t, 1, hashCalls)
+	require.Zero(t, downloads)
+}
+
+func TestPricingStartupEmbeddedCatalogWithoutNetwork(t *testing.T) {
+	for _, corruptCache := range []bool{false, true} {
+		t.Run(fmt.Sprintf("corrupt_cache_%t", corruptCache), func(t *testing.T) {
+			dir := t.TempDir()
+			svc := NewPricingService(&config.Config{Pricing: config.PricingConfig{
+				DataDir: dir, OverrideFile: filepath.Join(dir, "overrides.json"),
+			}}, nil)
+			if corruptCache {
+				require.NoError(t, os.WriteFile(svc.getPricingFilePath(), []byte("{"), 0644))
+			}
+			require.NoError(t, svc.Initialize())
+			t.Cleanup(svc.Stop)
+			price := svc.GetIdentifiedModelPricing("gpt-6.1-terra")
+			require.NotNil(t, price)
+			require.Equal(t, 1e-6, price.InputCostPerToken)
+			require.Equal(t, 5e-6, price.OutputCostPerToken)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256(resources.ModelPricing)), svc.localHash)
+			require.NoError(t, os.WriteFile(svc.cfg.Pricing.OverrideFile, []byte(`{"gpt-6.1-terra":{"input_cost_per_token":0}}`), 0644))
+			svc.reloadIfCustomFilesChanged()
+			require.Zero(t, svc.GetIdentifiedModelPricing("gpt-6.1-terra").InputCostPerToken)
+			require.NoError(t, os.Remove(svc.cfg.Pricing.OverrideFile))
+			svc.reloadIfCustomFilesChanged()
+			require.Equal(t, 1e-6, svc.GetIdentifiedModelPricing("gpt-6.1-terra").InputCostPerToken)
+		})
+	}
+}
 
 // blockingHashRemoteClient 的 FetchHashText 一直阻塞到 release 关闭，模拟远端不可达时等满超时。
 type blockingHashRemoteClient struct {

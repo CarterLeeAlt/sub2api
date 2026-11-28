@@ -20,3 +20,5 @@ backend/migrations/*.sql text eol=lf
 
 # Dockerfile
 Dockerfile text eol=lf
+
+backend/resources/model-pricing/*.json text eol=lf

@@ -227,7 +227,7 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 
 | 组件 | 技术 |
 |------|------|
-| 后端 | Go 1.27.0, Gin, Ent |
+| 后端 | Go 1.27.4, Gin, Ent |
 | 前端 | Vue 3.4+, Vite 5+, TailwindCSS |
 | 数据库 | PostgreSQL 15+ |
 | 缓存/队列 | Redis 7+ |
@@ -542,7 +542,7 @@ cd sub2api/deploy
 
 #### 前置条件
 
-- Go 1.21+
+- Go 1.27.4（以 `backend/go.mod` 为准）
 - PowerShell 7、curl、tar（前端初始化会在仓库内安装固定版本的 Node.js 和 pnpm）
 - PostgreSQL 15+
 - Redis 7+
@@ -575,6 +575,8 @@ nano config.yaml
 ```
 
 > **注意：** `-tags embed` 参数会将前端嵌入到二进制文件中。不使用此参数编译的程序将不包含前端界面。
+
+安装前端依赖后，也可以在仓库根目录运行 `make build`，生成带管理界面的 `backend/bin/server`。程序自带模型价目表，首次启动即可使用。
 
 **`config.yaml` 关键配置：**
 

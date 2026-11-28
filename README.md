@@ -225,7 +225,7 @@ Community projects that extend or integrate with Sub2API:
 
 | Component | Technology |
 |-----------|------------|
-| Backend | Go 1.27.0, Gin, Ent |
+| Backend | Go 1.27.4, Gin, Ent |
 | Frontend | Vue 3.4+, Vite 5+, TailwindCSS |
 | Database | PostgreSQL 15+ |
 | Cache/Queue | Redis 7+ |
@@ -504,7 +504,7 @@ Build and run from source code for development or customization.
 
 #### Prerequisites
 
-- Go 1.21+
+- Go 1.27.4 (see `backend/go.mod`)
 - PowerShell 7, curl and tar (the frontend setup installs pinned Node.js and pnpm inside the repository)
 - PostgreSQL 15+
 - Redis 7+
@@ -537,6 +537,8 @@ nano config.yaml
 ```
 
 > **Note:** The `-tags embed` flag embeds the frontend into the binary. Without this flag, the binary will not serve the frontend UI.
+
+After installing frontend dependencies, `make build` at the repository root builds the frontend and embeds it in `backend/bin/server`. The server also includes the model pricing catalog for first startup.
 
 **Key configuration in `config.yaml`:**
 

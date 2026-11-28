@@ -3,13 +3,43 @@
 package service
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestUpdateExtractsWindowsReleaseBinary(t *testing.T) {
+	for _, name := range []string{"sub2api.exe", "./sub2api.exe", "README.md"} {
+		dir := t.TempDir()
+		archivePath := filepath.Join(dir, "sub2api_windows_amd64.zip")
+		file, err := os.Create(archivePath)
+		require.NoError(t, err)
+		archive := zip.NewWriter(file)
+		entry, err := archive.Create(name)
+		require.NoError(t, err)
+		_, err = entry.Write([]byte("fixture executable"))
+		require.NoError(t, err)
+		require.NoError(t, archive.Close())
+		require.NoError(t, file.Close())
+		dest := filepath.Join(dir, "new-binary")
+		err = (&UpdateService{}).extractBinary(archivePath, dest)
+		if name == "README.md" {
+			require.ErrorContains(t, err, "not found")
+			require.NoFileExists(t, dest)
+			continue
+		}
+		require.NoError(t, err)
+		body, err := os.ReadFile(dest)
+		require.NoError(t, err)
+		require.Equal(t, "fixture executable", string(body))
+	}
+}
 
 type updateServiceCacheStub struct {
 	data string

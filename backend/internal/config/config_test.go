@@ -118,6 +118,17 @@ func TestLoadDefaultModelsListReadMaxBytes(t *testing.T) {
 	require.Equal(t, DefaultModelsListReadMaxBytes, cfg.Gateway.ModelsListReadMaxBytes)
 }
 
+func TestDefaultPricingUsesUpstreamCatalog(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("PRICING_REMOTE_URL", "")
+	t.Setenv("PRICING_HASH_URL", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	const upstream = "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window"
+	require.Equal(t, upstream+".json", cfg.Pricing.RemoteURL)
+	require.Equal(t, upstream+".sha256", cfg.Pricing.HashURL)
+}
+
 func TestLoadDefaultMinOutputTokens(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	cfg, err := Load()

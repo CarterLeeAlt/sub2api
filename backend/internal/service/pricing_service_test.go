@@ -476,7 +476,7 @@ func TestPricingService_MergesFallbackOnlyModels(t *testing.T) {
 
 	svc := &PricingService{cfg: &config.Config{}}
 	svc.cfg.Pricing.FallbackFile = fallbackFile
-	remoteData, err := svc.parsePricingData([]byte(`{
+	merged, _, err := svc.buildPricingData([]byte(`{
 		"remote-model": {
 			"input_cost_per_token": 0.000002,
 			"litellm_provider": "test",
@@ -485,7 +485,6 @@ func TestPricingService_MergesFallbackOnlyModels(t *testing.T) {
 	}`))
 	require.NoError(t, err)
 
-	merged := svc.mergeFallbackPricingData(remoteData)
 	require.InDelta(t, 0.000002, merged["remote-model"].InputCostPerToken, 1e-12)
 	require.NotNil(t, merged["gemini-3.1-flash-lite-image"])
 	require.InDelta(t, 0.034, merged["gemini-3.1-flash-lite-image"].OutputCostPerImage, 1e-12)
