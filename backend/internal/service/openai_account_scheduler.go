@@ -454,12 +454,16 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
+	var imageStickyWait *AccountSelectionResult
 	if !req.StickyWeighted {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
 		}
-		if selection != nil && selection.Account != nil {
+		if selection != nil && selection.Account != nil && req.RequiredImageCapability != "" && selection.WaitPlan != nil {
+			imageStickyWait = selection
+			req.PreserveStickyBinding = true
+		} else if selection != nil && selection.Account != nil {
 			decision.Layer = openAIAccountScheduleLayerSessionSticky
 			decision.StickySessionHit = true
 			decision.SelectedAccountID = selection.Account.ID
@@ -476,6 +480,16 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	decision.CandidateCount = candidateCount
 	decision.TopK = topK
 	decision.LoadSkew = loadSkew
+	if imageStickyWait != nil && (err == nil || errors.Is(err, ErrNoAvailableAccounts)) && (selection == nil || !selection.Acquired) {
+		if err := ctx.Err(); err != nil {
+			return nil, decision, err
+		}
+		decision.Layer = openAIAccountScheduleLayerSessionSticky
+		decision.StickySessionHit = true
+		decision.SelectedAccountID = imageStickyWait.Account.ID
+		decision.SelectedAccountType = imageStickyWait.Account.Type
+		return imageStickyWait, decision, nil
+	}
 	if err != nil {
 		return nil, decision, err
 	}
@@ -593,7 +607,12 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	cfg := s.service.schedulingConfig()
 	// WaitPlan.MaxConcurrency 使用 Concurrency（非 EffectiveLoadFactor），因为 WaitPlan 控制的是 Redis 实际并发槽位等待。
 	if s.service.concurrencyService != nil {
-		if escapeCfg.enabled && !req.DisableStickyEscape && acquireErr == nil && result != nil && !result.Acquired {
+		if req.RequiredImageCapability != "" && !req.PreserveStickyBinding && !req.DisableStickyEscape {
+			if waiting, err := s.service.concurrencyService.GetAccountWaitingCount(ctx, account.ID); err == nil && waiting >= cfg.StickySessionMaxWaiting {
+				return nil, true, nil
+			}
+		}
+		if escapeCfg.enabled && !req.DisableStickyEscape && req.RequiredImageCapability == "" && acquireErr == nil && result != nil && !result.Acquired {
 			errorRate, ttft, _ := s.stats.snapshot(accountID)
 			slog.Info("sticky_escape_triggered",
 				"account_id", accountID,
@@ -1089,7 +1108,9 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		if len(primary) == 0 {
 			primary = buildOpenAIWeightedSelectionOrder(ranked, req)
 		}
-		if !plan.includeOverflowFallback || groupTopK >= len(pool) {
+		// Images try the remaining compatible accounts before waiting, even
+		// when upstream cost does not influence their order.
+		if (!plan.includeOverflowFallback && req.RequiredImageCapability == "") || groupTopK >= len(pool) {
 			return primary
 		}
 
@@ -1202,6 +1223,9 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			return nil, compactBlocked, acquireErr
 		}
 		if result == nil || !result.Acquired {
+			if req.StickyWeighted && req.RequiredImageCapability != "" && candidate.account.ID == req.StickyAccountID {
+				req.PreserveStickyBinding = true
+			}
 			continue
 		}
 
@@ -1439,6 +1463,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	filterStats := openAISelectionFilterStats{pool: len(accounts)}
 	filtered := make([]*Account, 0, len(accounts))
 	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
+	var weightedImageSticky *Account
 	for i := range accounts {
 		account := &accounts[i]
 		if req.ExcludedIDs != nil {
@@ -1476,6 +1501,9 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			continue
 		}
 		filtered = append(filtered, account)
+		if req.StickyWeighted && req.RequiredImageCapability != "" && account.ID == req.StickyAccountID {
+			weightedImageSticky = account
+		}
 		loadReq = append(loadReq, AccountWithConcurrency{
 			ID:             account.ID,
 			MaxConcurrency: account.EffectiveLoadFactor(),
@@ -1489,6 +1517,11 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	if s.service.concurrencyService != nil {
 		if batchLoad, loadErr := s.service.concurrencyService.GetAccountsLoadBatch(ctx, loadReq); loadErr == nil {
 			loadMap = batchLoad
+		}
+	}
+	if weightedImageSticky != nil && weightedImageSticky.Concurrency > 0 {
+		if load := loadMap[weightedImageSticky.ID]; load != nil && load.CurrentConcurrency >= weightedImageSticky.Concurrency {
+			req.PreserveStickyBinding = true
 		}
 	}
 
@@ -1722,7 +1755,8 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 				continue
 			}
 			return attachSelectionProfitGate(ctx, &AccountSelectionResult{
-				Account: fresh,
+				Account:               fresh,
+				preserveStickyBinding: req.RequiredImageCapability != "" && req.PreserveStickyBinding,
 				WaitPlan: &AccountWaitPlan{
 					AccountID:      fresh.ID,
 					MaxConcurrency: fresh.Concurrency,
@@ -2451,7 +2485,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		if requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE {
 			effectiveExcludedIDs := cloneExcludedAccountIDs(excludedIDs)
 			for {
-				selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost)
+				selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, requiredImageCapability, useUpstreamTokenCost)
 				if err != nil {
 					return nil, decision, err
 				}
@@ -2477,7 +2511,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 
 		effectiveExcludedIDs := cloneExcludedAccountIDs(excludedIDs)
 		for {
-			selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost)
+			selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, requiredImageCapability, useUpstreamTokenCost)
 			if err != nil {
 				return nil, decision, err
 			}

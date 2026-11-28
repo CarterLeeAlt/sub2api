@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -64,6 +65,7 @@ type openAIImagesFailoverHTTPUpstream struct {
 	mu         sync.Mutex
 	accountIDs []int64
 	models     []string
+	response   string
 }
 
 func (u *openAIImagesFailoverHTTPUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -79,15 +81,17 @@ func (u *openAIImagesFailoverHTTPUpstream) Do(req *http.Request, _ string, accou
 	u.accountIDs = append(u.accountIDs, accountID)
 	u.models = append(u.models, model)
 	u.mu.Unlock()
+	response := u.response
+	if response == "" {
+		response = `{"error":{"type":"server_error","code":"server_error","message":"image backend unavailable"}}`
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header: http.Header{
 			"Content-Type": []string{"application/json"},
 			"X-Request-Id": []string{"req_img_failover"},
 		},
-		Body: io.NopCloser(bytes.NewBufferString(
-			`{"error":{"type":"server_error","code":"server_error","message":"image backend unavailable"}}`,
-		)),
+		Body: io.NopCloser(strings.NewReader(response)),
 	}, nil
 }
 

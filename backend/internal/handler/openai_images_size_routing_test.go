@@ -5,7 +5,9 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -54,20 +57,27 @@ func (r openAIImagesSizeRoutingAccountRepo) ListModelAvailabilityCandidates(_ co
 
 func newOpenAIImagesSizeRoutingTestHandler(t *testing.T, accounts []service.Account, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
 	t.Helper()
-	cfg := &config.Config{RunMode: config.RunModeSimple}
+	return newOpenAIImagesTestHandler(t, &config.Config{RunMode: config.RunModeSimple}, accounts, nil, nil, upstream)
+}
+
+func newOpenAIImagesTestHandler(t *testing.T, cfg *config.Config, accounts []service.Account, cache service.GatewayCache, concurrency *service.ConcurrencyService, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
+	t.Helper()
 	gatewayService := service.NewOpenAIGatewayService(
 		openAIImagesSizeRoutingAccountRepo{openAIImagesFailoverAccountRepo{accounts: accounts}},
-		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, cache,
 		cfg,
-		nil, nil, nil, nil, nil,
+		nil, concurrency, nil, nil, nil,
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 	billingService := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billingService.Stop)
+	if concurrency == nil {
+		concurrency = service.NewConcurrencyService(nil)
+	}
 	handler := NewOpenAIGatewayHandler(
 		gatewayService,
-		service.NewConcurrencyService(nil),
+		concurrency,
 		billingService,
 		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
 		nil, nil, nil, nil,
@@ -80,6 +90,10 @@ func newOpenAIImagesSizeRoutingTestHandler(t *testing.T, accounts []service.Acco
 func serveOpenAIImagesSizeRoutingRequest(ctx context.Context, handler *OpenAIGatewayHandler, groupID int64, body string) (*httptest.ResponseRecorder, *gin.Context) {
 	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
+	return serveOpenAIImagesRequest(handler, groupID, req)
+}
+
+func serveOpenAIImagesRequest(handler *OpenAIGatewayHandler, groupID int64, req *http.Request) (*httptest.ResponseRecorder, *gin.Context) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = req
@@ -105,6 +119,129 @@ func newOpenAIImagesSizeRoutingAccount(id int64, tiers ...any) service.Account {
 		Priority:    int(id),
 		Credentials: map[string]any{"access_token": fmt.Sprintf("token-%d", id)},
 		Extra:       map[string]any{service.AccountExtraOpenAIImageSizeTiers: tiers},
+	}
+}
+
+type openAIImagesAdmissionCache struct {
+	testutil.StubConcurrencyCache
+	available       map[int64]bool
+	allowAfterWait  bool
+	stickyQueueFull bool
+	queueFull       bool
+	onWait          func()
+	waitedFor       []int64
+	released        []int64
+	waiting         int
+}
+
+func (s *openAIImagesAdmissionCache) AcquireAccountSlot(_ context.Context, accountID int64, _ int, _ string) (bool, error) {
+	return s.available[accountID], nil
+}
+
+func (s *openAIImagesAdmissionCache) ReleaseAccountSlot(_ context.Context, accountID int64, _ string) error {
+	s.released = append(s.released, accountID)
+	return nil
+}
+
+func (s *openAIImagesAdmissionCache) GetAccountWaitingCount(_ context.Context, accountID int64) (int, error) {
+	if s.stickyQueueFull && accountID == 1 {
+		return 3, nil
+	}
+	return 0, nil
+}
+
+func (s *openAIImagesAdmissionCache) IncrementAccountWaitCount(_ context.Context, accountID int64, _ int) (bool, error) {
+	s.waitedFor = append(s.waitedFor, accountID)
+	if s.queueFull {
+		return false, nil
+	}
+	s.waiting++
+	if s.allowAfterWait {
+		s.available[accountID] = true
+	}
+	if s.onWait != nil {
+		s.onWait()
+	}
+	return true, nil
+}
+
+func (s *openAIImagesAdmissionCache) DecrementAccountWaitCount(context.Context, int64) error {
+	s.waiting--
+	return nil
+}
+
+func TestOpenAIGatewayHandlerImageEditsUsesFreeSlotsBeforeWaiting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name            string
+		otherAvailable  bool
+		stickyQueueFull bool
+		allowAfterWait  bool
+		queueFull       bool
+		cancelWait      bool
+		wantUpstream    []int64
+		wantWait        []int64
+		wantStatus      int
+		wantCode        string
+	}{
+		{name: "free account serves immediately", otherAvailable: true, wantUpstream: []int64{2}, wantStatus: http.StatusOK},
+		{name: "both accounts saturated", wantWait: []int64{1}, wantStatus: http.StatusTooManyRequests, wantCode: gatewayConcurrencyLimitCode},
+		{name: "another account becomes free after queueing", stickyQueueFull: true, allowAfterWait: true, wantUpstream: []int64{2}, wantWait: []int64{2}, wantStatus: http.StatusOK},
+		{name: "queue fills before admission", queueFull: true, wantWait: []int64{1}, wantStatus: http.StatusTooManyRequests, wantCode: gatewayQueueFullCode},
+		{name: "client cancels while queued", cancelWait: true, wantWait: []int64{1}, wantStatus: statusClientClosedRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{RunMode: config.RunModeSimple}
+			cfg.Gateway.Scheduling = config.GatewaySchedulingConfig{
+				LoadBatchEnabled: true, StickySessionMaxWaiting: 3, FallbackMaxWaiting: 10,
+				StickySessionWaitTimeout: 20 * time.Millisecond, FallbackWaitTimeout: time.Second,
+			}
+			accounts := []service.Account{newOpenAIImagesSizeRoutingAccount(1, "2K"), newOpenAIImagesSizeRoutingAccount(2, "2K")}
+			accounts[0].Priority = 10
+			for i := range accounts {
+				accounts[i].Concurrency = 5
+			}
+			bindings := &stickyWritebackCache{accountID: 1}
+			slots := &openAIImagesAdmissionCache{
+				available: map[int64]bool{2: tc.otherAvailable}, stickyQueueFull: tc.stickyQueueFull, allowAfterWait: tc.allowAfterWait,
+				queueFull: tc.queueFull,
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.cancelWait {
+				slots.onWait = cancel
+			}
+			upstream := &openAIImagesFailoverHTTPUpstream{response: `{"data":[{"b64_json":"aGVsbG8="}]}`}
+			handler := newOpenAIImagesTestHandler(t, cfg, accounts, bindings, service.NewConcurrencyService(slots), upstream)
+
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			require.NoError(t, form.WriteField("model", "gpt-image-2"))
+			require.NoError(t, form.WriteField("prompt", "edit image"))
+			require.NoError(t, form.WriteField("size", "1536x1024"))
+			image, err := form.CreateFormFile("image", "input.png")
+			require.NoError(t, err)
+			png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=")
+			require.NoError(t, err)
+			_, err = image.Write(png)
+			require.NoError(t, err)
+			require.NoError(t, form.Close())
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/images/edits", &body)
+			req.Header.Set("Content-Type", form.FormDataContentType())
+			req.Header.Set("session-id", "image-edit-session")
+			response, _ := serveOpenAIImagesRequest(handler, 3140, req)
+
+			require.Equal(t, tc.wantStatus, response.Code, response.Body.String())
+			require.Equal(t, tc.wantCode, gjson.GetBytes(response.Body.Bytes(), "error.code").String())
+			if tc.wantStatus == http.StatusOK {
+				require.Equal(t, "aGVsbG8=", gjson.GetBytes(response.Body.Bytes(), "data.0.b64_json").String())
+			}
+			require.Equal(t, tc.wantUpstream, upstream.calls())
+			require.Equal(t, tc.wantUpstream, slots.released)
+			require.Equal(t, tc.wantWait, slots.waitedFor)
+			require.Zero(t, slots.waiting)
+			require.EqualValues(t, 1, bindings.accountID)
+		})
 	}
 }
 

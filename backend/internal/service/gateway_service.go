@@ -643,10 +643,17 @@ type AccountSelectionResult struct {
 	WaitPlan    *AccountWaitPlan // nil means no wait allowed
 	// stickySessionHit 标记账号来自会话粘性绑定命中，供非高级调度路径回填决策标签。
 	stickySessionHit bool
+	// Keep the existing session binding when a temporary image selection is admitted after waiting.
+	preserveStickyBinding bool
 	// profitGate 携带本次选号真实生效的利润门（无门为 nil）。门安装在调度栈的
 	// 局部 ctx 上，handler 必须经 ContextWithSelectionProfitGate 重放后才能在
 	// 调度栈之外做抢槽后终检与准入后粘性绑定。
 	profitGate *openAIProfitControlGate
+}
+
+// PreservesStickyBinding reports whether admission should leave the current binding in place.
+func (r *AccountSelectionResult) PreservesStickyBinding() bool {
+	return r != nil && r.preserveStickyBinding
 }
 
 // ProfitGateActive 报告本次选号是否处于利润门之下。
