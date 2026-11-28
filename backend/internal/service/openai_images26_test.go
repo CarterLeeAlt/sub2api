@@ -44,7 +44,7 @@ func TestGPTImage26ComplexityAcrossImageEndpoints(t *testing.T) {
 							}
 							part, err := writer.CreateFormFile("image", "input.png")
 							require.NoError(t, err)
-							_, err = part.Write([]byte("image-bytes"))
+							_, err = part.Write(openAIImageTestPNG(t, 2, 2))
 							require.NoError(t, err)
 							require.NoError(t, writer.Close())
 							body, contentType = buf.Bytes(), writer.FormDataContentType()
@@ -184,9 +184,12 @@ func TestGPTImage26NativeOptions(t *testing.T) {
 	}
 	for _, multipartInput := range []bool{false, true} {
 		t.Run(fmt.Sprintf("markup/multipart=%t", multipartInput), func(t *testing.T) {
+			wantMarkupURL := "data:image/png;base64,bWFya3Vw"
 			body := []byte(`{"model":"gpt-image-2.6-flare","prompt":"edit","complexity":"low","images":[{"image_url":"data:image/png;base64,aW1hZ2U="}],"markup":{"image_url":"data:image/png;base64,bWFya3Vw"}}`)
 			contentType := "application/json"
 			if multipartInput {
+				pngBytes := openAIImageTestPNG(t, 2, 2)
+				wantMarkupURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes)
 				var buf bytes.Buffer
 				writer := multipart.NewWriter(&buf)
 				for key, value := range map[string]string{"model": "gpt-image-2.6-flare", "prompt": "edit", "complexity": "low", "frame_count": "2", "frame_duration_ms": "100"} {
@@ -195,10 +198,10 @@ func TestGPTImage26NativeOptions(t *testing.T) {
 				for _, name := range []string{"image", "markup"} {
 					header := textproto.MIMEHeader{}
 					header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename="input.png"`, name))
-					header.Set("Content-Type", "image/png")
+					header.Set("Content-Type", "application/octet-stream")
 					part, err := writer.CreatePart(header)
 					require.NoError(t, err)
-					_, err = part.Write([]byte(name))
+					_, err = part.Write(pngBytes)
 					require.NoError(t, err)
 				}
 				require.NoError(t, writer.Close())
@@ -213,7 +216,7 @@ func TestGPTImage26NativeOptions(t *testing.T) {
 			payload, target, err := buildOpenAIImagesOAuthPayload(parsed, parsed.Model)
 			require.NoError(t, err)
 			require.Equal(t, "https://chatgpt.com/backend-api/codex/images/edits", target)
-			require.Equal(t, "data:image/png;base64,bWFya3Vw", gjson.GetBytes(payload, "markup.image_url").String())
+			require.Equal(t, wantMarkupURL, gjson.GetBytes(payload, "markup.image_url").String())
 			require.Equal(t, "low", gjson.GetBytes(payload, "complexity").String())
 			require.Len(t, gjson.GetBytes(parsed.ModerationBody(), "images").Array(), 2)
 			_, err = buildOpenAIImagesResponsesRequest(parsed, parsed.Model)

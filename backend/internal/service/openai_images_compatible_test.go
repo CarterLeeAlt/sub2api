@@ -64,6 +64,7 @@ func TestCompatibleImagesForwardGemini(t *testing.T) {
 				credentials["model_mapping"] = map[string]any{requestModel: model}
 			}
 			body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"draw","size":"1024x1024","custom_field":"preserved"}`, requestModel))
+			var inputPNG []byte
 			if kind == "json_edit" {
 				endpoint = openAIImagesEditsEndpoint
 				body = []byte(fmt.Sprintf(`{"model":%q,"prompt":"draw","images":[{"image_url":"https://source.example/input.png"}],"custom_field":"preserved"}`, model))
@@ -80,7 +81,8 @@ func TestCompatibleImagesForwardGemini(t *testing.T) {
 				require.NoError(t, writer.WriteField("custom_field", "preserved"))
 				part, err := writer.CreateFormFile("image", "input.png")
 				require.NoError(t, err)
-				_, err = part.Write([]byte("original-image-bytes"))
+				inputPNG = openAIImageTestPNG(t, 2, 2)
+				_, err = part.Write(inputPNG)
 				require.NoError(t, err)
 				require.NoError(t, writer.Close())
 				body, contentType = buf.Bytes(), writer.FormDataContentType()
@@ -114,12 +116,14 @@ func TestCompatibleImagesForwardGemini(t *testing.T) {
 				require.NoError(t, r.ParseMultipartForm(1<<20))
 				require.Equal(t, model, r.FormValue("model"))
 				require.Equal(t, "preserved", r.FormValue("custom_field"))
-				file, _, err := r.FormFile("image")
+				file, header, err := r.FormFile("image")
 				require.NoError(t, err)
 				defer file.Close()
+				require.Equal(t, "input.png", header.Filename)
+				require.Equal(t, "image/png", header.Header.Get("Content-Type"))
 				data, err := io.ReadAll(file)
 				require.NoError(t, err)
-				require.Equal(t, "original-image-bytes", string(data))
+				require.Equal(t, inputPNG, data)
 			} else {
 				require.Equal(t, model, gjson.GetBytes(upstream.lastBody, "model").String())
 				require.Equal(t, "preserved", gjson.GetBytes(upstream.lastBody, "custom_field").String())

@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -133,8 +135,7 @@ func TestCompositeCompatibleImagesEndToEnd(t *testing.T) {
 				require.NoError(t, writer.WriteField("prompt", "draw"))
 				part, err := writer.CreateFormFile("image", "input.png")
 				require.NoError(t, err)
-				_, err = part.Write([]byte("fixture-image"))
-				require.NoError(t, err)
+				require.NoError(t, png.Encode(part, image.NewRGBA(image.Rect(0, 0, 2, 2))))
 				require.NoError(t, writer.Close())
 				body, contentType = buf.Bytes(), writer.FormDataContentType()
 			}

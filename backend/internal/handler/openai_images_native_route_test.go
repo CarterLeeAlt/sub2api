@@ -5,6 +5,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -61,8 +62,9 @@ func newNativeImageRoute(t *testing.T, delay time.Duration, status int) (*httpte
 				}
 			}()
 			require.Equal(t, "gpt-image-1", r.FormValue("model"))
-			part, _, err := r.FormFile("image")
+			part, header, err := r.FormFile("image")
 			require.NoError(t, err)
+			require.Equal(t, "image/png", header.Header.Get("Content-Type"))
 			_ = part.Close()
 		default:
 			t.Errorf("unexpected upstream path: %s", r.URL.Path)
@@ -179,6 +181,13 @@ func TestAsyncImageLedgerMatchesPollResult(t *testing.T) {
 	}
 }
 
+func openAIImageTestPNG(t *testing.T) []byte {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	return data
+}
+
 func nativeImageRequest(t *testing.T, endpoint string, native bool) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
@@ -189,7 +198,7 @@ func nativeImageRequest(t *testing.T, endpoint string, native bool) *http.Reques
 		require.NoError(t, writer.WriteField("prompt", "edit fixture"))
 		part, err := writer.CreateFormFile("image", "input.png")
 		require.NoError(t, err)
-		_, err = part.Write([]byte("fixture-image"))
+		_, err = part.Write(openAIImageTestPNG(t))
 		require.NoError(t, err)
 		require.NoError(t, writer.Close())
 		contentType = writer.FormDataContentType()
@@ -203,6 +212,51 @@ func nativeImageRequest(t *testing.T, endpoint string, native bool) *http.Reques
 		req.Header.Set("X-Codex-Image-Turn-Id", "fixture-turn")
 	}
 	return req
+}
+
+func TestImagesRouteRejectsInvalidMultipartImageUploads(t *testing.T) {
+	gateway, calls := newNativeImageRoute(t, 0, http.StatusOK)
+	for _, tc := range []struct {
+		field string
+		data  string
+		want  string
+	}{
+		{field: "image", want: "is empty"},
+		{field: "image[]", data: "this is text", want: "unsupported image format"},
+		{field: "mask", want: "is empty"},
+		{field: "markup", data: "this is text", want: "unsupported image format"},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			require.NoError(t, form.WriteField("model", "gpt-image-1"))
+			require.NoError(t, form.WriteField("prompt", "edit fixture"))
+			if tc.field == "mask" || tc.field == "markup" {
+				image, err := form.CreateFormFile("image", "source.png")
+				require.NoError(t, err)
+				_, err = image.Write(openAIImageTestPNG(t))
+				require.NoError(t, err)
+			}
+			part, err := form.CreateFormFile(tc.field, "bad.png")
+			require.NoError(t, err)
+			_, err = io.WriteString(part, tc.data)
+			require.NoError(t, err)
+			require.NoError(t, form.Close())
+
+			resp, err := gateway.Client().Post(gateway.URL+"/v1/images/edits", form.FormDataContentType(), &body)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			payload, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, string(payload))
+			require.Equal(t, "invalid_request_error", gjson.GetBytes(payload, "error.type").String())
+			message := gjson.GetBytes(payload, "error.message").String()
+			require.Contains(t, message, fmt.Sprintf("multipart field %q", tc.field))
+			require.Contains(t, message, "bad.png")
+			require.Contains(t, message, tc.want)
+			require.Zero(t, calls.Load())
+		})
+	}
 }
 
 func TestNativeImagesRoutesDelayedResponse(t *testing.T) {

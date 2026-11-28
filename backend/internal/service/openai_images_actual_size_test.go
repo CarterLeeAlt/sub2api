@@ -119,11 +119,16 @@ func runOpenAIOAuthImageActualSizeTest(t *testing.T, stream bool) openAIOAuthIma
 
 func encodeOpenAIImageTestPNG(t *testing.T, width, height int) string {
 	t.Helper()
+	return base64.StdEncoding.EncodeToString(openAIImageTestPNG(t, width, height))
+}
+
+func openAIImageTestPNG(t *testing.T, width, height int) []byte {
+	t.Helper()
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 	img.SetNRGBA(0, 0, color.NRGBA{R: 0xff, A: 0xff})
 	var buf bytes.Buffer
 	require.NoError(t, png.Encode(&buf, img))
-	return base64.StdEncoding.EncodeToString(buf.Bytes())
+	return buf.Bytes()
 }
 
 func encodeOpenAIImageTestJPEG(t *testing.T, width, height int) string {

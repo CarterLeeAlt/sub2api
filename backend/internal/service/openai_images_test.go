@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -78,7 +79,7 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEdit(t *testing.T
 	require.NoError(t, writer.WriteField("size", "1536x1024"))
 	part, err := writer.CreateFormFile("image", "source.png")
 	require.NoError(t, err)
-	_, err = part.Write([]byte("fake-image-bytes"))
+	_, err = part.Write(openAIImageTestPNG(t, 2, 2))
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 
@@ -99,7 +100,62 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEdit(t *testing.T
 	require.Equal(t, "1536x1024", parsed.Size)
 	require.Equal(t, "2K", parsed.SizeTier)
 	require.Len(t, parsed.Uploads, 1)
+	require.Equal(t, "image/png", parsed.Uploads[0].ContentType)
 	require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
+}
+
+func TestOpenAIImagesMultipartUploadFormatsForModerationAndForwarding(t *testing.T) {
+	for _, fixture := range []struct {
+		contentType string
+		encoded     string
+	}{
+		{contentType: "image/png", encoded: encodeOpenAIImageTestPNG(t, 2, 2)},
+		{contentType: "image/jpeg", encoded: encodeOpenAIImageTestJPEG(t, 2, 2)},
+		{contentType: "image/webp", encoded: "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA"},
+		{contentType: "image/gif", encoded: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"},
+	} {
+		t.Run(fixture.contentType, func(t *testing.T) {
+			data, err := base64.StdEncoding.DecodeString(fixture.encoded)
+			require.NoError(t, err)
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			require.NoError(t, writer.WriteField("model", "gpt-image-2"))
+			require.NoError(t, writer.WriteField("prompt", "replace background"))
+			part, err := writer.CreateFormFile("image[0]", "source.bin")
+			require.NoError(t, err)
+			_, err = part.Write(data)
+			require.NoError(t, err)
+			require.NoError(t, writer.Close())
+			parsed, err := parseImagesEditMultipart(t, body.Bytes(), writer.FormDataContentType())
+			require.NoError(t, err)
+			require.Len(t, parsed.Uploads, 1)
+			require.Equal(t, fixture.contentType, parsed.Uploads[0].ContentType)
+			require.Equal(t, data, parsed.Uploads[0].Data)
+
+			wantURL := "data:" + fixture.contentType + ";base64," + fixture.encoded
+			moderation := ExtractContentModerationInput(ContentModerationProtocolOpenAIImages, parsed.ModerationBody())
+			require.Equal(t, []string{wantURL}, moderation.Images)
+
+			directBody, _, err := buildOpenAIImagesOAuthPayload(parsed, parsed.Model)
+			require.NoError(t, err)
+			require.Equal(t, wantURL, gjson.GetBytes(directBody, "images.0.image_url").String())
+			responsesBody, err := buildOpenAIImagesResponsesRequest(parsed, "gpt-image-1")
+			require.NoError(t, err)
+			require.Equal(t, wantURL, gjson.GetBytes(responsesBody, "input.0.content.1.image_url").String())
+
+			forwardedBody, forwardedType, err := rewriteOpenAIImagesModel(body.Bytes(), parsed, parsed.Model)
+			require.NoError(t, err)
+			forwarded := httptest.NewRequest(http.MethodPost, openAIImagesEditsEndpoint, bytes.NewReader(forwardedBody))
+			forwarded.Header.Set("Content-Type", forwardedType)
+			upload, header, err := forwarded.FormFile("image[0]")
+			require.NoError(t, err)
+			defer upload.Close()
+			require.Equal(t, fixture.contentType, header.Header.Get("Content-Type"))
+			forwardedBytes, err := io.ReadAll(upload)
+			require.NoError(t, err)
+			require.Equal(t, data, forwardedBytes)
+		})
+	}
 }
 
 func TestOpenAIImagesRequestModerationBody_JSONEditIncludesInputImageURLs(t *testing.T) {
@@ -258,7 +314,7 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEditWithMaskAndNa
 	imageHeader.Set("Content-Type", "image/png")
 	imagePart, err := writer.CreatePart(imageHeader)
 	require.NoError(t, err)
-	_, err = imagePart.Write([]byte("source-image-bytes"))
+	_, err = imagePart.Write(openAIImageTestPNG(t, 2, 2))
 	require.NoError(t, err)
 
 	maskHeader := make(textproto.MIMEHeader)
@@ -266,7 +322,7 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEditWithMaskAndNa
 	maskHeader.Set("Content-Type", "image/png")
 	maskPart, err := writer.CreatePart(maskHeader)
 	require.NoError(t, err)
-	_, err = maskPart.Write([]byte("mask-image-bytes"))
+	_, err = maskPart.Write(openAIImageTestPNG(t, 2, 2))
 	require.NoError(t, err)
 
 	require.NoError(t, writer.Close())
@@ -303,7 +359,7 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_ModelRequired(t *testing.T
 	require.NoError(t, form.WriteField("prompt", "edit the image"))
 	part, err := form.CreateFormFile("image", "input.png")
 	require.NoError(t, err)
-	_, err = io.WriteString(part, "fixture-image")
+	_, err = part.Write(openAIImageTestPNG(t, 2, 2))
 	require.NoError(t, err)
 	require.NoError(t, form.Close())
 	c, _ := newOpenAIImagesTestContext(t, body.Bytes())
@@ -1653,10 +1709,26 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyEditUsesConfiguredV1BaseURL(t *
 	writer := multipart.NewWriter(&body)
 	require.NoError(t, writer.WriteField("model", "gpt-image-2"))
 	require.NoError(t, writer.WriteField("prompt", "replace background"))
-	imagePart, err := writer.CreateFormFile("image", "source.png")
+	pngBytes := openAIImageTestPNG(t, 2, 2)
+	jpegBytes, err := base64.StdEncoding.DecodeString(encodeOpenAIImageTestJPEG(t, 2, 2))
 	require.NoError(t, err)
-	_, err = imagePart.Write([]byte("png-image-content"))
-	require.NoError(t, err)
+	files := []struct {
+		field       string
+		filename    string
+		contentType string
+		data        []byte
+	}{
+		{field: "image[]", filename: "source.png", contentType: "image/png", data: pngBytes},
+		{field: "image[]", filename: "source.jpg", contentType: "image/jpeg", data: jpegBytes},
+		{field: "mask", filename: "mask.png", contentType: "image/png", data: pngBytes},
+		{field: "custom_file", filename: "metadata.txt", contentType: "application/octet-stream", data: []byte("metadata")},
+	}
+	for _, file := range files {
+		part, err := writer.CreateFormFile(file.field, file.filename)
+		require.NoError(t, err)
+		_, err = part.Write(file.data)
+		require.NoError(t, err)
+	}
 	require.NoError(t, writer.Close())
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body.Bytes()))
@@ -1702,9 +1774,28 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyEditUsesConfiguredV1BaseURL(t *
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, "https://image-upstream.example/v1/images/edits", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer test-api-key", upstream.lastReq.Header.Get("Authorization"))
-	require.Contains(t, upstream.lastReq.Header.Get("Content-Type"), "multipart/form-data")
-	require.Contains(t, string(upstream.lastBody), `name="model"`)
-	require.Contains(t, string(upstream.lastBody), "gpt-image-2")
+	forwarded := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(upstream.lastBody))
+	forwarded.Header.Set("Content-Type", upstream.lastReq.Header.Get("Content-Type"))
+	require.NoError(t, forwarded.ParseMultipartForm(1<<20))
+	t.Cleanup(func() { _ = forwarded.MultipartForm.RemoveAll() })
+	require.Equal(t, "gpt-image-2", forwarded.FormValue("model"))
+	require.Equal(t, "replace background", forwarded.FormValue("prompt"))
+	require.Len(t, forwarded.MultipartForm.File["image[]"], 2)
+	fileIndexes := map[string]int{}
+	for _, want := range files {
+		index := fileIndexes[want.field]
+		require.Greater(t, len(forwarded.MultipartForm.File[want.field]), index)
+		got := forwarded.MultipartForm.File[want.field][index]
+		fileIndexes[want.field]++
+		require.Equal(t, want.filename, got.Filename)
+		require.Equal(t, want.contentType, got.Header.Get("Content-Type"))
+		part, err := got.Open()
+		require.NoError(t, err)
+		data, err := io.ReadAll(part)
+		_ = part.Close()
+		require.NoError(t, err)
+		require.Equal(t, want.data, data)
+	}
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "ZWRpdGVk", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
 }
@@ -1852,18 +1943,17 @@ func TestOpenAIGatewayServiceForwardImages_OAuthEditsMultipartUsesResponsesAPI(t
 
 	imageHeader := make(textproto.MIMEHeader)
 	imageHeader.Set("Content-Disposition", `form-data; name="image"; filename="source.png"`)
-	imageHeader.Set("Content-Type", "image/png")
+	imageHeader.Set("Content-Type", "application/octet-stream")
 	imagePart, err := writer.CreatePart(imageHeader)
 	require.NoError(t, err)
-	_, err = imagePart.Write([]byte("png-image-content"))
+	_, err = imagePart.Write(openAIImageTestPNG(t, 2, 2))
 	require.NoError(t, err)
 
 	maskHeader := make(textproto.MIMEHeader)
 	maskHeader.Set("Content-Disposition", `form-data; name="mask"; filename="mask.png"`)
-	maskHeader.Set("Content-Type", "image/png")
 	maskPart, err := writer.CreatePart(maskHeader)
 	require.NoError(t, err)
-	_, err = maskPart.Write([]byte("png-mask-content"))
+	_, err = maskPart.Write(openAIImageTestPNG(t, 2, 2))
 	require.NoError(t, err)
 
 	require.NoError(t, writer.Close())

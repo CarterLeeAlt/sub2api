@@ -107,6 +107,7 @@ type OpenAIImagesRequest struct {
 	MarkupUpload       *OpenAIImagesUpload
 	Body               []byte
 	bodyHash           string
+	uploadContentTypes map[int]string // keyed by position in the original multipart body
 }
 
 // Keep SVG author options separate from the image model and its complexity.
@@ -386,7 +387,7 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
-	for {
+	for partIndex := 0; ; partIndex++ {
 		part, err := reader.NextPart()
 		if err == io.EOF {
 			break
@@ -413,33 +414,44 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 
 		fileName := strings.TrimSpace(part.FileName())
 		if fileName != "" {
-			partContentType := strings.TrimSpace(part.Header.Get("Content-Type"))
-			if (name == "mask" || name == "markup") && len(data) > 0 {
-				width, height := parseOpenAIImageDimensions(part.Header)
-				upload := OpenAIImagesUpload{
-					FieldName:   name,
-					FileName:    fileName,
-					ContentType: partContentType,
-					Data:        data,
-					Width:       width,
-					Height:      height,
-				}
-				if name == "mask" {
-					req.MaskUpload = &upload
-				} else {
-					req.MarkupUpload = &upload
-				}
+			isImage := name == "image" || strings.HasPrefix(name, "image[")
+			if !isImage && name != "mask" && name != "markup" {
+				continue
 			}
-			if name == "image" || strings.HasPrefix(name, "image[") {
-				width, height := parseOpenAIImageDimensions(part.Header)
-				req.Uploads = append(req.Uploads, OpenAIImagesUpload{
-					FieldName:   name,
-					FileName:    fileName,
-					ContentType: partContentType,
-					Data:        data,
-					Width:       width,
-					Height:      height,
-				})
+			partContentType := strings.TrimSpace(part.Header.Get("Content-Type"))
+			if req.IsEdits() {
+				if len(data) == 0 {
+					return fmt.Errorf("multipart field %q: file %q is empty", name, fileName)
+				}
+				partContentType = http.DetectContentType(data)
+				switch partContentType {
+				case "image/png", "image/jpeg", "image/webp", "image/gif":
+				default:
+					return fmt.Errorf("multipart field %q: file %q has an unsupported image format; use PNG, JPEG, WebP, or GIF", name, fileName)
+				}
+				if req.uploadContentTypes == nil {
+					req.uploadContentTypes = make(map[int]string)
+				}
+				req.uploadContentTypes[partIndex] = partContentType
+			} else if !isImage && len(data) == 0 {
+				continue
+			}
+			width, height := parseOpenAIImageDimensions(part.Header)
+			upload := OpenAIImagesUpload{
+				FieldName:   name,
+				FileName:    fileName,
+				ContentType: partContentType,
+				Data:        data,
+				Width:       width,
+				Height:      height,
+			}
+			switch name {
+			case "mask":
+				req.MaskUpload = &upload
+			case "markup":
+				req.MarkupUpload = &upload
+			default:
+				req.Uploads = append(req.Uploads, upload)
 			}
 			continue
 		}
@@ -639,7 +651,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 		parsed.Endpoint,
 		account.Type,
 	)
-	forwardBody, forwardContentType, err := rewriteOpenAIImagesModel(body, parsed.ContentType, upstreamModel)
+	forwardBody, forwardContentType, err := rewriteOpenAIImagesModel(body, parsed, upstreamModel)
 	if err != nil {
 		return nil, err
 	}
@@ -828,15 +840,14 @@ func buildOpenAIImagesURL(base string, endpoint string) string {
 	return buildOpenAIEndpointURL(base, endpoint)
 }
 
-func rewriteOpenAIImagesModel(body []byte, contentType string, model string) ([]byte, string, error) {
+func rewriteOpenAIImagesModel(body []byte, parsed *OpenAIImagesRequest, model string) ([]byte, string, error) {
 	model = strings.TrimSpace(model)
+	contentType := parsed.ContentType
 	if model == "" {
 		return body, contentType, nil
 	}
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err == nil && strings.EqualFold(mediaType, "multipart/form-data") {
-		rewrittenBody, rewrittenType, rewriteErr := rewriteOpenAIImagesMultipartModel(body, contentType, model)
-		return rewrittenBody, rewrittenType, rewriteErr
+	if parsed.Multipart {
+		return rewriteOpenAIImagesMultipartModel(body, contentType, model, parsed.uploadContentTypes)
 	}
 	rewritten, err := sjson.SetBytes(body, "model", model)
 	if err != nil {
@@ -845,7 +856,7 @@ func rewriteOpenAIImagesModel(body []byte, contentType string, model string) ([]
 	return rewritten, contentType, nil
 }
 
-func rewriteOpenAIImagesMultipartModel(body []byte, contentType string, model string) ([]byte, string, error) {
+func rewriteOpenAIImagesMultipartModel(body []byte, contentType string, model string, uploadContentTypes map[int]string) ([]byte, string, error) {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse multipart content-type: %w", err)
@@ -860,7 +871,7 @@ func rewriteOpenAIImagesMultipartModel(body []byte, contentType string, model st
 	writer := multipart.NewWriter(&buffer)
 	modelWritten := false
 
-	for {
+	for partIndex := 0; ; partIndex++ {
 		part, err := reader.NextPart()
 		if err == io.EOF {
 			break
@@ -871,6 +882,9 @@ func rewriteOpenAIImagesMultipartModel(body []byte, contentType string, model st
 
 		formName := strings.TrimSpace(part.FormName())
 		partHeader := cloneMultipartHeader(part.Header)
+		if uploadContentType := uploadContentTypes[partIndex]; uploadContentType != "" {
+			partHeader.Set("Content-Type", uploadContentType)
+		}
 		target, err := writer.CreatePart(partHeader)
 		if err != nil {
 			_ = part.Close()

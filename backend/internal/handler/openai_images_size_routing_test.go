@@ -5,7 +5,6 @@ package handler
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -221,9 +220,7 @@ func TestOpenAIGatewayHandlerImageEditsUsesFreeSlotsBeforeWaiting(t *testing.T) 
 			require.NoError(t, form.WriteField("size", "1536x1024"))
 			image, err := form.CreateFormFile("image", "input.png")
 			require.NoError(t, err)
-			png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=")
-			require.NoError(t, err)
-			_, err = image.Write(png)
+			_, err = image.Write(openAIImageTestPNG(t))
 			require.NoError(t, err)
 			require.NoError(t, form.Close())
 			req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/images/edits", &body)

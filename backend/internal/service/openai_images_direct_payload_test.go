@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,13 +24,29 @@ func TestCodexDirectImagesMultipartEdit(t *testing.T) {
 	for key, value := range map[string]string{"model": "gpt-image-2.5-sunburst", "prompt": "编辑", "quality": "xhigh", "n": "2", "output_format": "webp", "output_compression": "75", "partial_images": "2", "input_fidelity": "high"} {
 		require.NoError(t, w.WriteField(key, value))
 	}
-	for _, field := range []string{"image[]", "image[]", "mask"} {
+	pngBytes := openAIImageTestPNG(t, 2, 2)
+	pngURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes)
+	jpegBase64 := encodeOpenAIImageTestJPEG(t, 2, 2)
+	jpegBytes, err := base64.StdEncoding.DecodeString(jpegBase64)
+	require.NoError(t, err)
+	jpegURL := "data:image/jpeg;base64," + jpegBase64
+	for _, upload := range []struct {
+		field       string
+		contentType string
+		data        []byte
+	}{
+		{field: "image[]", contentType: "application/octet-stream", data: pngBytes},
+		{field: "image[]", contentType: "image/png", data: jpegBytes},
+		{field: "mask", data: pngBytes},
+	} {
 		header := textproto.MIMEHeader{}
-		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename="image.png"`, field))
-		header.Set("Content-Type", "image/png")
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename="image.png"`, upload.field))
+		if upload.contentType != "" {
+			header.Set("Content-Type", upload.contentType)
+		}
 		part, err := w.CreatePart(header)
 		require.NoError(t, err)
-		_, err = part.Write([]byte("png-content"))
+		_, err = part.Write(upload.data)
 		require.NoError(t, err)
 	}
 	require.NoError(t, w.Close())
@@ -43,7 +60,14 @@ func TestCodexDirectImagesMultipartEdit(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "https://chatgpt.com/backend-api/codex/images/edits", target)
 	require.Len(t, gjson.GetBytes(upstreamBody, "images").Array(), 2)
-	require.Equal(t, "data:image/png;base64,cG5nLWNvbnRlbnQ=", gjson.GetBytes(upstreamBody, "mask.image_url").String())
+	require.Equal(t, pngURL, gjson.GetBytes(upstreamBody, "images.0.image_url").String())
+	require.Equal(t, jpegURL, gjson.GetBytes(upstreamBody, "images.1.image_url").String())
+	require.Equal(t, pngURL, gjson.GetBytes(upstreamBody, "mask.image_url").String())
+	moderationBody := parsed.ModerationBody()
+	require.Len(t, gjson.GetBytes(moderationBody, "images").Array(), 3)
+	for index, want := range []string{pngURL, jpegURL, pngURL} {
+		require.Equal(t, want, gjson.GetBytes(moderationBody, fmt.Sprintf("images.%d.image_url", index)).String())
+	}
 	require.Equal(t, "xhigh", gjson.GetBytes(upstreamBody, "quality").String())
 	require.Equal(t, "high", gjson.GetBytes(upstreamBody, "input_fidelity").String())
 	require.EqualValues(t, 2, gjson.GetBytes(upstreamBody, "n").Int())
