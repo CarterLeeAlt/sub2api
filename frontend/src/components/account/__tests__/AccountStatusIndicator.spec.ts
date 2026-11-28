@@ -17,7 +17,8 @@ vi.mock('@/utils/format', async () => {
   const actual = await vi.importActual<typeof import('@/utils/format')>('@/utils/format')
   return {
     ...actual,
-    formatCountdown: () => '1h'
+    formatCountdown: () => '1h',
+    formatCountdownWithSuffix: () => '1h auto resume'
   }
 })
 
@@ -143,6 +144,24 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.find('.badge-warning').text()).toBe('admin.accounts.status.rateLimited')
     expect(wrapper.text()).toContain('admin.accounts.status.rateLimitedAutoResume')
     expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulable')
+    expect(wrapper.text().indexOf('429')).toBeLessThan(wrapper.text().indexOf('admin.accounts.status.rateLimited'))
+  })
+
+  it('places short badges above model statuses and the overload explanation', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          overload_until: '2099-07-11T13:00:00Z',
+          extra: { model_rate_limits: { 'claude-opus-5': { rate_limit_reset_at: '2099-07-11T13:00:00Z' } } }
+        })
+      },
+      global: { stubs: { Icon: true } }
+    })
+
+    const text = wrapper.text()
+    expect(text.indexOf('529')).toBeLessThan(text.indexOf('COpus5'))
+    expect(wrapper.element.lastElementChild?.firstElementChild?.textContent?.trim()).toBe('admin.accounts.status.overloaded')
+    expect(wrapper.element.lastElementChild?.lastElementChild?.textContent?.trim()).toBe('1h auto resume')
   })
 
   it('模型限流 + overages 启用 + 无 AICredits key → 显示 ⚡ (credits_active)', () => {

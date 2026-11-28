@@ -1,42 +1,10 @@
 <template>
   <div class="flex flex-col items-start gap-2">
-    <div v-if="(modelCatalogPending || modelCatalogFailed) && !hasError && health?.kind !== 'auth_refresh_required'" class="flex flex-col items-start gap-1" :title="modelCatalog.error || t('admin.accounts.modelCatalog.pending')">
-      <span class="badge text-xs badge-warning">{{ t(modelCatalogPending ? 'admin.accounts.modelCatalog.pendingStatus' : 'admin.accounts.modelCatalog.failedStatus') }}</span>
-      <span v-if="modelCatalog.synced_at" class="text-[11px] text-gray-400">{{ t('admin.accounts.modelCatalog.lastSuccess') }}: {{ formatDateTimeToMinute(modelCatalog.synced_at) }}</span>
-    </div>
-    <!-- Rate Limit Display (429) - Two-line layout -->
     <span v-if="hasError" class="badge text-xs badge-danger">{{ health?.kind === 'auth_invalid' ? t('admin.accounts.openaiHealth.auth_invalid') : statusText }}</span>
     <span v-else-if="health?.kind === 'auth_refresh_required'" class="badge text-xs badge-warning">{{ t('admin.accounts.openaiHealth.auth_refresh_required') }}</span>
-    <div v-else-if="isRateLimited" class="flex flex-col items-start gap-1">
-      <span class="badge text-xs badge-warning">{{ t('admin.accounts.status.rateLimited') }}</span>
-      <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ rateLimitResumeText }}</span>
-    </div>
-
-    <!-- Overload Display (529) - Two-line layout -->
-    <div v-else-if="isOverloaded" class="flex flex-col items-start gap-1">
-      <span class="badge text-xs badge-danger">{{ t('admin.accounts.status.overloaded') }}</span>
-      <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ overloadCountdown }}</span>
-    </div>
-
-    <!-- Main Status Badge (shown when not rate limited/overloaded) -->
-    <template v-else>
-      <div v-if="isTempUnschedulable" class="flex flex-col items-start gap-1">
-        <button
-          type="button"
-          :class="['badge text-xs', statusClass, 'cursor-pointer']"
-          :title="t('admin.accounts.status.viewTempUnschedDetails')"
-          @click="handleTempUnschedClick"
-        >
-          {{ statusText }}
-        </button>
-        <span class="max-w-[180px] text-left text-[11px] leading-4 text-gray-500 dark:text-gray-400">
-          {{ tempUnschedRecoveryText }}
-        </span>
-      </div>
-      <span v-else :class="['badge text-xs', statusClass]">
-        {{ statusText }}
-      </span>
-    </template>
+    <span v-else-if="!showMainStatusDetails" :class="['badge text-xs', statusClass]">
+      {{ statusText }}
+    </span>
 
     <!-- Error Info Indicator -->
     <div v-if="hasError && account.error_message" class="group/error relative">
@@ -80,6 +48,25 @@
         class="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 whitespace-normal rounded bg-gray-900 px-3 py-2 text-center text-xs leading-relaxed text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-gray-700"
       >
         {{ t('admin.accounts.status.rateLimitedUntil', { time: formatDateTime(account.rate_limit_reset_at) }) }}
+        <div
+          class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"
+        ></div>
+      </div>
+    </div>
+
+    <!-- Overload Indicator (529) -->
+    <div v-if="isOverloaded && !hasError" class="group relative">
+      <span
+        class="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400"
+      >
+        <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
+        529
+      </span>
+      <!-- Tooltip -->
+      <div
+        class="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 whitespace-normal rounded bg-gray-900 px-3 py-2 text-center text-xs leading-relaxed text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-gray-700"
+      >
+        {{ t('admin.accounts.status.overloadedUntil', { time: formatTime(account.overload_until) }) }}
         <div
           class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"
         ></div>
@@ -134,24 +121,34 @@
       </div>
     </div>
 
-    <!-- Overload Indicator (529) -->
-    <div v-if="isOverloaded && !hasError" class="group relative">
-      <span
-        class="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400"
-      >
-        <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
-        529
-      </span>
-      <!-- Tooltip -->
-      <div
-        class="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 whitespace-normal rounded bg-gray-900 px-3 py-2 text-center text-xs leading-relaxed text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-gray-700"
-      >
-        {{ t('admin.accounts.status.overloadedUntil', { time: formatTime(account.overload_until) }) }}
-        <div
-          class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"
-        ></div>
-      </div>
+    <div v-if="(modelCatalogPending || modelCatalogFailed) && !hasError && health?.kind !== 'auth_refresh_required'" class="flex flex-col items-start gap-1" :title="modelCatalog.error || t('admin.accounts.modelCatalog.pending')">
+      <span class="badge text-xs badge-warning">{{ t(modelCatalogPending ? 'admin.accounts.modelCatalog.pendingStatus' : 'admin.accounts.modelCatalog.failedStatus') }}</span>
+      <span v-if="modelCatalog.synced_at" class="text-[11px] text-gray-400">{{ t('admin.accounts.modelCatalog.lastSuccess') }}: {{ formatDateTimeToMinute(modelCatalog.synced_at) }}</span>
     </div>
+
+    <template v-if="showMainStatusDetails">
+      <div v-if="isRateLimited" class="flex flex-col items-start gap-1">
+        <span class="badge text-xs badge-warning">{{ t('admin.accounts.status.rateLimited') }}</span>
+        <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ rateLimitResumeText }}</span>
+      </div>
+      <div v-else-if="isOverloaded" class="flex flex-col items-start gap-1">
+        <span class="badge text-xs badge-danger">{{ t('admin.accounts.status.overloaded') }}</span>
+        <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ overloadCountdown }}</span>
+      </div>
+      <div v-else class="flex flex-col items-start gap-1">
+        <button
+          type="button"
+          :class="['badge text-xs', statusClass, 'cursor-pointer']"
+          :title="t('admin.accounts.status.viewTempUnschedDetails')"
+          @click="handleTempUnschedClick"
+        >
+          {{ statusText }}
+        </button>
+        <span class="max-w-[180px] text-left text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+          {{ tempUnschedRecoveryText }}
+        </span>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -289,6 +286,11 @@ const isTempUnschedulable = computed(() => {
 const hasError = computed(() => {
   return props.account.status === 'error' || health.value?.kind === 'auth_invalid'
 })
+
+const showMainStatusDetails = computed(() =>
+  !hasError.value && health.value?.kind !== 'auth_refresh_required' &&
+  (isRateLimited.value || isOverloaded.value || isTempUnschedulable.value)
+)
 
 const isQuotaExceeded = computed(() => {
   const exceeded = (used?: number | null, limit?: number | null) =>
