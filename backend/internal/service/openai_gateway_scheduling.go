@@ -386,6 +386,39 @@ func isOpenAICompatibleAccountEligibleForRequestBeforeProfit(ctx context.Context
 	return openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx, account, platform, requestedModel, requireCompact, requiredCapability) == ""
 }
 
+type openAIToolRequestKey struct{}
+
+// WithOpenAIToolRouting records the inbound protocol only for requests carrying tool declarations.
+func WithOpenAIToolRouting(ctx context.Context, body []byte, inbound string) context.Context {
+	if inbound == APIProtocolChatCompletions && !gjson.GetBytes(body, "messages").Exists() && gjson.GetBytes(body, "input").Exists() {
+		inbound = APIProtocolResponses
+	}
+	hasTools := gjson.GetBytes(body, "tools.0").Exists() || (inbound == APIProtocolChatCompletions && gjson.GetBytes(body, "functions.0").Exists())
+	if !hasTools && inbound == APIProtocolResponses {
+		gjson.GetBytes(body, "input").ForEach(func(_, item gjson.Result) bool {
+			kind := item.Get("type").String()
+			hasTools = (kind == "additional_tools" || kind == "tool_search_output") && item.Get("tools.0").Exists()
+			return !hasTools
+		})
+	}
+	if !hasTools {
+		return ctx
+	}
+	return context.WithValue(ctx, openAIToolRequestKey{}, inbound)
+}
+
+func toolRequestNeedsDifferentProtocol(ctx context.Context, account *Account, model string, compact bool) bool {
+	if !account.IsOpenAI() || ctx == nil {
+		return false
+	}
+	inbound, tools := ctx.Value(openAIToolRequestKey{}).(string)
+	if !tools {
+		return false
+	}
+	target := resolveOpenAIAccountUpstreamModelForRequest(account, model, compact)
+	return openai.RequiresResponsesForToolCalls(target) && resolveUpstreamProtocol(account, inbound, target, nil) == APIProtocolChatCompletions
+}
+
 func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Context, account *Account, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) string {
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if account == nil {
@@ -443,7 +476,7 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
 		return "model_not_supported"
 	}
-	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
+	if toolRequestNeedsDifferentProtocol(ctx, account, requestedModel, requireCompact) || !account.SupportsOpenAIEndpointCapability(requiredCapability) {
 		if account.IsGrok() && requiredCapability == OpenAIEndpointCapabilityGrokMediaGeneration {
 			_, reason := account.GrokMediaGenerationEligibility()
 			slog.Debug("grok_media_account_ineligible", "account_id", account.ID, "reason", reason)

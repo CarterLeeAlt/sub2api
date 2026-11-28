@@ -64,7 +64,11 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 
 	storeFalse := false
 	out.Store = &storeFalse
-	parallelToolCalls := true
+	choice, err := parseAnthropicToolChoice(req.ToolChoice)
+	if err != nil {
+		return nil, fmt.Errorf("convert tool_choice: %w", err)
+	}
+	parallelToolCalls := !choice.DisableParallelToolUse
 	out.ParallelToolCalls = &parallelToolCalls
 	out.Text = &ResponsesText{Verbosity: "medium"}
 
@@ -94,7 +98,7 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 
 	// Convert tool_choice
 	if len(req.ToolChoice) > 0 {
-		tc, err := convertAnthropicToolChoiceToResponses(req.ToolChoice)
+		tc, err := choice.toResponses(req.ToolChoice)
 		if err != nil {
 			return nil, fmt.Errorf("convert tool_choice: %w", err)
 		}
@@ -104,21 +108,28 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 	return out, nil
 }
 
-// convertAnthropicToolChoiceToResponses maps Anthropic tool_choice to Responses format.
+type anthropicToolChoice struct {
+	Type                   string `json:"type"`
+	Name                   string `json:"name"`
+	DisableParallelToolUse bool   `json:"disable_parallel_tool_use"`
+}
+
+func parseAnthropicToolChoice(raw json.RawMessage) (anthropicToolChoice, error) {
+	var choice anthropicToolChoice
+	if len(raw) == 0 {
+		return choice, nil
+	}
+	err := json.Unmarshal(raw, &choice)
+	return choice, err
+}
+
+// toResponses maps Anthropic tool_choice to Responses format.
 //
 //	{"type":"auto"}            → "auto"
 //	{"type":"any"}             → "required"
 //	{"type":"none"}            → "none"
 //	{"type":"tool","name":"X"} → {"type":"function","name":"X"}
-func convertAnthropicToolChoiceToResponses(raw json.RawMessage) (json.RawMessage, error) {
-	var tc struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(raw, &tc); err != nil {
-		return nil, err
-	}
-
+func (tc anthropicToolChoice) toResponses(raw json.RawMessage) (json.RawMessage, error) {
 	switch tc.Type {
 	case "auto":
 		return json.Marshal("auto")

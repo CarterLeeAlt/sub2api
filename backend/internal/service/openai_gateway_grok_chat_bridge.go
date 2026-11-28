@@ -652,12 +652,13 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 
 	s.updateGrokUsageFromResponse(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.Header, resp.StatusCode)
 
+	clientModel := chatClientModel(ctx, originalModel)
 	var result *OpenAIForwardResult
 	if clientStream {
 		// Grok 桥不涉及 image_generation 工具，图片计数器传空。
-		result, err = s.handleChatStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, len(body), nil, OpenAIResponsesImageBillingConfig{})
+		result, err = s.handleChatStreamingResponse(resp, c, account, clientModel, billingModel, upstreamModel, startTime, len(body), nil, OpenAIResponsesImageBillingConfig{})
 	} else {
-		result, err = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, nil, OpenAIResponsesImageBillingConfig{})
+		result, err = s.handleChatBufferedStreamingResponse(resp, c, account, clientModel, billingModel, upstreamModel, startTime, nil, OpenAIResponsesImageBillingConfig{})
 	}
 	if result != nil {
 		result.UpstreamEndpoint = grokChatResponsesEndpoint

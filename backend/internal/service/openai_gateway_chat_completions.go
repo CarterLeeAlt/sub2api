@@ -182,9 +182,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// 1. Parse Chat Completions request
 	var chatReq apicompat.ChatCompletionsRequest
 	if err := parseChatRequestForBridge(body, account.Platform, &chatReq); err != nil {
-		if account.Platform == PlatformKimi {
-			writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		}
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, fmt.Errorf("parse chat completions request: %w", err)
 	}
 	originalModel := chatReq.Model
@@ -262,6 +260,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		chatReq.Model = upstreamModel
 		responsesReq, err = chatCompletionsToResponses(s.cfg, &chatReq)
 		if err != nil {
+			writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return nil, fmt.Errorf("convert chat completions to responses: %w", err)
 		}
 		responsesReq.Model = upstreamModel
@@ -460,6 +459,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 
 	// 9. Handle normal response
+	originalModel = chatClientModel(ctx, originalModel)
 	var result *OpenAIForwardResult
 	var handleErr error
 	if clientStream {

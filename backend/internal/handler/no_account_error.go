@@ -56,7 +56,7 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	// one message that names the real problem. It also flips the ops attribution
 	// from a local model-configuration issue to routing capacity, because call
 	// sites gate markOpsRoutingCapacityLimitedIfNoAvailable on ModelNotFound.
-	if fallback.ModelNotFound {
+	if fallback.ModelNotFound || fallback.Status == http.StatusBadRequest {
 		return fallback
 	}
 	match := selectionModelRateLimitedPattern.FindStringSubmatch(strings.ToLower(err.Error()))
@@ -67,6 +67,10 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if parseErr != nil || count <= 0 {
 		return fallback
 	}
+	return noAccountRateLimited()
+}
+
+func noAccountRateLimited() noAccountErrorClassification {
 	return noAccountErrorClassification{
 		Status:  http.StatusTooManyRequests,
 		ErrType: "rate_limit_error",
@@ -122,7 +126,13 @@ func classifyNoAccountError(
 	}
 
 	result := diag.DiagnoseModelAvailabilityForPlatform(ctx, apiKey.GroupID, routingModel, platform)
+	if result.AllSupportingAccountsRateLimited {
+		return noAccountRateLimited()
+	}
 	if result.HasAccountsInPool && !result.HasModelSupport {
+		if result.HasToolProtocolMismatch {
+			return noAccountErrorClassification{Status: http.StatusBadRequest, ErrType: "invalid_request_error", Message: fmt.Sprintf("Model %q requires a Responses account for tool calls", displayModel)}
+		}
 		message := fmt.Sprintf("Model %q is not supported by any configured account in this group", displayModel)
 		if result.HasRetiredSubscriptionModel {
 			message = fmt.Sprintf("Model %q targets GPT-5.5, which retired from Codex with ChatGPT sign-in on October 14, 2026. Select an available replacement such as GPT-6.1 Sol or GPT-6 Luna, or configure an API-key upstream that supports GPT-5.5.", displayModel)

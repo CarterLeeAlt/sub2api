@@ -90,6 +90,10 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 	// (upstream rejects tool_choice without tools), and a named choice only when
 	// it points at a declared tool — mirroring responsesToolChoiceToChatToolChoice,
 	// chat upstreams 400 on tool_choice referencing an unknown tool.
+	choice, err := parseAnthropicToolChoice(req.ToolChoice)
+	if err != nil {
+		return nil, fmt.Errorf("convert tool_choice: %w", err)
+	}
 	if len(out.Tools) > 0 && len(req.ToolChoice) > 0 {
 		declared := make(map[string]bool, len(out.Tools))
 		for _, tool := range out.Tools {
@@ -97,7 +101,7 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 				declared[tool.Function.Name] = true
 			}
 		}
-		tc, err := convertAnthropicToolChoiceToChat(req.ToolChoice, declared)
+		tc, err := choice.toChat(declared)
 		if err != nil {
 			return nil, fmt.Errorf("convert tool_choice: %w", err)
 		}
@@ -109,7 +113,13 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 	// Match the Responses bridge, including an explicit thinking disable.
 	out.ReasoningEffort = anthropicReasoningEffort(req)
 
-	parallelToolCalls := true
+	if len(req.StopSeqs) > 0 {
+		out.Stop, err = json.Marshal(req.StopSeqs)
+		if err != nil {
+			return nil, err
+		}
+	}
+	parallelToolCalls := !choice.DisableParallelToolUse
 	out.ParallelToolCalls = &parallelToolCalls
 
 	return out, nil
@@ -357,15 +367,7 @@ func anthropicToolsToChatTools(tools []AnthropicTool) []ChatTool {
 //	{"type":"any"}             → "required"
 //	{"type":"none"}            → "none"
 //	{"type":"tool","name":"X"} → {"type":"function","function":{"name":"X"}} (X declared)
-func convertAnthropicToolChoiceToChat(raw json.RawMessage, declared map[string]bool) (json.RawMessage, error) {
-	var tc struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(raw, &tc); err != nil {
-		return nil, err
-	}
-
+func (tc anthropicToolChoice) toChat(declared map[string]bool) (json.RawMessage, error) {
 	switch tc.Type {
 	case "auto":
 		return json.Marshal("auto")

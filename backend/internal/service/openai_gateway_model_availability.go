@@ -64,8 +64,16 @@ func (s *OpenAIGatewayService) DiagnoseModelAvailabilityForPlatform(
 		// model_mapping accepts everything; otherwise the explicit / wildcard
 		// mapping must match.
 		if accounts[i].IsModelSupported(requestedModel) {
+			if toolRequestNeedsDifferentProtocol(ctx, &accounts[i], requestedModel, false) {
+				diag.HasToolProtocolMismatch = true
+				continue
+			}
 			diag.HasModelSupport = true
-			return diag
+			account := &accounts[i]
+			diag.AllSupportingAccountsRateLimited = account.IsRateLimited() || account.isModelRateLimitedWithContext(ctx, requestedModel)
+			if !diag.AllSupportingAccountsRateLimited {
+				return diag
+			}
 		}
 	}
 	return diag

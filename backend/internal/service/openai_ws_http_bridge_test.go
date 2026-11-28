@@ -2226,7 +2226,13 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 		return event
 	}
 
-	writeMessage(`{"type":"response.create","model":"gpt-5.1","stream":true,"reasoning":{"effort":"high"},"input":[{"role":"system","content":"Keep the reference verbatim"},{"role":"user","content":"first"}]}`)
+	writeMessage(`{"type":"response.create","generate":false,"model":"gpt-5.1","input":[]}`)
+	require.Equal(t, "response.created", gjson.GetBytes(readMessage(), "type").String())
+	prewarm := readMessage()
+	require.Equal(t, "response.completed", gjson.GetBytes(prewarm, "type").String())
+	prewarmID := gjson.GetBytes(prewarm, "response.id").String()
+	require.NotEmpty(t, prewarmID)
+	writeMessage(fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"model":"gpt-5.1","stream":true,"reasoning":{"effort":"high"},"input":[{"role":"system","content":"Keep the reference verbatim"},{"role":"user","content":"first"}]}`, prewarmID))
 	firstTurnEvent := readMessage()
 	require.Equal(t, "response.completed", gjson.GetBytes(firstTurnEvent, "type").String())
 	require.Equal(t, "resp_bridge_first", gjson.GetBytes(firstTurnEvent, "response.id").String())

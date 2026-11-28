@@ -71,6 +71,9 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 	}
 
 	modelKey := a.GetMappedModel(requestedModel)
+	if a.IsOpenAIOAuth() && OpenAIImagesEndpointFromContext(ctx) {
+		modelKey = requestedModel
+	}
 	if a.Platform == PlatformAntigravity {
 		modelKey = resolveFinalAntigravityModelKey(ctx, a, requestedModel)
 	}

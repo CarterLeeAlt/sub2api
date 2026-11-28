@@ -827,6 +827,27 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_ResponsesCapabilityExcl
 		require.Equal(t, int64(37001), selection.Account.ID)
 	})
 
+	t.Run("tool calls use the mapped model and its actual protocol", func(t *testing.T) {
+		chat, responses := unsupported, supported
+		chat.Priority, responses.Priority = 1, 10
+		chat.Credentials = map[string]any{"model_mapping": map[string]any{"public": "gpt-6.1-sol"}}
+		responses.Credentials = chat.Credentials
+		for _, tc := range []struct {
+			inbound, body string
+			want          int64
+		}{
+			{APIProtocolChatCompletions, `{"messages":[],"functions":[{}]}`, responses.ID},
+			{APIProtocolResponses, `{"input":[{"type":"additional_tools","tools":[{}]}]}`, responses.ID},
+			{APIProtocolAnthropic, `{"messages":[],"tools":[{}]}`, responses.ID},
+			{APIProtocolResponses, `{"input":"hello"}`, chat.ID},
+		} {
+			svc := newSvc([]Account{chat, responses})
+			selection, _, err := svc.SelectAccountWithSchedulerForCapability(WithOpenAIToolRouting(ctx, []byte(tc.body), tc.inbound), &groupID, "", "", "public", nil, OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, false)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, selection.Account.ID, tc.body)
+		}
+	})
+
 	t.Run("仅有不支持 responses 的账号时生图意图无可用账号", func(t *testing.T) {
 		svc := newSvc([]Account{unsupported})
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(

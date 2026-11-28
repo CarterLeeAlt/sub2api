@@ -5,14 +5,19 @@ package handler
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/tidwall/gjson"
 )
 
 type fakeDiagnoser struct {
@@ -40,6 +45,95 @@ func (f *fakeDiagnoser) DiagnoseModelAvailabilityForPlatform(
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+func TestOpenAIChannelAliasSelectionErrorsAtHTTPEntrypoints(t *testing.T) {
+	const groupID int64 = 7
+	channel := service.NewChannelService(&openAIWSUsageHandlerChannelRepoStub{
+		channels:       []service.Channel{{ID: 11, Status: service.StatusActive, GroupIDs: []int64{groupID}, ModelMapping: map[string]map[string]string{service.PlatformOpenAI: {"public": "target"}}}},
+		groupPlatforms: map[int64]string{groupID: service.PlatformOpenAI},
+	}, nil, nil, nil, nil)
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	account := service.Account{ID: 1, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"model_mapping": map[string]any{"target": "target"}}, Extra: map[string]any{"model_rate_limits": map[string]any{"target": map[string]any{"rate_limit_reset_at": time.Now().Add(time.Hour).Format(time.RFC3339)}}}}
+	repo := openAIImagesSizeRoutingAccountRepo{openAIImagesFailoverAccountRepo{accounts: []service.Account{account}}}
+	h := newOpenAIHandlerForPreviousResponseIDValidation(t, nil)
+	h.cfg = cfg
+	h.billingCacheService = service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(h.billingCacheService.Stop)
+	h.gatewayService = service.NewOpenAIGatewayService(repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, h.billingCacheService, nil, nil, nil, nil, nil, channel, nil, nil, nil)
+	for _, name := range []string{"public", "unknown"} {
+		for _, tc := range []struct {
+			path string
+			run  func(*gin.Context)
+		}{{"/v1/chat/completions", h.ChatCompletions}, {"/v1/responses", h.Responses}, {"/v1/messages", h.Messages}} {
+			t.Run(tc.path+"/"+name, func(t *testing.T) {
+				c, rec := newOpenAICompatibleStreamValidationContext(tc.path, fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"input":"hi","max_tokens":100}`, name), false)
+				key, _ := middleware.GetAPIKeyFromContext(c)
+				key.Group.Platform = service.PlatformOpenAI
+				tc.run(c)
+				if name == "public" {
+					require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+					require.Equal(t, "rate_limit_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+				} else {
+					require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+					require.Contains(t, gjson.GetBytes(rec.Body.Bytes(), "error.message").String(), name)
+				}
+			})
+		}
+	}
+}
+
+func TestOpenAIChatChannelAliasToolRequestReachesResponsesAccount(t *testing.T) {
+	const groupID int64 = 7
+	const public = "public-assistant"
+	const target = "gpt-6.1-sol"
+	requests := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		requests <- body
+		if r.Header.Get("Authorization") != "Bearer responses-account" || r.URL.Path != "/v1/responses" {
+			t.Errorf("unexpected account or endpoint: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"resp_example","object":"response","model":"upstream-snapshot","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello back"}]}],"usage":{"input_tokens":4,"output_tokens":2}}`)
+	}))
+	defer upstream.Close()
+	channel := service.NewChannelService(&openAIWSUsageHandlerChannelRepoStub{
+		channels:       []service.Channel{{ID: 11, Status: service.StatusActive, GroupIDs: []int64{groupID}, ModelMapping: map[string]map[string]string{service.PlatformOpenAI: {public: "route-target"}}}},
+		groupPlatforms: map[int64]string{groupID: service.PlatformOpenAI},
+	}, nil, nil, nil, nil)
+	var accounts []service.Account
+	for i, credential := range []string{"chat-account", "responses-account"} {
+		accounts = append(accounts, service.Account{
+			ID: int64(i + 1), Priority: i + 1, Concurrency: 1, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true,
+			Credentials: map[string]any{"api_key": credential, "base_url": upstream.URL, "model_mapping": map[string]any{"route-target": target}},
+			Extra:       map[string]any{"openai_responses_supported": i == 1},
+		})
+	}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	h := newOpenAIHandlerForPreviousResponseIDValidation(t, nil)
+	h.cfg = cfg
+	h.billingCacheService = service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(h.billingCacheService.Stop)
+	repo := openAIImagesSizeRoutingAccountRepo{openAIImagesFailoverAccountRepo{accounts: accounts}}
+	usage := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 1)}
+	h.gatewayService = service.NewOpenAIGatewayService(repo, usage, &openAIWSUsageBillingRepo{}, nil, nil, nil, nil, cfg, nil, nil, service.NewBillingService(cfg, nil), nil, h.billingCacheService, &compositeWSHTTPUpstream{}, &service.DeferredService{}, nil, nil, nil, channel, nil, nil, nil)
+	c, rec := newOpenAICompatibleStreamValidationContext("/v1/chat/completions", `{"model":"public-assistant","input":"hello","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"stream":false}`, false)
+	key, _ := middleware.GetAPIKeyFromContext(c)
+	key.Group.Platform = service.PlatformOpenAI
+	h.ChatCompletions(c)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, requests, 1)
+	sent := <-requests
+	require.Equal(t, target, gjson.GetBytes(sent, "model").String())
+	require.Equal(t, "lookup", gjson.GetBytes(sent, "tools.0.name").String())
+	require.Equal(t, public, gjson.GetBytes(rec.Body.Bytes(), "model").String())
+	require.Equal(t, "hello back", gjson.GetBytes(rec.Body.Bytes(), "choices.0.message.content").String())
+}
 
 // newTestGinContextWithRequest wraps the bare newTestGinContext helper
 // (defined in openai_gateway_cyber_test.go) by additionally attaching a stub

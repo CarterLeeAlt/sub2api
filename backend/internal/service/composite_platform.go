@@ -75,6 +75,13 @@ func ResolvedUpstreamModelFromContext(ctx context.Context) (string, bool) {
 	return model, true
 }
 
+func chatClientModel(ctx context.Context, fallback string) string {
+	if model, ok := RequestedPublicModelFromContext(ctx); ok {
+		return model
+	}
+	return fallback
+}
+
 func RequestedPublicModelFromContext(ctx context.Context) (string, bool) {
 	if ctx == nil {
 		return "", false

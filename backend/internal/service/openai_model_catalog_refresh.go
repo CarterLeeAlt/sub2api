@@ -15,14 +15,14 @@ import (
 )
 
 type AccountModelCatalogRepository interface {
-	ListDueModelCatalogAccounts(context.Context, int64, int) ([]Account, error)
+	ListDueModelCatalogAccounts(context.Context, int64, int, bool) ([]Account, error)
 	SaveModelCatalogObservation(context.Context, *Account, string, string, AccountModelCatalog) (bool, error)
 	SetModelCatalogWake(func())
 	FinishModelCatalogRound(context.Context, time.Time, time.Time) error
 }
 
 type upstreamModelCatalogReader interface {
-	FetchUpstreamSupportedModels(context.Context, *Account) ([]string, error)
+	fetchOpenAICodexManifestEntries(context.Context, *Account, *Account) ([]openAICodexManifestModel, []byte, error)
 }
 
 // OpenAIModelCatalogRefreshService owns one serial worker. The database holds due
@@ -113,7 +113,8 @@ func (s *OpenAIModelCatalogRefreshService) RunOnce(ctx context.Context) error {
 	startedAt := time.Now().UTC()
 	for {
 		queryCtx, queryCancel := context.WithTimeout(ctx, 10*time.Second)
-		accounts, err := s.repo.ListDueModelCatalogAccounts(queryCtx, afterID, 100)
+		spec := officialImageModels.Load()
+		accounts, err := s.repo.ListDueModelCatalogAccounts(queryCtx, afterID, 100, spec != nil && spec.Lifecycle != nil)
 		queryCancel()
 		if err != nil {
 			return err
@@ -161,13 +162,25 @@ func (s *OpenAIModelCatalogRefreshService) refresh(ctx context.Context, a *Accou
 		return err
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
-	models, fetchErr := s.reader.FetchUpstreamSupportedModels(requestCtx, a)
+	spec := officialImageModels.Load()
+	var entries []openAICodexManifestModel
+	var fetchErr error
+	if state.PendingImageManifest != "" && spec != nil && spec.Lifecycle != nil {
+		fetchErr = json.Unmarshal([]byte(state.PendingImageManifest), &entries)
+	} else {
+		entries, _, fetchErr = s.reader.fetchOpenAICodexManifestEntries(requestCtx, a, a)
+	}
 	cancel()
+	var models []string
+	var pending bool
+	if fetchErr == nil {
+		models, pending, fetchErr = resolveOAuthCatalogModels(a, entries, spec)
+	}
 	now := time.Now().UTC()
 	state.AttemptedAt = now.Format(time.RFC3339Nano)
 	state.NextSyncAt = now.Add(time.Duration(30+rand.IntN(16)) * time.Minute).Format(time.RFC3339Nano)
 	models = dedupeAndSortModelIDs(models)
-	if fetchErr == nil && len(models) == 0 {
+	if fetchErr == nil && len(models) == 0 && !pending {
 		fetchErr = fmt.Errorf("upstream returned an empty model list")
 	}
 	if fetchErr != nil {
@@ -192,9 +205,23 @@ func (s *OpenAIModelCatalogRefreshService) refresh(ctx context.Context, a *Accou
 			state.NextSyncAt = now.Add(2 * time.Minute).Format(time.RFC3339Nano)
 		}
 	} else {
+		state.PendingImageManifest = ""
+		if pending {
+			saved, err := json.Marshal(entries)
+			if err != nil {
+				return err
+			}
+			state.PendingImageManifest = string(saved)
+		}
+		state.NativeImages = make(map[string]any)
+		for _, model := range models {
+			if IsGPTImageGenerationModel(model) {
+				state.NativeImages[model] = true
+			}
+		}
 		state.Added, state.Removed = ReplaceAccountModelWhitelist(a, models)
 		state.SyncedAt = state.AttemptedAt
-		state.Ready = true
+		state.Ready = len(models) != 0
 		state.Error = ""
 	}
 	writeCtx, writeCancel := context.WithTimeout(ctx, 5*time.Second)

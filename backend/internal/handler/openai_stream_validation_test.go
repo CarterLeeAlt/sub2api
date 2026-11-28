@@ -55,6 +55,14 @@ func TestOpenAICompatibleHandlersRejectInvalidStreamFieldType(t *testing.T) {
 			},
 		},
 		{
+			name: "openai_messages_string_stream",
+			path: "/v1/messages",
+			body: `{"model":"gpt-5","stream":"true","messages":[]}`,
+			run: func(c *gin.Context) {
+				newOpenAIHandlerForPreviousResponseIDValidation(t, nil).Messages(c)
+			},
+		},
+		{
 			name: "openai_chat_completions_string_stream",
 			path: "/openai/v1/chat/completions",
 			body: `{"model":"gpt-5","stream":"true","messages":[{"role":"user","content":"hello"}]}`,
@@ -134,7 +142,7 @@ func newOpenAICompatibleStreamValidationContext(path, body string, claudeCodeOnl
 	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
 		ID:      11,
 		GroupID: &groupID,
-		Group:   &service.Group{ID: groupID, ClaudeCodeOnly: claudeCodeOnly},
+		Group:   &service.Group{ID: groupID, ClaudeCodeOnly: claudeCodeOnly, AllowMessagesDispatch: true},
 		User:    &service.User{ID: 13},
 	})
 	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 13, Concurrency: 1})

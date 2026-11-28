@@ -1324,13 +1324,15 @@ func TestAnthropicToResponses_ToolChoiceAuto(t *testing.T) {
 		Model:      "gpt-5.2",
 		MaxTokens:  1024,
 		Messages:   []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
-		ToolChoice: json.RawMessage(`{"type":"auto"}`),
+		ToolChoice: json.RawMessage(`{"type":"auto","disable_parallel_tool_use":true}`),
 	}
 
 	resp, err := AnthropicToResponses(req)
 	require.NoError(t, err)
 
 	var tc string
+	require.NotNil(t, resp.ParallelToolCalls)
+	require.False(t, *resp.ParallelToolCalls)
 	require.NoError(t, json.Unmarshal(resp.ToolChoice, &tc))
 	assert.Equal(t, "auto", tc)
 }

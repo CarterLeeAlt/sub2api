@@ -835,6 +835,32 @@ func TestForwardAsChatCompletions_APIKeyAutoDerivesStableIsolatedPromptCacheKey(
 	require.NotEqual(t, upstream.requests[1].Header.Get("session_id"), upstream.requests[2].Header.Get("session_id"))
 }
 
+func TestForwardAsChatCompletionsCursorJSONPreservesPublicModel(t *testing.T) {
+	for _, stream := range []string{"", `,"stream":false`} {
+		body := []byte(`{"model":"channel-target","input":"hello"` + stream + `}`)
+		ctx := WithCompositeRouteDecision(t.Context(), CompositeRouteDecision{Matched: true, PublicModel: "public", UpstreamModel: "channel-target"})
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		response := `{"id":"resp_cursor","object":"response","status":"completed","model":"snapshot","output":[{"type":"message","content":[{"type":"output_text","text":"hello back"}]}],"usage":{"input_tokens":4,"output_tokens":2}}`
+		upstream := &httpUpstreamRecorder{resp: ordinaryModelsUpstreamResponse(response)}
+		upstream.resp.Header.Set("Content-Type", "application/json; charset=utf-8")
+		svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+		account := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "sk-compatible"}}
+		account.Extra = map[string]any{"openai_responses_supported": true}
+		account.Credentials["model_mapping"] = map[string]any{"channel-target": "upstream-target"}
+		result, err := svc.ForwardAsChatCompletions(ctx, c, account, body, "", "")
+		require.NoError(t, err)
+		require.Equal(t, "hello", gjson.GetBytes(upstream.lastBody, "input").String())
+		require.Equal(t, "upstream-target", gjson.GetBytes(upstream.lastBody, "model").String())
+		require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+		require.Equal(t, "public", gjson.GetBytes(rec.Body.Bytes(), "model").String())
+		require.Equal(t, "hello back", gjson.GetBytes(rec.Body.Bytes(), "choices.0.message.content").String())
+		require.EqualValues(t, 4, result.Usage.InputTokens)
+		require.Equal(t, "snapshot", result.UpstreamResponseModel)
+	}
+}
+
 func TestForwardAsChatCompletions_ResponsesShapeDoesNotAutoDerivePromptCacheKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

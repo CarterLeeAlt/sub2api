@@ -99,12 +99,13 @@ func (r *accountRepository) FinishModelCatalogRound(ctx context.Context, started
 	return err
 }
 
-func (r *accountRepository) ListDueModelCatalogAccounts(ctx context.Context, afterID int64, limit int) ([]service.Account, error) {
+func (r *accountRepository) ListDueModelCatalogAccounts(ctx context.Context, afterID int64, limit int, imageCatalogReady bool) ([]service.Account, error) {
 	rows, err := r.sql.QueryContext(ctx, `SELECT id FROM accounts WHERE deleted_at IS NULL
 		AND platform='openai' AND type='oauth' AND parent_account_id IS NULL
 		AND extra->'model_catalog'->>'source'='upstream' AND id>$1
-		AND (COALESCE(extra->'model_catalog'->>'next_sync_at','')='' OR (extra->'model_catalog'->>'next_sync_at')::timestamptz<=NOW())
-		ORDER BY id LIMIT $2`, afterID, limit)
+		AND (COALESCE(extra->'model_catalog'->>'next_sync_at','')='' OR (extra->'model_catalog'->>'next_sync_at')::timestamptz<=NOW()
+			OR ($3 AND COALESCE(extra->'model_catalog'->>'pending_image_manifest','')<>'' AND COALESCE(extra->'model_catalog'->>'error','')=''))
+		ORDER BY id LIMIT $2`, afterID, limit, imageCatalogReady)
 	if err != nil {
 		return nil, err
 	}

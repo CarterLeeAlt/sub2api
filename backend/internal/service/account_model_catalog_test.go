@@ -96,7 +96,7 @@ type catalogRefreshTestStore struct {
 }
 
 func (r *catalogRefreshTestStore) SetModelCatalogWake(func()) {}
-func (r *catalogRefreshTestStore) ListDueModelCatalogAccounts(context.Context, int64, int) ([]Account, error) {
+func (r *catalogRefreshTestStore) ListDueModelCatalogAccounts(context.Context, int64, int, bool) ([]Account, error) {
 	return r.accounts, nil
 }
 func (r *catalogRefreshTestStore) FinishModelCatalogRound(_ context.Context, _ time.Time, next time.Time) error {
@@ -112,8 +112,13 @@ func (r *catalogRefreshTestStore) SaveModelCatalogObservation(_ context.Context,
 
 type catalogRefreshTestReader func(context.Context, *Account) ([]string, error)
 
-func (f catalogRefreshTestReader) FetchUpstreamSupportedModels(ctx context.Context, a *Account) ([]string, error) {
-	return f(ctx, a)
+func (f catalogRefreshTestReader) fetchOpenAICodexManifestEntries(ctx context.Context, a, _ *Account) ([]openAICodexManifestModel, []byte, error) {
+	ids, err := f(ctx, a)
+	var entries []openAICodexManifestModel
+	for _, id := range ids {
+		entries = append(entries, openAICodexManifestModel{Slug: id})
+	}
+	return entries, nil, err
 }
 
 func TestModelCatalogRefreshResultsAndManualScheduling(t *testing.T) {

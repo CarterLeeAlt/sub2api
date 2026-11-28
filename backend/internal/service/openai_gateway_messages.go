@@ -87,6 +87,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// 1. Parse Anthropic request
 	var anthropicReq apicompat.AnthropicRequest
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
 	}
 	anthropicDigestReq := cloneAnthropicRequestForDigest(&anthropicReq)
@@ -161,6 +162,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		DeferReasoningEffortValidation: true,
 	})
 	if err != nil {
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, fmt.Errorf("convert anthropic to responses: %w", err)
 	}
 
@@ -865,6 +867,22 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 		return nil, usage, acc, openAICompatPriorModelAudit{}, errors.New("upstream response body is nil")
 	}
 	prior := newOpenAICompatPriorModelAudit(account)
+	if strings.EqualFold(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]), "application/json") {
+		body, err := readUpstreamResponseBodyLimited(resp.Body, resolveUpstreamResponseReadLimit(s.cfg))
+		if err != nil {
+			return nil, usage, acc, prior, &openAICompatBufferedReadError{cause: err}
+		}
+		body = restoreCodexToolNamesFromContext(c, body)
+		var response apicompat.ResponsesResponse
+		if err := json.Unmarshal(body, &response); err != nil || !isOpenAICompatResponsesTerminalEvent("response."+response.Status) {
+			return nil, usage, acc, prior, nil
+		}
+		usage, _ = extractOpenAIUsageFromJSONBytes(body)
+		for _, counter := range imageCounters {
+			counter.AddJSONResponse(body)
+		}
+		return &response, usage, acc, prior, nil
+	}
 	recordPrior := func(event *apicompat.ResponsesStreamEvent) {
 		prior.record(event)
 	}

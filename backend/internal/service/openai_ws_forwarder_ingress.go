@@ -751,8 +751,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				// The HTTP payload can contain a policy rewrite or replayed configuration from an earlier turn.
 				result.RequestedReasoningEffort = currentBridgePayload.requestedReasoningEffort
 			}
+			localPrewarm := gjson.GetBytes(bridgePayloadRaw, "generate").Type == gjson.False
 			if hooks != nil && hooks.AfterTurn != nil {
-				hooks.AfterTurn(turn, result, bridgeErr)
+				if localPrewarm {
+					hooks.AfterTurn(turn, nil, bridgeErr)
+				} else {
+					hooks.AfterTurn(turn, result, bridgeErr)
+				}
 			}
 			releaseImageSlot()
 			if bridgeErr != nil {
@@ -793,7 +798,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if result.wsReplayInputExists {
 				lastBridgeResponseID = responseID
 			}
-			if responseID != "" && stateStore != nil {
+			if responseID != "" && stateStore != nil && !localPrewarm {
 				ttl := s.openAIWSResponseStickyTTL()
 				logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
 				s.bindOpenAIWSResponseOwner(ctx, c, groupID, responseID)

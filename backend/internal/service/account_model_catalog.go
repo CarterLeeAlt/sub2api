@@ -48,15 +48,17 @@ func (edit *BulkModelCatalogEdit) Apply(current *Account, credentials, extra map
 }
 
 type AccountModelCatalog struct {
-	Source      string `json:"source"`
-	Revision    string `json:"revision"`
-	SyncedAt    string `json:"synced_at,omitempty"`
-	Ready       bool   `json:"ready"`
-	AttemptedAt string `json:"attempted_at,omitempty"`
-	NextSyncAt  string `json:"next_sync_at,omitempty"`
-	Error       string `json:"error,omitempty"`
-	Added       int    `json:"added"`
-	Removed     int    `json:"removed"`
+	Source               string         `json:"source"`
+	Revision             string         `json:"revision"`
+	SyncedAt             string         `json:"synced_at,omitempty"`
+	Ready                bool           `json:"ready"`
+	AttemptedAt          string         `json:"attempted_at,omitempty"`
+	NextSyncAt           string         `json:"next_sync_at,omitempty"`
+	Error                string         `json:"error,omitempty"`
+	Added                int            `json:"added"`
+	Removed              int            `json:"removed"`
+	NativeImages         map[string]any `json:"native_images,omitempty"`
+	PendingImageManifest string         `json:"pending_image_manifest,omitempty"`
 }
 
 func (a *Account) SupportsAutomaticModelCatalog() bool {
@@ -77,6 +79,8 @@ func (a *Account) ModelCatalog() AccountModelCatalog {
 		state.Error, _ = value["error"].(string)
 		state.Added = parseExtraInt(value["added"])
 		state.Removed = parseExtraInt(value["removed"])
+		state.NativeImages, _ = value["native_images"].(map[string]any)
+		state.PendingImageManifest, _ = value["pending_image_manifest"].(string)
 	}
 	return state
 }
@@ -98,6 +102,7 @@ func SetAccountModelCatalog(a *Account, state AccountModelCatalog) {
 		"source": state.Source, "revision": state.Revision, "synced_at": state.SyncedAt, "ready": state.Ready,
 		"attempted_at": state.AttemptedAt, "next_sync_at": state.NextSyncAt,
 		"error": state.Error, "added": state.Added, "removed": state.Removed,
+		"native_images": state.NativeImages, "pending_image_manifest": state.PendingImageManifest,
 	}
 }
 
@@ -155,6 +160,8 @@ func MergeAccountModelCatalog(incoming, current *Account) error {
 		}
 		state = AccountModelCatalog{Source: edit.Source, Revision: uuid.NewString()}
 		if edit.Source == "upstream" {
+			state.NativeImages = current.ModelCatalog().NativeImages
+			state.PendingImageManifest = current.ModelCatalog().PendingImageManifest
 			// Existing accounts retain their last valid restrictions while switching source.
 			state.SyncedAt = current.ModelCatalog().SyncedAt
 			state.Ready = current.ModelCatalog().Ready || (current.ModelCatalog().Source != "upstream" && len(current.GetModelMapping()) > 0)

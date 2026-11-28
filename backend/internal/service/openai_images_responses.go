@@ -1892,17 +1892,19 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	if err := validateOpenAIImagesModel(requestModel); err != nil {
 		return nil, err
 	}
-	upstreamModel := account.GetMappedModel(requestModel)
-	if err := validateOpenAIImagesModel(upstreamModel); err != nil {
-		return nil, err
+	upstreamModel := requestModel
+	if !account.IsOpenAIOAuth() {
+		upstreamModel = account.GetMappedModel(requestModel)
+		if err := validateOpenAIImagesModel(upstreamModel); err != nil {
+			return nil, err
+		}
 	}
 	if account.IsOpenAIOAuth() {
 		if public, ok := RequestedPublicModelFromContext(ctx); ok && IsGPTImageGenerationModel(public) && public != requestModel {
 			return nil, fmt.Errorf("OAuth image model %q cannot be routed as %q", public, requestModel)
 		}
-		upstreamModel = requestModel
 		state := account.ModelCatalog()
-		if state.Source == "upstream" && !account.IsModelSupported(upstreamModel) {
+		if state.Source == "upstream" && !account.supportsCatalogImage(upstreamModel) {
 			return nil, fmt.Errorf("image model %q is not in the account's model list", upstreamModel)
 		}
 		key := getAPIKeyFromContext(c)

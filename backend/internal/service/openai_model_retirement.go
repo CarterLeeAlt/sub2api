@@ -86,12 +86,20 @@ func filterRetiredOpenAIPublicModelsBody(body []byte, accounts []Account, codex 
 func supportsOpenAIRequestModel(account *Account, requestedModel string, requireCompact bool) bool {
 	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth && IsGPTImageGenerationModel(requestedModel) {
 		if state := account.ModelCatalog(); state.Source == "upstream" {
-			_, listed := account.GetModelMapping()[requestedModel]
-			return listed
+			return account.supportsCatalogImage(requestedModel)
 		}
 	}
 	if isRetiredOpenAISubscriptionModel(account, resolveOpenAIAccountUpstreamModelForRequest(account, requestedModel, requireCompact)) {
 		return false
 	}
 	return account.isModelMappingSupported(requestedModel)
+}
+
+func (account *Account) supportsCatalogImage(model string) bool {
+	if account.ModelCatalog().NativeImages[model] == true {
+		return true
+	}
+	// Snapshots written before native image IDs were stored prove support only
+	// for identity mappings. An alias is never evidence of native support.
+	return account.GetModelMapping()[model] == model
 }

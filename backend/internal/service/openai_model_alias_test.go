@@ -51,9 +51,10 @@ func TestNormalizeKnownOpenAICodexModelCodexAutoPassthrough(t *testing.T) {
 		"codex-auto-review": "codex-auto-review",
 		"CODEX-Auto-Review": "codex-auto-review",
 		// Unknown codex-auto-* slugs pass through as the canonical lowercase slug.
-		"codex-auto-xxx":         "codex-auto-xxx",
-		"codex-auto-debate-high": "codex-auto-debate-high",
-		"openai/codex-auto-xxx":  "codex-auto-xxx",
+		"codex-auto-xxx":            "codex-auto-xxx",
+		"codex-auto-gpt-5.4-review": "codex-auto-gpt-5.4-review",
+		"codex-auto-debate-high":    "codex-auto-debate-high",
+		"openai/codex-auto-xxx":     "codex-auto-xxx",
 		// Unrelated strings containing "codex" still fall back to gpt-5.3-codex.
 		"codexxyz":           "gpt-5.3-codex",
 		"codex":              "gpt-5.3-codex",

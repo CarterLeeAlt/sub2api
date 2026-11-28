@@ -16,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -250,6 +251,9 @@ func prepareOpenAIWSHTTPBridgeBody(account *Account, payload []byte) ([]byte, er
 	if body == nil {
 		return nil, errors.New("response.create payload must be a JSON object")
 	}
+	if generate, present := body["generate"]; present && generate != true {
+		return nil, errors.New("HTTP generation requires generate to be true or omitted")
+	}
 	delete(body, "type")
 	delete(body, "generate")
 	delete(body, "previous_response_id")
@@ -477,6 +481,26 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	}
 	if writeClientMessage == nil {
 		return nil, errors.New("client websocket writer is nil")
+	}
+	if gjson.GetBytes(payload, "generate").Type == gjson.False {
+		// HTTP has no non-generating Responses operation. Keep the prewarm ID
+		// local to this bridge so its first real turn can replay the seed input.
+		id := "resp_" + uuid.NewString()
+		response := apicompat.ResponsesResponse{ID: id, Object: "response", CreatedAt: time.Now().Unix(), Model: originalModel, Output: []apicompat.ResponsesOutput{}}
+		for seq, kind := range []string{"created", "completed"} {
+			response.Status = "in_progress"
+			if kind == "completed" {
+				response.Status = "completed"
+			}
+			frame, err := json.Marshal(gin.H{"type": "response." + kind, "sequence_number": seq, "response": response})
+			if err != nil {
+				return nil, err
+			}
+			if err := writeClientMessage(frame); err != nil {
+				return nil, err
+			}
+		}
+		return &OpenAIForwardResult{RequestID: id, Model: originalModel, wsReplayInputExists: true}, nil
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
 

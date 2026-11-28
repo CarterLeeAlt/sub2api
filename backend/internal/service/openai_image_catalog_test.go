@@ -191,8 +191,9 @@ func TestOAuthImageSyncFiltersDeprecationsAndDefaultSnapshots(t *testing.T) {
 	require.Equal(t, *first, retained)
 
 	officialImageModels.Store(&imageSpecSnapshot{Models: first.Models})
-	_, err = tester.SyncUpstreamModelCatalog(t.Context(), account)
-	require.ErrorContains(t, err, "image catalog is not available yet")
+	manual, err = tester.SyncUpstreamModelCatalog(t.Context(), store.saved[0])
+	require.NoError(t, err)
+	require.Equal(t, models, manual.Models)
 }
 
 func TestOAuthSyncListsOfficialImageModelsWithoutGeneratingImages(t *testing.T) {
@@ -204,6 +205,7 @@ func TestOAuthSyncListsOfficialImageModelsWithoutGeneratingImages(t *testing.T) 
 	defer officialImageModels.Store(previous)
 	a := directImagesTestAccount()
 	a.Credentials["plan_type"] = "team"
+	a.Credentials["model_mapping"] = map[string]any{"withheld-painter": "fixture-painter", "fixture-painter": "another-painter"}
 	SetAccountModelCatalog(a, AccountModelCatalog{Source: "upstream", Revision: "original", Ready: true})
 	store := &catalogRefreshTestStore{accounts: []Account{*a}}
 	const model = "fixture-painter"
@@ -241,6 +243,13 @@ func TestOAuthSyncListsOfficialImageModelsWithoutGeneratingImages(t *testing.T) 
 	synced := store.saved[0]
 	require.True(t, synced.IsModelSupported(model))
 	require.False(t, synced.IsModelSupported("withheld-painter"))
+	require.Equal(t, model, synced.GetMappedModel("withheld-painter"))
+	newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"driver"},{"slug":"fixture-painter"}]}`)
+	tester.openaiGatewayService = &OpenAIGatewayService{}
+	picker, err := tester.FetchOpenAIAccountModels(t.Context(), synced)
+	require.NoError(t, err)
+	require.Contains(t, pickerModelIDs(picker), model)
+	require.NotContains(t, pickerModelIDs(picker), "withheld-painter")
 	req := []byte(fmt.Sprintf(`{"model":%q,"prompt":"circle"}`, model))
 	c, _ := newOpenAIImagesTestContext(t, req)
 	gateway := newOpenAIImagesTestService(upstream)
@@ -250,4 +259,43 @@ func TestOAuthSyncListsOfficialImageModelsWithoutGeneratingImages(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, model, forward.UpstreamModel)
 	require.Equal(t, 1, imageRequests)
+}
+
+func TestCatalogColdStartCompletesImagesFromSavedManifest(t *testing.T) {
+	previous := officialImageModels.Swap(nil)
+	defer officialImageModels.Store(previous)
+	for _, ready := range []bool{false, true} {
+		officialImageModels.Store(nil)
+		a := catalogTestAccount()
+		a.Credentials["plan_type"] = "team"
+		if ready {
+			ReplaceAccountModelWhitelist(a, []string{"old-text", "gpt-image-previous", "gpt-image-excluded"})
+		}
+		SetAccountModelCatalog(a, AccountModelCatalog{Source: "upstream", Ready: ready})
+		reads := 0
+		upstream := &codexModelsHTTPUpstreamStub{do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+			reads++
+			require.Equal(t, http.MethodGet, req.Method)
+			return ordinaryModelsUpstreamResponse(`{"models":[{"slug":"new-text"},{"slug":"gpt-image-excluded","supported_in_api":false}]}`), nil
+		}}
+		store := &catalogRefreshTestStore{}
+		worker := NewOpenAIModelCatalogRefreshService(store, &AccountTestService{httpUpstream: upstream}, &fakeLeaderLockCache{})
+		require.NoError(t, worker.refresh(t.Context(), a))
+		partial := store.saved[0]
+		require.True(t, partial.ModelCatalog().Ready)
+		require.NotEmpty(t, partial.ModelCatalog().PendingImageManifest)
+		require.True(t, partial.IsModelSupported("new-text"))
+		require.False(t, partial.IsModelSupported("old-text"))
+		require.Equal(t, ready, partial.IsModelSupported("gpt-image-previous"))
+		require.False(t, partial.IsModelSupported("gpt-image-excluded"))
+		officialImageModels.Store(&imageSpecSnapshot{Models: map[string]imageEndpointSupport{"gpt-image-current": {Generate: true}, "gpt-image-excluded": {Generate: true}}, Lifecycle: &imageModelLifecycle{}})
+		require.NoError(t, worker.refresh(t.Context(), partial))
+		complete := store.saved[1]
+		require.Empty(t, complete.ModelCatalog().PendingImageManifest)
+		require.True(t, complete.IsModelSupported("gpt-image-current"))
+		require.False(t, complete.IsModelSupported("gpt-image-excluded"))
+		require.False(t, complete.IsModelSupported("gpt-image-previous"))
+		require.Equal(t, 1, reads)
+		worker.Stop()
+	}
 }

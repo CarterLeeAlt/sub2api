@@ -35,10 +35,19 @@ type openAICodexManifestModel struct {
 // Both transports persist credential-scoped diagnostics through the same CAS
 // writer. The request snapshot prevents late failures from disabling new credentials.
 func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, []byte, error) {
-	credentialAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+	owner, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
 		return nil, nil, newUpstreamModelSyncConfigError("Failed to resolve OpenAI OAuth credentials", err)
 	}
+	entries, body, err := s.fetchOpenAICodexManifestEntries(ctx, account, owner)
+	if err != nil {
+		return nil, nil, err
+	}
+	models, _, err := resolveOAuthCatalogModels(owner, entries, officialImageModels.Load())
+	return models, body, err
+}
+
+func (s *AccountTestService) fetchOpenAICodexManifestEntries(ctx context.Context, account, credentialAccount *Account) ([]openAICodexManifestModel, []byte, error) {
 	if credentialAccount == nil || !credentialAccount.IsOpenAIOAuth() {
 		return nil, nil, newUpstreamModelSyncUnsupportedError("OpenAI OAuth credentials are required for Codex model sync", nil)
 	}
@@ -67,7 +76,7 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 				if err := ensureAgentIdentityTaskForAccount(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount, credentialAccount.GetCredential("task_id")); err != nil {
 					return nil, nil, newUpstreamModelSyncUpstreamError("Failed to renew Agent Identity task", err)
 				}
-				return s.fetchOpenAIOAuthUpstreamModels(markAgentIdentityTaskRecoveryTried(ctx), account)
+				return s.fetchOpenAICodexManifestEntries(markAgentIdentityTaskRecoveryTried(ctx), account, credentialAccount)
 			}
 			_ = observeOpenAIUpstreamResponse(ctx, s.accountRepo, credentialAccount, "models", resp.StatusCode, errorBody)
 			return nil, nil, &UpstreamModelSyncError{
@@ -133,31 +142,38 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 	if err != nil {
 		return nil, nil, newUpstreamModelSyncUpstreamError("OpenAI Codex model list response was not valid JSON", err)
 	}
+	return manifestModels, body, nil
+}
+
+func resolveOAuthCatalogModels(account *Account, manifestModels []openAICodexManifestModel, spec *imageSpecSnapshot) ([]string, bool, error) {
 	models := openAICodexManifestModelIDs(manifestModels)
 	if len(models) == 0 {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+		return nil, false, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
-	spec := officialImageModels.Load()
-	canGenerate := openAICodexImageGenerationEligible(credentialAccount, manifestModels)
+	canGenerate := openAICodexImageGenerationEligible(account, manifestModels)
+	excluded := make(map[string]bool)
+	for _, entry := range manifestModels {
+		if entry.SupportedInAPI != nil && !*entry.SupportedInAPI {
+			excluded[strings.TrimSpace(entry.Slug)] = true
+		}
+	}
 	if spec == nil || spec.Lifecycle == nil {
 		var officialModels map[string]imageEndpointSupport
 		if spec != nil {
 			officialModels = spec.Models
 		}
-		textModels := slices.DeleteFunc(models, func(id string) bool { return isOfficialImageModelID(id, officialModels) })
-		// Keep a saved automatic whitelist intact while the shared catalog loads.
-		if len(textModels) == 0 || (canGenerate && account.ModelCatalog().Ready) {
-			return nil, nil, newUpstreamModelSyncUpstreamError("OpenAI image catalog is not available yet", nil)
-		}
-		return textModels, body, nil
-	}
-	if canGenerate {
-		excluded := make(map[string]bool)
-		for _, entry := range manifestModels {
-			if entry.SupportedInAPI != nil && !*entry.SupportedInAPI {
-				excluded[strings.TrimSpace(entry.Slug)] = true
+		hasImages := slices.ContainsFunc(models, func(id string) bool { return isOfficialImageModelID(id, officialModels) })
+		models = slices.DeleteFunc(models, func(id string) bool { return isOfficialImageModelID(id, officialModels) })
+		if canGenerate {
+			for id := range account.GetModelMapping() {
+				if isOfficialImageModelID(id, officialModels) && !excluded[id] && account.supportsCatalogImage(id) {
+					models = append(models, id)
+				}
 			}
 		}
+		return dedupeAndSortModelIDs(models), canGenerate || hasImages, nil
+	}
+	if canGenerate {
 		for id, endpoints := range spec.Models {
 			if endpoints.Generate && !excluded[id] {
 				models = append(models, id)
@@ -166,9 +182,9 @@ func (s *AccountTestService) fetchOpenAIOAuthUpstreamModels(ctx context.Context,
 	}
 	models = spec.Lifecycle.filterModelIDs(models)
 	if len(models) == 0 {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+		return nil, false, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
-	return models, body, nil
+	return models, false, nil
 }
 
 func openAICodexImageGenerationEligible(account *Account, manifestModels []openAICodexManifestModel) bool {

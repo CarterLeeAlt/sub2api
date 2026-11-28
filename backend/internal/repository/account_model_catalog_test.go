@@ -52,7 +52,7 @@ func TestModelCatalogPostgresConsistency(t *testing.T) {
 	require.True(t, a.ModelCatalogPending())
 	read := func() *service.Account { got, err := repo.GetByID(ctx, a.ID); require.NoError(t, err); return got }
 	stale := read()
-	due, err := repo.ListDueModelCatalogAccounts(ctx, 0, 100)
+	due, err := repo.ListDueModelCatalogAccounts(ctx, 0, 100, false)
 	require.NoError(t, err)
 	require.Len(t, due, 1)
 	observation := read()
@@ -60,6 +60,7 @@ func TestModelCatalogPostgresConsistency(t *testing.T) {
 	require.NoError(t, err)
 	state := observation.ModelCatalog()
 	state.Ready = true
+	state.PendingImageManifest = `[{"slug":"fresh"}]`
 	state.SyncedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	state.AttemptedAt = state.SyncedAt
 	state.NextSyncAt = time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339Nano)
@@ -67,6 +68,13 @@ func TestModelCatalogPostgresConsistency(t *testing.T) {
 	applied, err := repo.SaveModelCatalogObservation(ctx, observation, state.Revision, string(credentials), state)
 	require.NoError(t, err)
 	require.True(t, applied)
+	due, err = repo.ListDueModelCatalogAccounts(ctx, 0, 100, false)
+	require.NoError(t, err)
+	require.Empty(t, due)
+	due, err = repo.ListDueModelCatalogAccounts(ctx, 0, 100, true)
+	require.NoError(t, err)
+	require.Len(t, due, 1)
+	require.Equal(t, state.PendingImageManifest, due[0].ModelCatalog().PendingImageManifest)
 	// Replayed observations cannot overwrite a newer observation, even with the same configuration revision.
 	applied, err = repo.SaveModelCatalogObservation(ctx, observation, state.Revision, string(credentials), state)
 	require.NoError(t, err)
