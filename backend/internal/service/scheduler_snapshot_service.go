@@ -997,7 +997,10 @@ func (s *SchedulerSnapshotService) bucketsForPlatform(platform string, groupIDs 
 func (s *SchedulerSnapshotService) rebuildBuckets(ctx context.Context, buckets []SchedulerBucket, reason string) error {
 	tasks, firstErr := s.prepareBucketWriteTasks(ctx, buckets)
 	queries := newSchedulerAccountQueryCache(tasks)
-	if err := s.rebuildPreparedBucketTasks(ctx, tasks, reason, false, queries); err != nil && firstErr == nil {
+	// A writer already holding the bucket lock may have read an older account
+	// state. Keep the outbox event pending until its rebuild publishes or the
+	// bucket is retired, so re-enabled accounts cannot be left out of the pool.
+	if err := s.rebuildPreparedBucketTasks(ctx, tasks, reason, true, queries); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr

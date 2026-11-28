@@ -230,7 +230,8 @@ func TestSchedulerRebuildRetireAfterDBLoadFencesPublish(t *testing.T) {
 	}
 	require.NoError(t, cache.RetireBucket(context.Background(), bucket))
 	close(releaseSet)
-	require.NoError(t, <-result)
+	require.ErrorIs(t, <-result, ErrSchedulerBucketRetired)
+	require.NoError(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{bucket}, "retired"))
 
 	setAttempts, published := cache.counts(bucket)
 	require.Equal(t, 1, setAttempts)

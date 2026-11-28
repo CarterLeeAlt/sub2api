@@ -9,23 +9,45 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type openAIImagesSizeRoutingAccountRepo struct {
 	openAIImagesFailoverAccountRepo
 }
 
+func (r openAIImagesSizeRoutingAccountRepo) ListActive(context.Context) ([]service.Account, error) {
+	return r.accounts, nil
+}
+
+func (r openAIImagesSizeRoutingAccountRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]service.Account, error) {
+	var out []service.Account
+	for _, account := range r.accountsForPlatform(platform) {
+		if account.IsSchedulable() {
+			out = append(out, account)
+		}
+	}
+	return out, nil
+}
+
 func (r openAIImagesSizeRoutingAccountRepo) ListModelAvailabilityCandidates(_ context.Context, _ *int64, platforms []string, _ bool) ([]service.Account, error) {
 	var out []service.Account
 	for _, platform := range platforms {
-		out = append(out, r.accountsForPlatform(platform)...)
+		for _, account := range r.accountsForPlatform(platform) {
+			if account.IsActive() && account.Schedulable {
+				out = append(out, account)
+			}
+		}
 	}
 	return out, nil
 }
@@ -55,8 +77,8 @@ func newOpenAIImagesSizeRoutingTestHandler(t *testing.T, accounts []service.Acco
 	return handler
 }
 
-func serveOpenAIImagesSizeRoutingRequest(handler *OpenAIGatewayHandler, groupID int64, body string) (*httptest.ResponseRecorder, *gin.Context) {
-	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(body)))
+func serveOpenAIImagesSizeRoutingRequest(ctx context.Context, handler *OpenAIGatewayHandler, groupID int64, body string) (*httptest.ResponseRecorder, *gin.Context) {
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -86,6 +108,52 @@ func newOpenAIImagesSizeRoutingAccount(id int64, tiers ...any) service.Account {
 	}
 }
 
+func TestOpenAIGatewayHandlerFirstSelectionClassifiesUnavailableAccounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name       string
+		mutate     func(*service.Account)
+		wantStatus int
+		wantType   string
+		poolReason string
+	}{
+		{"manually paused", func(a *service.Account) { a.Schedulable = false }, http.StatusServiceUnavailable, "api_error", "manually_paused"},
+		{"rate limited", func(a *service.Account) {
+			until := time.Now().Add(time.Hour)
+			a.RateLimitResetAt = &until
+		}, http.StatusTooManyRequests, "rate_limit_error", "account_rate_limited"},
+		{"unsupported model", func(a *service.Account) {
+			a.Credentials["model_mapping"] = map[string]any{"gpt-6.2-astra": "gpt-6.2-astra"}
+		}, http.StatusNotFound, "model_not_found", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := newOpenAIImagesSizeRoutingAccount(1, "2K")
+			tc.mutate(&account)
+			upstream := &openAIImagesFailoverHTTPUpstream{}
+			handler := newOpenAIImagesSizeRoutingTestHandler(t, []service.Account{account}, upstream)
+			core, logs := observer.New(zap.WarnLevel)
+			ctx := logger.IntoContext(t.Context(), zap.New(core))
+			image, _ := serveOpenAIImagesSizeRoutingRequest(ctx, handler, 3140, `{"model":"gpt-image-2.6-sunburst","prompt":"draw","size":"1536x1024"}`)
+			text, _ := serveOpenAIResponsesSizeRoutingRequest(ctx, handler, 3140, `{"model":"gpt-6.2-sol","input":"test"}`)
+			for _, response := range []*httptest.ResponseRecorder{image, text} {
+				require.Equal(t, tc.wantStatus, response.Code, response.Body.String())
+				require.Equal(t, tc.wantType, gjson.GetBytes(response.Body.Bytes(), "error.type").String())
+			}
+			require.Empty(t, upstream.calls())
+			for _, message := range []string{"openai.images.account_select_failed", "openai.account_select_failed"} {
+				entries := logs.FilterMessage(message).All()
+				require.Len(t, entries, 1)
+				fields := entries[0].ContextMap()
+				if tc.poolReason == "" {
+					require.NotContains(t, fields, "account_pool_db_state")
+					continue
+				}
+				require.Equal(t, map[string]int{"active_accounts": 1, tc.poolReason: 1}, fields["account_pool_db_state"])
+			}
+		})
+	}
+}
+
 func TestOpenAIGatewayHandlerImages_SizeTierMissingFromGroupReturns400(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstream := &openAIImagesFailoverHTTPUpstream{}
@@ -93,7 +161,7 @@ func TestOpenAIGatewayHandlerImages_SizeTierMissingFromGroupReturns400(t *testin
 		newOpenAIImagesSizeRoutingAccount(1, "1K", "2K"),
 	}, upstream)
 
-	rec, c := serveOpenAIImagesSizeRoutingRequest(handler, 3140, `{"model":"gpt-image-2","prompt":"draw a cat","size":"3840x2160"}`)
+	rec, c := serveOpenAIImagesSizeRoutingRequest(t.Context(), handler, 3140, `{"model":"gpt-image-2","prompt":"draw a cat","size":"3840x2160"}`)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Equal(t, "invalid_request_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
@@ -112,14 +180,14 @@ func TestOpenAIGatewayHandlerImages_SizeTierRoutesToAllowedAccounts(t *testing.T
 		newOpenAIImagesSizeRoutingAccount(3, "4K"),
 	}, upstream)
 
-	rec, _ := serveOpenAIImagesSizeRoutingRequest(handler, 3141, `{"model":"gpt-image-1","prompt":"draw a cat","size":"2880x2880"}`)
+	rec, _ := serveOpenAIImagesSizeRoutingRequest(t.Context(), handler, 3141, `{"model":"gpt-image-1","prompt":"draw a cat","size":"2880x2880"}`)
 
 	require.Equal(t, http.StatusBadGateway, rec.Code, "the stub upstream fails every attempt")
 	require.Equal(t, []int64{2, 3}, upstream.calls(), "4K requests fail over only across 4K accounts")
 }
 
-func serveOpenAIResponsesSizeRoutingRequest(handler *OpenAIGatewayHandler, groupID int64, body string) (*httptest.ResponseRecorder, *gin.Context) {
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
+func serveOpenAIResponsesSizeRoutingRequest(ctx context.Context, handler *OpenAIGatewayHandler, groupID int64, body string) (*httptest.ResponseRecorder, *gin.Context) {
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -142,7 +210,7 @@ func TestOpenAIGatewayHandlerResponses_ImageToolSizeTierMissingFromGroupReturns4
 		newOpenAIImagesSizeRoutingAccount(1, "1K", "2K"),
 	}, upstream)
 
-	rec, _ := serveOpenAIResponsesSizeRoutingRequest(handler, 3142, `{"model":"gpt-5.4","stream":false,"input":"draw a cat","tools":[{"type":"image_generation","size":"3840x2160"}]}`)
+	rec, _ := serveOpenAIResponsesSizeRoutingRequest(t.Context(), handler, 3142, `{"model":"gpt-5.4","stream":false,"input":"draw a cat","tools":[{"type":"image_generation","size":"3840x2160"}]}`)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Equal(t, "invalid_request_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
@@ -157,7 +225,7 @@ func TestOpenAIGatewayHandlerResponses_TextRequestIgnoresImageSizeTiers(t *testi
 		newOpenAIImagesSizeRoutingAccount(1, "4K"),
 	}, upstream)
 
-	_, _ = serveOpenAIResponsesSizeRoutingRequest(handler, 3143, `{"model":"gpt-5.4","stream":false,"input":"hello","size":"1024x1024"}`)
+	_, _ = serveOpenAIResponsesSizeRoutingRequest(t.Context(), handler, 3143, `{"model":"gpt-5.4","stream":false,"input":"hello","size":"1024x1024"}`)
 
 	require.NotEmpty(t, upstream.calls())
 	require.Equal(t, int64(1), upstream.calls()[0])

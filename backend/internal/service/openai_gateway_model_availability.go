@@ -2,10 +2,62 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 )
+
+// DiagnoseEmptyOpenAISelectionPool counts current database state after the
+// scheduler reported an empty pool. The result is only for the failure log;
+// the database read does not participate in selection or error classification.
+func (s *OpenAIGatewayService) DiagnoseEmptyOpenAISelectionPool(ctx context.Context, groupID *int64, model string, requireCompact bool, selectionErr error) (map[string]int, error) {
+	var empty openAINoAvailableSelectionError
+	if !errors.As(selectionErr, &empty) || !empty.emptyPool || s.accountRepo == nil {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	var accounts []Account
+	var err error
+	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+		accounts, err = s.accountRepo.ListActive(ctx)
+	} else if groupID != nil {
+		accounts, err = s.accountRepo.ListByGroup(ctx, *groupID)
+	} else {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	counts := map[string]int{"active_accounts": 0}
+	for i := range accounts {
+		account := &accounts[i]
+		if !account.IsOpenAI() {
+			continue
+		}
+		counts["active_accounts"]++
+		switch {
+		case !account.Schedulable:
+			counts["manually_paused"]++
+		case account.ModelCatalogPending():
+			counts["catalog_pending"]++
+		case account.IsRateLimited():
+			counts["account_rate_limited"]++
+		case account.IsOverloaded():
+			counts["overloaded"]++
+		case !account.IsSchedulable():
+			counts["other_account_blocks"]++
+		case !supportsOpenAIRequestModel(account, model, requireCompact):
+			counts["model_not_supported"]++
+		default:
+			counts["passes_account_and_model_checks"]++
+		}
+	}
+	return counts, nil
+}
 
 // DiagnoseModelAvailabilityForPlatform reports whether the requested model
 // is configured to be served by any persistently eligible OpenAI-compatible

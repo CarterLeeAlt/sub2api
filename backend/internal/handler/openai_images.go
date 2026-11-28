@@ -189,6 +189,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			reqLog.Warn("openai.images.account_select_failed",
 				zap.Error(err),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
+				openAIEmptySelectionPoolLogField(requestCtx, h.gatewayService, apiKey.GroupID, routingModel, false, service.PlatformOpenAI, len(failedAccountIDs), err),
 			)
 			if len(failedAccountIDs) == 0 {
 				if tier, unsupported := h.gatewayService.OpenAIImageSizeTierUnsupported(c.Request.Context(), apiKey.GroupID, routingModel, parsed.Size, "", parsed.RequiredCapabilityForModel(channelMapping.MappedModel)); unsupported {

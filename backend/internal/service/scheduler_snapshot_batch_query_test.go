@@ -377,7 +377,7 @@ func TestSchedulerRebuildBatchDoesNotReuseAccountPayloadAfterLockBusy(t *testing
 	cache.lockBusy[single] = true
 	svc := newBatchQueryTestService(cache, newBatchAccountQueryRepo(), config.RunModeStandard)
 
-	require.NoError(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "busy"))
+	require.ErrorIs(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "busy"), ErrSchedulerBucketRebuildBusy)
 	full, idOnly := cache.reuseCounts(single)
 	require.Zero(t, full)
 	require.Zero(t, idOnly)
@@ -626,13 +626,13 @@ func TestSchedulerRebuildBatchPreservesLockBusyAndFencingPolicy(t *testing.T) {
 	single := SchedulerBucket{GroupID: groupID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
 	forced := SchedulerBucket{GroupID: groupID, Platform: PlatformOpenAI, Mode: SchedulerModeForced}
 
-	t.Run("ordinary lock busy skips only that bucket", func(t *testing.T) {
+	t.Run("account event lock busy leaves the event pending while other buckets rebuild", func(t *testing.T) {
 		cache := newBatchSnapshotCache()
 		cache.lockBusy[single] = true
 		repo := newBatchAccountQueryRepo()
 		svc := newBatchQueryTestService(cache, repo, config.RunModeStandard)
 
-		require.NoError(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "test"))
+		require.ErrorIs(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "test"), ErrSchedulerBucketRebuildBusy)
 		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}))
 		_, singleAttempts, _, _ := cache.bucketState(single)
 		_, forcedAttempts, forcedVersion, _ := cache.bucketState(forced)
@@ -665,13 +665,13 @@ func TestSchedulerRebuildBatchPreservesLockBusyAndFencingPolicy(t *testing.T) {
 		require.Equal(t, 1, forcedVersion)
 	})
 
-	t.Run("ordinary fencing stays non-fatal", func(t *testing.T) {
+	t.Run("periodic rebuild fencing stays non-fatal", func(t *testing.T) {
 		cache := newBatchSnapshotCache()
 		cache.setErrors[single] = ErrSchedulerBucketWriteFenced
 		repo := newBatchAccountQueryRepo()
 		svc := newBatchQueryTestService(cache, repo, config.RunModeStandard)
 
-		require.NoError(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "test"))
+		require.NoError(t, svc.prepareAndRebuildFullSnapshot(context.Background(), nil, nil, []SchedulerBucket{single, forced}, "interval"))
 		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}))
 		_, singleAttempts, singleVersion, _ := cache.bucketState(single)
 		_, forcedAttempts, forcedVersion, _ := cache.bucketState(forced)

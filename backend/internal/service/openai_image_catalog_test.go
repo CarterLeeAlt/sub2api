@@ -262,6 +262,7 @@ func TestOAuthSyncListsOfficialImageModelsWithoutGeneratingImages(t *testing.T) 
 }
 
 func TestCatalogColdStartCompletesImagesFromSavedManifest(t *testing.T) {
+	const knownImage, newImage = "gpt-image-2.5-sunburst", "gpt-image-2.6-sunburst"
 	previous := officialImageModels.Swap(nil)
 	defer officialImageModels.Store(previous)
 	for _, ready := range []bool{false, true} {
@@ -269,7 +270,7 @@ func TestCatalogColdStartCompletesImagesFromSavedManifest(t *testing.T) {
 		a := catalogTestAccount()
 		a.Credentials["plan_type"] = "team"
 		if ready {
-			ReplaceAccountModelWhitelist(a, []string{"old-text", "gpt-image-previous", "gpt-image-excluded"})
+			ReplaceAccountModelWhitelist(a, []string{"old-text", knownImage, "gpt-image-previous", "gpt-image-excluded"})
 		}
 		SetAccountModelCatalog(a, AccountModelCatalog{Source: "upstream", Ready: ready})
 		reads := 0
@@ -286,16 +287,42 @@ func TestCatalogColdStartCompletesImagesFromSavedManifest(t *testing.T) {
 		require.NotEmpty(t, partial.ModelCatalog().PendingImageManifest)
 		require.True(t, partial.IsModelSupported("new-text"))
 		require.False(t, partial.IsModelSupported("old-text"))
+		require.Equal(t, ready, partial.IsModelSupported(knownImage))
+		require.False(t, partial.IsModelSupported(newImage))
 		require.Equal(t, ready, partial.IsModelSupported("gpt-image-previous"))
 		require.False(t, partial.IsModelSupported("gpt-image-excluded"))
-		officialImageModels.Store(&imageSpecSnapshot{Models: map[string]imageEndpointSupport{"gpt-image-current": {Generate: true}, "gpt-image-excluded": {Generate: true}}, Lifecycle: &imageModelLifecycle{}})
+		officialImageModels.Store(&imageSpecSnapshot{
+			Models: map[string]imageEndpointSupport{
+				knownImage: {Generate: true}, newImage: {Generate: true}, "gpt-image-excluded": {Generate: true},
+			},
+			Lifecycle: &imageModelLifecycle{},
+		})
 		require.NoError(t, worker.refresh(t.Context(), partial))
 		complete := store.saved[1]
 		require.Empty(t, complete.ModelCatalog().PendingImageManifest)
-		require.True(t, complete.IsModelSupported("gpt-image-current"))
 		require.False(t, complete.IsModelSupported("gpt-image-excluded"))
 		require.False(t, complete.IsModelSupported("gpt-image-previous"))
 		require.Equal(t, 1, reads)
 		worker.Stop()
+		for _, model := range []string{knownImage, newImage} {
+			body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"circle","size":"1536x1024"}`, model))
+			c, response := newOpenAIImagesTestContext(t, body)
+			upstream := &httpUpstreamRecorder{resp: openAIImagesJSONResponse()}
+			gateway := newOpenAIImagesTestService(upstream)
+			gateway.accountRepo = schedulerTestOpenAIAccountRepo{accounts: []Account{*complete}}
+			parsed, err := gateway.ParseOpenAIImagesRequest(c, body)
+			require.NoError(t, err)
+			ctx := WithOpenAIImageSizeRouting(c.Request.Context(), parsed.Size)
+			selection, _, err := gateway.SelectAccountWithSchedulerForImages(ctx, nil, "", model, nil, parsed.RequiredCapabilityForModel(model))
+			require.NoError(t, err)
+			require.Equal(t, complete.ID, selection.Account.ID)
+			result, err := gateway.ForwardImages(ctx, c, selection.Account, body, parsed, model)
+			require.NoError(t, err)
+			require.Equal(t, model, result.UpstreamModel)
+			require.Equal(t, "1536x1024", gjson.GetBytes(upstream.lastBody, "size").String())
+			require.Equal(t, "aGVsbG8=", gjson.GetBytes(response.Body.Bytes(), "data.0.b64_json").String())
+			require.Equal(t, 1, result.ImageCount)
+			require.Equal(t, 20, result.Usage.ImageOutputTokens)
+		}
 	}
 }

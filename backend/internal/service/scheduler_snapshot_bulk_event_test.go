@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,7 @@ type bulkEventSnapshotCache struct {
 	accountMu        sync.Mutex
 	setAccountIDs    []int64
 	deleteAccountIDs []int64
+	watermark        int64
 }
 
 func newBulkEventSnapshotCache() *bulkEventSnapshotCache {
@@ -72,6 +74,15 @@ func (c *bulkEventSnapshotCache) capturedBuckets() []SchedulerBucket {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]SchedulerBucket(nil), c.captures...)
+}
+
+func (c *bulkEventSnapshotCache) GetOutboxWatermark(context.Context) (int64, error) {
+	return c.watermark, nil
+}
+
+func (c *bulkEventSnapshotCache) SetOutboxWatermark(_ context.Context, id int64) error {
+	c.watermark = id
+	return nil
 }
 
 func newBulkEventTestService(cache SchedulerCache, accounts AccountRepository) *SchedulerSnapshotService {
@@ -121,6 +132,38 @@ func TestSchedulerBulkAccountEventScopesOpenAIRebuildToFreshPlatform(t *testing.
 	set, deleted := cache.accountWrites()
 	require.Equal(t, []int64{1}, set)
 	require.Empty(t, deleted)
+}
+
+func TestSchedulerOutboxKeepsAccountChangeWhileSnapshotRebuildIsBusy(t *testing.T) {
+	const groupID int64 = 12
+	account := Account{ID: 1, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true, GroupIDs: []int64{groupID}}
+	bucket := SchedulerBucket{GroupID: groupID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
+	cache := newBulkEventSnapshotCache()
+	repo := newBulkEventAccountRepo(&account)
+	repo.results[batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}] = []batchAccountQueryResult{
+		{}, {accounts: []Account{account}}, {accounts: []Account{account}},
+	}
+	outbox := &outboxCleanupRepo{events: []SchedulerOutboxEvent{{
+		ID: 1, EventType: SchedulerOutboxEventAccountChanged, AccountID: &account.ID, CreatedAt: time.Now(),
+	}}}
+	svc := NewSchedulerSnapshotService(cache, outbox, repo, nil, &config.Config{RunMode: config.RunModeStandard})
+
+	// The prior snapshot has no members. A concurrent writer that has already
+	// loaded that state still holds the lock when the enable event is handled.
+	require.NoError(t, svc.rebuildBuckets(t.Context(), []SchedulerBucket{bucket}, "initial"))
+	cache.lockBusy[bucket] = true
+	svc.pollOutbox()
+	_, _, _, writes := cache.bucketState(bucket)
+	require.Len(t, writes, 1)
+	require.Empty(t, writes[0].accounts)
+	require.Zero(t, cache.watermark, "a skipped rebuild must not consume the enable event")
+
+	cache.lockBusy[bucket] = false
+	svc.pollOutbox()
+	_, _, _, writes = cache.bucketState(bucket)
+	require.Len(t, writes, 2)
+	require.Equal(t, []Account{account}, writes[1].accounts)
+	require.EqualValues(t, 1, cache.watermark)
 }
 
 func TestSchedulerMetadataEventRefreshesAccountWithoutRebuildingBuckets(t *testing.T) {

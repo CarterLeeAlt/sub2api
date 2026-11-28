@@ -728,6 +728,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			reqLog.Warn("openai.account_select_failed",
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
+				openAIEmptySelectionPoolLogField(c.Request.Context(), h.gatewayService, apiKey.GroupID, forwardModel, requireCompact, requestPlatform, len(failedAccountIDs), err),
 			)
 			if len(failedAccountIDs) == 0 {
 				if legacyCompact && errors.Is(err, service.ErrNoAvailableCompactAccounts) {

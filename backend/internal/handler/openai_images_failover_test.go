@@ -141,7 +141,7 @@ func TestOpenAIGatewayHandlerImages_RequiresModelAndOnlySwitchesAccounts(t *test
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := &openAIImagesFailoverHTTPUpstream{}
 			handler := newOpenAIImagesSizeRoutingTestHandler(t, tc.accounts, upstream)
-			response, _ := serveOpenAIImagesSizeRoutingRequest(handler, 3144, tc.body)
+			response, _ := serveOpenAIImagesSizeRoutingRequest(t.Context(), handler, 3144, tc.body)
 			require.Equal(t, tc.wantStatus, response.Code, response.Body.String())
 			require.Equal(t, tc.wantIDs, upstream.calls())
 			require.Equal(t, tc.wantModels, upstream.models)

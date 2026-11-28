@@ -9,9 +9,24 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
+
+func openAIEmptySelectionPoolLogField(ctx context.Context, gateway *service.OpenAIGatewayService, groupID *int64, model string, requireCompact bool, platform string, excludedAccounts int, selectionErr error) zap.Field {
+	if platform != service.PlatformOpenAI || excludedAccounts != 0 {
+		return zap.Skip()
+	}
+	counts, err := gateway.DiagnoseEmptyOpenAISelectionPool(ctx, groupID, model, requireCompact, selectionErr)
+	if err != nil {
+		return zap.NamedError("account_pool_db_lookup_error", err)
+	}
+	if counts == nil {
+		return zap.Skip()
+	}
+	return zap.Any("account_pool_db_state", counts)
+}
 
 // noAccountErrorClassification describes the HTTP response to emit when
 // account selection failed with ErrNoAvailableAccounts. Handlers obtain it
