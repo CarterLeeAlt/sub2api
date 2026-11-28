@@ -2847,6 +2847,9 @@ func (h *AccountHandler) GetBatchUsage(c *gin.Context) {
 	}
 
 	usageByAccount, errorsByAccount, recoveredAccountIDs, err := h.accountUsageService.GetUsageBatch(c.Request.Context(), accountIDs, req.Force)
+	if abortIfRequestCanceled(c) {
+		return
+	}
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

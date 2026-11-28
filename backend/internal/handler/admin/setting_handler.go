@@ -102,11 +102,17 @@ func (h *SettingHandler) SetStepUpDeps(totpService *service.TotpService, userSer
 // GET /api/v1/admin/settings
 func (h *SettingHandler) GetSettings(c *gin.Context) {
 	settings, err := h.settingService.GetAllSettings(c.Request.Context())
+	if abortIfRequestCanceled(c) {
+		return
+	}
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 	authSourceDefaults, err := h.settingService.GetAuthSourceDefaultSettings(c.Request.Context())
+	if abortIfRequestCanceled(c) {
+		return
+	}
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -405,14 +411,22 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 	}
 
 	// OpenAI fast policy (stored under a dedicated setting key)
-	if fastPolicy, err := h.settingService.GetOpenAIFastPolicySettings(c.Request.Context()); err != nil {
+	fastPolicy, err := h.settingService.GetOpenAIFastPolicySettings(c.Request.Context())
+	if abortIfRequestCanceled(c) {
+		return
+	}
+	if err != nil {
 		slog.Error("openai_fast_policy_settings_get_failed", "error", err)
 	} else if fastPolicy != nil {
 		payload.OpenAIFastPolicySettings = openaiFastPolicySettingsToDTO(fastPolicy)
 	}
 
 	// Default platform quotas（JSON map）
-	if platformQuotas, err := h.settingService.GetDefaultPlatformQuotas(c.Request.Context()); err != nil {
+	platformQuotas, err := h.settingService.GetDefaultPlatformQuotas(c.Request.Context())
+	if abortIfRequestCanceled(c) {
+		return
+	}
+	if err != nil {
 		slog.Error("default_platform_quotas_get_failed", "error", err)
 	} else {
 		payload.DefaultPlatformQuotas = platformQuotas
