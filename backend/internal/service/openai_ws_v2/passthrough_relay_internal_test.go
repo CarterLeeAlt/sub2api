@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	coderws "github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -505,7 +506,31 @@ func TestOpenAICacheCreationTokensFromUsageNestedZeroWins(t *testing.T) {
 	t.Parallel()
 
 	usage := gjson.Parse(`{"input_tokens_details":{"cache_write_tokens":0},"cache_creation_input_tokens":19}`)
-	require.Zero(t, openAICacheCreationTokensFromUsage(usage))
+	writes, _, _, _ := openai.CacheWriteUsage(usage)
+	require.Zero(t, writes)
+}
+
+func TestRelayCacheWriteLifetimePerTurn(t *testing.T) {
+	state := &relayState{}
+	for i, detail := range []string{`"ttl_30m_tokens":0,"ttl_12h_tokens":20`, `"ttl_30m_tokens":20,"ttl_12h_tokens":0`, `"ttl_12h_tokens":20`, `"ttl_30m_tokens":8,"ttl_12h_tokens":20`} {
+		progress := []byte(`{"usage":{"input_tokens":30,"input_tokens_details":{"cache_write_tokens":20,"cache_write_tokens_details":{` + detail + `}}}}`)
+		parseUsageAndAccumulate(state, progress, "response.in_progress", nil)
+		parseUsageAndAccumulate(state, []byte(`{"response":{"usage":{"input_tokens":30,"output_tokens":5}}}`), "response.completed", nil)
+		turn := finalizeRelayTurnUsage(state)
+		require.Equal(t, 20, turn.CacheCreationInputTokens)
+		wantShort, wantLong := 0, 0
+		switch i {
+		case 0:
+			wantLong = 20
+		case 1:
+			wantShort = 20
+		}
+		require.Equal(t, wantShort, turn.CacheCreation30mInputTokens)
+		require.Equal(t, wantLong, turn.CacheCreation12hInputTokens)
+	}
+	require.Equal(t, 80, state.usage.CacheCreationInputTokens)
+	require.Equal(t, 20, state.usage.CacheCreation12hInputTokens)
+	require.Equal(t, 20, state.usage.CacheCreation30mInputTokens)
 }
 
 func TestEmitTurnCompleteCoverage(t *testing.T) {

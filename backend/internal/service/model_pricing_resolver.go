@@ -274,6 +274,7 @@ func applyChannelImagePriceOverrides(chPricing *ChannelModelPricing, pricing *Mo
 	}
 	if chPricing.ImageInputPrice != nil {
 		pricing.ImageInputPricePerToken = *chPricing.ImageInputPrice
+		pricing.ImageInputPriceExplicit = true
 	}
 }
 

@@ -746,6 +746,9 @@ func responseModelBillingAdoptable(baseline, response *CostBreakdown, baselineCh
 	if response.TotalCost <= 0 && baseline.TotalCost > 0 {
 		return false
 	}
+	if response.ActualCost > baseline.ActualCost+responseModelBillingCostEpsilon || (response.ActualCost <= 0 && baseline.ActualCost > 0) {
+		return false
+	}
 	return !baselineChannelPriced || responseChannelPriced
 }
 

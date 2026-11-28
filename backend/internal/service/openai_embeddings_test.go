@@ -63,8 +63,8 @@ func TestForwardEmbeddings_APIKeyPassthroughRecordsUsageAndBatchInput(t *testing
 				{"object":"embedding","index":0,"embedding":[0.1,0.2]},
 				{"object":"embedding","index":1,"embedding":[0.3,0.4]}
 			],
-			"model":"jina-embeddings-v5-text-small",
-			"usage":{"prompt_tokens":13,"total_tokens":13}
+			"model":"jina-embeddings-v5-text-small-snapshot",
+			"usage":{"prompt_tokens":13,"total_tokens":13,"prompt_tokens_details":{"image_tokens":7}}
 		}`)),
 	}}
 	svc := &OpenAIGatewayService{
@@ -93,7 +93,10 @@ func TestForwardEmbeddings_APIKeyPassthroughRecordsUsageAndBatchInput(t *testing
 	require.Equal(t, "nowledge-embedding", result.Model)
 	require.Equal(t, "jina-embeddings-v5-text-small", result.BillingModel)
 	require.Equal(t, "jina-embeddings-v5-text-small", result.UpstreamModel)
+	require.Equal(t, "jina-embeddings-v5-text-small-snapshot", result.UpstreamResponseModel)
+	require.Equal(t, result.UpstreamResponseModel, gjson.GetBytes(rec.Body.Bytes(), "model").String())
 	require.Equal(t, 13, result.Usage.InputTokens)
+	require.Equal(t, 7, result.Usage.ImageInputTokens)
 	require.Equal(t, 0, result.Usage.OutputTokens)
 	require.Equal(t, "https://api.jina.ai/v1/embeddings", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer sk-test", upstream.lastReq.Header.Get("Authorization"))

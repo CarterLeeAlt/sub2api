@@ -326,8 +326,12 @@ func TestCalculateStatsCost_TokenBilling_WithImageOutput(t *testing.T) {
 	}
 	result := calculateStatsCost(pricing, tokens, 1)
 	require.NotNil(t, result)
-	// 100*0.001 + 50*0.002 + 10*0.01 = 0.1 + 0.1 + 0.1 = 0.3
-	require.InDelta(t, 0.3, *result, 1e-12)
+	// 50 output tokens include 40 text tokens and 10 image tokens.
+	require.InDelta(t, 0.28, *result, 1e-12)
+	// Hosted tools can report image output even when the text model reports no output total.
+	imageOnly := calculateStatsCost(pricing, UsageTokens{ImageOutputTokens: 10}, 1)
+	require.NotNil(t, imageOnly)
+	require.InDelta(t, 0.10, *imageOnly, 1e-12)
 }
 
 func TestCalculateStatsCost_TokenBilling_PartialPricesNil(t *testing.T) {

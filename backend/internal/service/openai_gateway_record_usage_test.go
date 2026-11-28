@@ -3257,6 +3257,33 @@ func TestOpenAIGatewayServiceRecordUsage_FreeOpenAIFastMissingPricingRecordsZero
 	require.Zero(t, usageRepo.lastLog.ActualCost)
 }
 
+func TestFreeFastResponseModelNeverIncreasesDebit(t *testing.T) {
+	logs := &openAIRecordUsageLogRepoStub{inserted: true}
+	users := &openAIRecordUsageUserRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(logs, users, &openAIRecordUsageSubRepoStub{}, nil)
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	group := &Group{ID: 77, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true, RateMultiplier: 1, FreeOpenAIFast: true, ModelPricing: []ChannelModelPricing{
+		{Models: []string{"gpt-5.6-sol"}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(0.01), FastMultiplier: testPtrFloat64(4)},
+		{Models: []string{"gpt-5.6-terra"}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(0.02), FastMultiplier: testPtrFloat64(1.5)},
+	}}
+	tier := "priority"
+	input := &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{RequestID: "free-fast", Model: "gpt-5.6-sol", UpstreamModel: "gpt-5.6-sol", UpstreamResponseModel: "gpt-5.6-terra", ServiceTier: &tier, Usage: OpenAIUsage{InputTokens: 100}},
+		APIKey: &APIKey{ID: 1, GroupID: &group.ID, Group: group}, User: &User{ID: 2}, Account: &Account{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		ChannelUsageFields: ChannelUsageFields{BillingModelSource: BillingModelSourceResponse},
+	}
+	err := svc.RecordUsage(t.Context(), input)
+	require.NoError(t, err)
+	require.InDelta(t, 1, users.lastAmount, 1e-12)
+	require.InDelta(t, 1, logs.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, 4, logs.lastLog.TotalCost, 1e-12)
+	group.FreeOpenAIFast = false
+	input.Result.RequestID = "paid-fast"
+	require.NoError(t, svc.RecordUsage(t.Context(), input))
+	require.InDelta(t, 3, users.lastAmount, 1e-12)
+	require.InDelta(t, 3, logs.lastLog.TotalCost, 1e-12)
+}
+
 func TestGroupBillsOpenAIFastAtStandardRequiresOpenAIAccount(t *testing.T) {
 	apiKey := &APIKey{Group: &Group{Platform: PlatformComposite, FreeOpenAIFast: true}}
 

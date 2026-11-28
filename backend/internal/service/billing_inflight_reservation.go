@@ -365,6 +365,8 @@ const (
 	InflightEstimateVideo
 	// InflightEstimateAudio 语音（tts/stt/realtime）：按 AudioMode/AudioUnits 计。
 	InflightEstimateAudio
+	// Standalone Codex searches use the group's per-call price and base multiplier.
+	InflightEstimateAlphaSearch
 )
 
 // InflightEstimateRequest 单请求估算输入。
@@ -771,6 +773,14 @@ func (s *OpenAIGatewayService) inflightEstimateDeps() inflightEstimateDeps {
 func (s *OpenAIGatewayService) EstimateInflightReservation(ctx context.Context, apiKey *APIKey, req InflightEstimateRequest) (float64, bool) {
 	if s == nil {
 		return 0, false
+	}
+	if req.Kind == InflightEstimateAlphaSearch {
+		if apiKey == nil || apiKey.User == nil {
+			return 0, false
+		}
+		base := s.baseBillingMultiplier(ctx, apiKey, apiKey.User)
+		cost := s.billingService.CalculateWebSearchCost(req.SearchCalls, webSearchPricePerCallFromAPIKey(apiKey), base)
+		return cost.ActualCost, true
 	}
 	return s.inflightEstimateDeps().estimate(ctx, apiKey, req)
 }

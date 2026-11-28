@@ -100,7 +100,8 @@ type ModelPricing struct {
 	UltrafastMultiplier                float64
 	InputPricePerToken                 float64 // 每token输入价格 (USD)
 	InputPricePerTokenPriority         float64 // priority service tier 下每token输入价格 (USD)
-	ImageInputPricePerToken            float64 // 图片输入 token 价格 (USD)，用于多模态 embedding 等图文不同价场景；为 0 时回退到 InputPricePerToken
+	ImageInputPricePerToken            float64 // 图片输入 token 价格 (USD)
+	ImageInputPriceExplicit            bool    // 渠道显式填写 0 时，图片输入免费
 	ImageCacheReadPricePerToken        float64 // 图片缓存输入价格；无独立价格时沿用缓存读取价
 	OutputPricePerToken                float64 // 每token输出价格 (USD)
 	OutputPricePerTokenPriority        float64 // priority service tier 下每token输出价格 (USD)
@@ -1909,7 +1910,7 @@ func (s *BillingService) computeTokenBreakdown(
 			imageInputTokens = tokens.InputTokens
 		}
 		imageInputPrice := pricing.ImageInputPricePerToken
-		if imageInputPrice == 0 {
+		if imageInputPrice == 0 && !pricing.ImageInputPriceExplicit {
 			// 未配置图片输入档时回退到文本 input 价（已含 priority / 长上下文调整）
 			imageInputPrice = inputPrice
 		}

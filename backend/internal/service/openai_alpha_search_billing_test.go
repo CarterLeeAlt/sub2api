@@ -42,6 +42,20 @@ func TestCalculateWebSearchCostDefaultAndOverride(t *testing.T) {
 	require.Empty(t, cost.BillingMode)
 }
 
+func TestAlphaSearchReservationMatchesCharge(t *testing.T) {
+	svc := &OpenAIGatewayService{billingService: &BillingService{}}
+	group := &Group{ID: 11, Platform: PlatformOpenAI, RateMultiplier: 2.5}
+	key := &APIKey{ID: 1, User: &User{ID: 2}, Group: group, GroupID: &group.ID}
+	for _, price := range []*float64{nil, float64Ptr(0), float64Ptr(0.20)} {
+		group.WebSearchPricePerCall = price
+		reserved, priced := svc.EstimateInflightReservation(t.Context(), key, InflightEstimateRequest{Kind: InflightEstimateAlphaSearch, Model: "search", SearchCalls: 1, BodyBytes: 65536})
+		require.True(t, priced)
+		charge, err := svc.calculateOpenAIRecordUsageCost(t.Context(), &OpenAIForwardResult{WebSearchCalls: 1}, key, nil, 7, 1, 1, 2.5, UsageTokens{}, "", nil, false, time.Time{})
+		require.NoError(t, err)
+		require.Equal(t, charge.ActualCost, reserved)
+	}
+}
+
 func TestCalculateOpenAIRecordUsageCostWebSearchPerCall(t *testing.T) {
 	t.Parallel()
 	svc := &OpenAIGatewayService{billingService: &BillingService{}}

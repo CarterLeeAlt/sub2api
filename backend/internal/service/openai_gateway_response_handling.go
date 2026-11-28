@@ -16,6 +16,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -1373,16 +1374,10 @@ func preserveOpenAIUsageDetailsMissingFromTerminal(terminalPayload []byte, prior
 		!usage.Get("cached_tokens").Exists() {
 		merged.CacheReadInputTokens = prior.CacheReadInputTokens
 	}
-	if prior.CacheCreationInputTokens > 0 && merged.CacheCreationInputTokens == 0 &&
-		!usage.Get("input_tokens_details.cache_write_tokens").Exists() &&
-		!usage.Get("prompt_tokens_details.cache_write_tokens").Exists() &&
-		!usage.Get("input_tokens_details.cache_creation_tokens").Exists() &&
-		!usage.Get("prompt_tokens_details.cache_creation_tokens").Exists() &&
-		!usage.Get("cache_write_tokens").Exists() &&
-		!usage.Get("cache_creation_input_tokens").Exists() &&
-		!usage.Get("cache_write_input_tokens").Exists() &&
-		!usage.Get("cache_creation_tokens").Exists() {
+	if _, _, _, reported := openai.CacheWriteUsage(usage); prior.CacheCreationInputTokens > 0 && !reported {
 		merged.CacheCreationInputTokens = prior.CacheCreationInputTokens
+		merged.CacheCreation30mInputTokens = prior.CacheCreation30mInputTokens
+		merged.CacheCreation12hInputTokens = prior.CacheCreation12hInputTokens
 	}
 }
 
@@ -1730,8 +1725,7 @@ func openAIUsageFromGJSON(value gjson.Result) (OpenAIUsage, bool) {
 		)
 	}
 	cacheReadTokens := openAICacheReadTokensFromUsage(value)
-	cacheCreationTokens := openAICacheCreationTokensFromUsage(value)
-	cache30m, cache12h := openAICacheCreationTTLTokensFromUsage(value, cacheCreationTokens)
+	cacheCreationTokens, cache30m, cache12h, _ := openai.CacheWriteUsage(value)
 	imageOutputTokens := value.Get("output_tokens_details.image_tokens").Int()
 	if imageOutputTokens == 0 {
 		imageOutputTokens = value.Get("completion_tokens_details.image_tokens").Int()
@@ -1771,48 +1765,6 @@ func openAICacheReadTokensFromUsage(value gjson.Result) int {
 		value.Get("cached_tokens"),
 		value.Get("prompt_cache_hit_tokens"), // DeepSeek：prompt_tokens = hit + miss
 	)
-}
-
-func openAICacheCreationTokensFromUsage(value gjson.Result) int {
-	for _, nested := range []gjson.Result{
-		value.Get("input_tokens_details.cache_write_tokens"),
-		value.Get("prompt_tokens_details.cache_write_tokens"),
-		value.Get("input_tokens_details.cache_creation_tokens"),
-		value.Get("prompt_tokens_details.cache_creation_tokens"),
-	} {
-		if nested.Exists() {
-			return max(int(nested.Int()), 0)
-		}
-	}
-
-	return firstPositiveGJSONInt(
-		value.Get("cache_write_tokens"),
-		value.Get("cache_creation_input_tokens"),
-		value.Get("cache_write_input_tokens"),
-		value.Get("cache_creation_tokens"),
-	)
-}
-
-// Only reported usage determines the lifetime. Missing, partial or inconsistent
-// details keep the aggregate's legacy price; request TTLs cannot prove writes.
-func openAICacheCreationTTLTokensFromUsage(value gjson.Result, aggregate int) (int, int) {
-	for _, path := range []string{"input_tokens_details", "prompt_tokens_details"} {
-		details := value.Get(path + ".cache_write_tokens_details")
-		if !details.Exists() {
-			continue
-		}
-		short, long := details.Get("ttl_30m_tokens"), details.Get("ttl_12h_tokens")
-		if short.Type != gjson.Number || long.Type != gjson.Number {
-			return 0, 0
-		}
-		a, b := short.Int(), long.Int()
-		if a < 0 || b < 0 || float64(a) != short.Float() || float64(b) != long.Float() ||
-			a > int64(aggregate) || b != int64(aggregate)-a {
-			return 0, 0
-		}
-		return int(a), int(b)
-	}
-	return 0, 0
 }
 
 func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {

@@ -2150,6 +2150,16 @@ func TestComputeTokenBreakdown_ExplicitZeroImagePrice_NoFallback(t *testing.T) {
 	require.InDelta(t, 150*15e-6, bd.OutputCost, 1e-12)
 }
 
+func TestChannelZeroImageInputPriceBillsOnlyText(t *testing.T) {
+	svc := newTestBillingService()
+	card := &ChannelModelPricing{InputPrice: testPtrFloat64(0.002), ImageInputPrice: testPtrFloat64(0)}
+	pricing, err := svc.GetModelPricingWithChannel("gpt-5.1", card)
+	require.NoError(t, err)
+	cost := svc.computeTokenBreakdown(pricing, UsageTokens{InputTokens: 100, ImageInputTokens: 70}, 1, "", false)
+	require.Zero(t, cost.ImageInputCost)
+	require.InDelta(t, 0.06, cost.ActualCost, 1e-12)
+}
+
 func TestComputeTokenBreakdown_NonExplicitZeroImagePrice_FallsBackToOutput(t *testing.T) {
 	svc := newTestBillingService()
 

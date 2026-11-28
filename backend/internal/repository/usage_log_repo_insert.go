@@ -157,20 +157,36 @@ func (r *usageLogRepository) Create(ctx context.Context, log *service.UsageLog) 
 		return false, nil
 	}
 
+	executor := r.sql
+	var inserted bool
+	var err error
+	log.RequestID = strings.TrimSpace(log.RequestID)
 	if tx := dbent.TxFromContext(ctx); tx != nil {
-		return r.createSingle(ctx, tx.Client(), log)
+		executor = tx.Client()
+		inserted, err = r.createSingle(ctx, executor, log)
+	} else if log.RequestID == "" {
+		inserted, err = r.createSingle(ctx, executor, log)
+	} else {
+		inserted, err = r.createBatched(ctx, log)
 	}
-	requestID := strings.TrimSpace(log.RequestID)
-	if requestID == "" {
-		return r.createSingle(ctx, r.sql, log)
+	if err == nil && !inserted && log.BillingSettled && log.ActualCost > 0 {
+		// A previous billing failure can already own this request's usage row.
+		// Keep its identity and timestamp, but publish the confirmed settlement.
+		prepared := prepareUsageLogInsert(log)
+		_, err = executor.ExecContext(ctx, settleUsageLogSQL, prepared.args...)
 	}
-	log.RequestID = requestID
-	return r.createBatched(ctx, log)
+	return inserted, err
 }
 
 func (r *usageLogRepository) CreateBestEffort(ctx context.Context, log *service.UsageLog) error {
 	if log == nil {
 		return nil
+	}
+	if log.BillingSettled && log.ActualCost > 0 {
+		// The no-result batcher caches duplicates before checking their charge.
+		// The result-returning batcher can distinguish a new receipt from a retry.
+		_, err := r.Create(ctx, log)
+		return err
 	}
 
 	if tx := dbent.TxFromContext(ctx); tx != nil {
@@ -318,6 +334,22 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 	log.RateMultiplier = prepared.rateMultiplier
 	return true, nil
 }
+
+// Use the successful event's usage, price card and attribution together.
+// Ordinary duplicates and late zero-charge records cannot overwrite a payment.
+var settleUsageLogSQL = func() string {
+	columns := strings.TrimPrefix(usageLogSelectColumns, "id, ")
+	var assignments, values []string
+	for i, column := range strings.Split(columns, ", ") {
+		values = append(values, fmt.Sprintf("$%d::%s", i+1, usageLogInsertArgTypes[i]))
+		switch column {
+		case "request_id", "api_key_id", "created_at":
+			continue
+		}
+		assignments = append(assignments, column+"=paid."+column)
+	}
+	return "UPDATE usage_logs AS receipt SET " + strings.Join(assignments, ", ") + " FROM (VALUES (" + strings.Join(values, ", ") + ")) AS paid(" + columns + ") WHERE receipt.api_key_id=paid.api_key_id AND receipt.request_id=paid.request_id AND receipt.actual_cost=0"
+}()
 
 func (r *usageLogRepository) createBatched(ctx context.Context, log *service.UsageLog) (bool, error) {
 	if r.db == nil {

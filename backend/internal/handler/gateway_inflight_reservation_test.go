@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -201,4 +202,44 @@ func TestWebSearch_RejectsWhenInflightExceedsBalance(t *testing.T) {
 	require.NotEqual(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), "balance")
 	require.Equal(t, 1, cache.count(), "rejected request must not leave a reservation behind")
+}
+
+func TestAlphaSearchUsesPerCallPriceForAdmission(t *testing.T) {
+	const groupID int64 = 7
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/alpha/search" {
+			t.Errorf("unexpected search route %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"output":"local search result"}`)
+	}))
+	defer upstream.Close()
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60, FailClosedOnUnpriced: true}
+	cache := newHandlerInflightCache(1.5)
+	billing := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billing.Stop)
+	account := service.Account{ID: 1, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1, Credentials: map[string]any{"api_key": "sk-test", "base_url": upstream.URL}}
+	repo := &openAIWSUsageHandlerAccountRepoStub{account: account}
+	h := newOpenAIHandlerForPreviousResponseIDValidation(t, nil)
+	h.cfg, h.billingCacheService = cfg, billing
+	h.gatewayService = service.NewOpenAIGatewayService(repo, nil, &openAIWSUsageBillingRepo{}, nil, nil, nil, nil, cfg, nil, nil, service.NewBillingService(cfg, nil), nil, billing, &compositeWSHTTPUpstream{}, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+	for _, price := range []float64{0, 1} {
+		c, rec := newOpenAICompatibleStreamValidationContext("/v1/alpha/search", `{"model":"search-model","input":"hello"}`, false)
+		key, _ := middleware2.GetAPIKeyFromContext(c)
+		key.Group.Platform, key.Group.WebSearchPricePerCall, key.Group.RateMultiplier = service.PlatformOpenAI, &price, 1
+		held, err := billing.ReserveInflight(t.Context(), key.User, key.Group, nil, 1)
+		require.NoError(t, err)
+		h.AlphaSearch(c)
+		held.HandlerDone()
+		require.Zero(t, cache.count())
+		if price == 0 {
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), "local search result")
+		} else {
+			require.NotEqual(t, http.StatusOK, rec.Code)
+			require.Contains(t, rec.Body.String(), "balance")
+		}
+	}
 }
