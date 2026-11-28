@@ -224,6 +224,62 @@ func TestOpenAIInterruptedResponsesBilling(t *testing.T) {
 	}
 }
 
+func TestOpenAICompletedResponsesBilling(t *testing.T) {
+	const output = `data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"completed answer"}` + "\n\n"
+	const usage = `{"input_tokens":10,"output_tokens":5}`
+	const completed = `"id":"resp_pc","object":"response","status":"completed","output":[]`
+	for _, tc := range []struct {
+		name      string
+		earlier   string
+		terminal  string
+		wantUsage bool
+	}{
+		{name: "reported", terminal: `"response":{` + completed + `,"usage":` + usage + `}`, wantUsage: true},
+		{name: "reported earlier", earlier: `data: {"type":"response.in_progress","response":{"usage":` + usage + `}}` + "\n\n", terminal: `"response":{` + completed + `}`, wantUsage: true},
+		{name: "empty outer usage", terminal: `"usage":{},"response":{` + completed + `,"usage":` + usage + `}`, wantUsage: true},
+		{name: "absent", terminal: `"response":{` + completed + `}`},
+	} {
+		for _, passthrough := range []bool{false, true} {
+			for _, stream := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/passthrough=%t/stream=%t", tc.name, passthrough, stream), func(t *testing.T) {
+					accounts := preContentAccounts(2)
+					for i := range accounts {
+						accounts[i].Type = service.AccountTypeOAuth
+						accounts[i].Credentials = map[string]any{"access_token": "fixture-token"}
+						accounts[i].Extra = map[string]any{"openai_passthrough": passthrough}
+					}
+					logs := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 2)}
+					billing := &compatStreamUsageBillingRepo{}
+					events := preContentHandlerCreated + tc.earlier + output + `data: {"type":"response.completed",` + tc.terminal + `}` + "\n\n"
+					rec, upstream := serveMessagesScenario(t, preContentFailoverScenario{
+						accounts: accounts, endpoint: "/v1/responses", usageLogs: logs, billing: billing,
+						requestBody: fmt.Sprintf(`{"model":"gpt-5.4","input":"hello","stream":%t}`, stream),
+						respond: func(int) (*http.Response, error) {
+							return preContentSSEResponse(io.NopCloser(strings.NewReader(events))), nil
+						},
+					})
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					require.Contains(t, rec.Body.String(), "completed answer")
+					require.Equal(t, 1, upstream.calls())
+					require.Len(t, logs.created, 1)
+					require.Len(t, billing.commands, 1)
+					row := <-logs.created
+					if tc.wantUsage {
+						require.Equal(t, 10, row.InputTokens)
+						require.Equal(t, 5, row.OutputTokens)
+						require.Positive(t, row.ActualCost)
+						require.Positive(t, billing.commands[0].BalanceCost)
+					} else {
+						require.Zero(t, row.TotalTokens())
+						require.Zero(t, row.ActualCost)
+						require.Zero(t, billing.commands[0].BalanceCost)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestHTTPContinuationSkipsChatOnlyAccount(t *testing.T) {
 	for _, count := range []int{1, 2} {
 		t.Run(fmt.Sprintf("accounts=%d", count), func(t *testing.T) {

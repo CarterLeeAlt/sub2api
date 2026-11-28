@@ -2197,6 +2197,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 
 	usage := &OpenAIUsage{}
+	var usageReport openAIUsageReport
 	imageCounter := newOpenAIImageOutputCounter()
 	var firstTokenMs *int
 	responseID := ""
@@ -2400,7 +2401,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
 				// 再打 cyber 标记，否则 mark 记到的是解析前的 0，导致流式 cyber 按 0 token 计费
 				// 而漏记真实用量。对齐 WS V2 / Chat 流式路径（均先解析 usage 再 Mark）。
-				s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+				usageReport.observe(s.parseSSEUsageBytesWithType(dataBytes, eventType, usage))
 				if hit, code, msg := detectOpenAICyberPolicy(dataBytes); hit {
 					cyberHit = true
 					MarkOpsCyberPolicy(c, CyberPolicyMark{
@@ -2506,7 +2507,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 			}
-			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+			usageReport.observe(s.parseSSEUsageBytesWithType(dataBytes, eventType, usage))
 		}
 		if line == "" {
 			pendingSSEEventType = ""
@@ -2631,7 +2632,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	if (sawDone || sawTerminalEvent) && !sawFailedEvent {
 		s.clearOpenAIProxyStreamDisconnect(account)
 	}
-	logOpenAISuccessMissingUsage(ctx, c, account, resp, usage, terminalEventType, clientDisconnected)
+	logOpenAISuccessMissingUsage(ctx, c, account, resp, usage, terminalEventType, clientDisconnected, zap.String("usage_report", usageReport.String()))
 
 	return resultWithUsage(), nil
 }
@@ -2666,19 +2667,14 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel)
 	}
 
-	usage := &OpenAIUsage{}
-	usageParsed := false
-	if len(body) > 0 {
-		if parsedUsage, ok := extractOpenAIUsageFromJSONBytes(body); ok {
-			*usage = parsedUsage
-			usageParsed = true
-		}
-	}
-	if !usageParsed {
+	usageValue, usageObject, usageReport := selectOpenAIUsageFromJSONBytes(body)
+	usage := &usageValue
+	if !usageObject.Exists() {
 		// 兜底：尝试从 SSE 文本中解析 usage
-		usage = s.parseSSEUsageFromBody(string(body))
+		var sseReport openAIUsageReport
+		usage, sseReport = s.parseSSEUsageFromBody(string(body))
+		usageReport.observe(sseReport)
 	}
-	logOpenAISuccessMissingUsage(ctx, c, account, resp, usage, "json", false)
 
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 
@@ -2702,6 +2698,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
 		c.Data(resp.StatusCode, contentType, body)
 	}
+	logOpenAISuccessMissingUsage(ctx, c, account, resp, usage, "json", false, zap.String("usage_report", usageReport.String()))
 	return &openaiNonStreamingResultPassthrough{
 		OpenAIUsage:      usage,
 		usage:            usage,
@@ -2733,7 +2730,7 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 	}
 	finalResponse, ok := extractOpenAINonStreamingFinalResponse(bodyText, terminalType, terminalPayload)
 
-	usage := s.parseSSEUsageFromBody(bodyText)
+	usage, usageReport := s.parseSSEUsageFromBody(bodyText)
 	if ok {
 		// When the terminal event has an empty output array, reconstruct
 		// output from accumulated delta events so the client gets full content.
@@ -2770,7 +2767,7 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 	}
 
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
-	logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, usage, terminalType, false)
+	logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, usage, terminalType, false, zap.String("usage_report", usageReport.String()))
 
 	contentType := "application/json; charset=utf-8"
 	if !ok {
