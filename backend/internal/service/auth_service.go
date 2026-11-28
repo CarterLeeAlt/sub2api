@@ -18,8 +18,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 
 	"github.com/golang-jwt/jwt/v5"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -423,10 +425,9 @@ func (s *AuthService) VerifyCaptcha(ctx context.Context, proof CaptchaProof, rem
 		return nil
 	}
 
-	providerConfig, err := s.settingService.GetCaptchaProviderConfig(ctx)
+	providerConfig, err := s.readCaptchaProviderConfig(ctx)
 	if err != nil {
-		logger.LegacyPrintf("service.auth", "%s", "[Auth] Failed to read captcha provider settings")
-		return ErrServiceUnavailable
+		return err
 	}
 	turnstileEnabled := providerConfig.TurnstileEnabled
 	tencentEnabled := providerConfig.Tencent.Enabled
@@ -458,6 +459,24 @@ func (s *AuthService) VerifyCaptcha(ctx context.Context, proof CaptchaProof, rem
 	return nil
 }
 
+func (s *AuthService) readCaptchaProviderConfig(ctx context.Context) (CaptchaProviderConfig, error) {
+	providerConfig, err := s.settingService.GetCaptchaProviderConfig(ctx)
+	if err == nil {
+		return providerConfig, nil
+	}
+	// A canceled request can make the database driver return its own error.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return CaptchaProviderConfig{}, context.Canceled
+	}
+	logger.FromContext(ctx).Error("failed to read captcha provider settings",
+		zap.String("component", "service.auth"),
+		zap.String("error", logredact.RedactText(err.Error(), SettingKeyTurnstileSecretKey,
+			SettingKeyTencentCaptchaAppSecretKey, SettingKeyTencentCaptchaCloudSecretID,
+			SettingKeyTencentCaptchaCloudSecretKey, SettingKeyAliyunCaptchaAccessKeyID, SettingKeyAliyunCaptchaAccessKeySecret)),
+	)
+	return CaptchaProviderConfig{}, ErrServiceUnavailable
+}
+
 // captchaProvidersConflict 同一时间仅允许启用一家人机验证服务商
 func captchaProvidersConflict(enabled ...bool) bool {
 	count := 0
@@ -476,10 +495,9 @@ func (s *AuthService) VerifyActionCaptchaIfEnabled(ctx context.Context, proof Ca
 		return ErrServiceUnavailable
 	}
 
-	providerConfig, err := s.settingService.GetCaptchaProviderConfig(ctx)
+	providerConfig, err := s.readCaptchaProviderConfig(ctx)
 	if err != nil {
-		logger.LegacyPrintf("service.auth", "%s", "[Auth] Failed to read captcha provider settings")
-		return ErrServiceUnavailable
+		return err
 	}
 	tencentEnabled := providerConfig.Tencent.Enabled
 	aliyunEnabled := providerConfig.Aliyun.Enabled

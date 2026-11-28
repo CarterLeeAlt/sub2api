@@ -85,7 +85,7 @@ func (h *PasskeyHandler) BeginLogin(c *gin.Context) {
 		TencentTicket:  req.TencentCaptchaTicket,
 		TencentRandstr: req.TencentCaptchaRandstr,
 	}, ip.GetClientIP(c)); err != nil {
-		response.ErrorFrom(c, err)
+		writeAuthCaptchaError(c, err)
 		return
 	}
 	assertion, token, err := h.passkeys.BeginLogin(c.Request.Context())

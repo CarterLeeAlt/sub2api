@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -88,6 +89,13 @@ func captchaProof(turnstileToken, tencentTicket, tencentRandstr string) service.
 		TencentTicket:  tencentTicket,
 		TencentRandstr: tencentRandstr,
 	}
+}
+
+func writeAuthCaptchaError(c *gin.Context, err error) {
+	if errors.Is(err, context.Canceled) && failoverClientGone(c) {
+		return
+	}
+	response.ErrorFrom(c, err)
 }
 
 // AuthResponse 认证响应格式（匹配前端期望）
@@ -186,7 +194,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	// 验证当前启用的验证码（邮箱验证码注册场景避免重复校验一次性票据）
 	proof := captchaProof(req.TurnstileToken, req.TencentCaptchaTicket, req.TencentCaptchaRandstr)
 	if err := h.authService.VerifyCaptchaForRegister(c.Request.Context(), proof, ip.GetClientIP(c), req.VerifyCode); err != nil {
-		response.ErrorFrom(c, err)
+		writeAuthCaptchaError(c, err)
 		return
 	}
 
@@ -218,7 +226,7 @@ func (h *AuthHandler) SendVerifyCode(c *gin.Context) {
 
 	proof := captchaProof(req.TurnstileToken, req.TencentCaptchaTicket, req.TencentCaptchaRandstr)
 	if err := h.authService.VerifyCaptcha(c.Request.Context(), proof, ip.GetClientIP(c)); err != nil {
-		response.ErrorFrom(c, err)
+		writeAuthCaptchaError(c, err)
 		return
 	}
 
@@ -245,7 +253,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	proof := captchaProof(req.TurnstileToken, req.TencentCaptchaTicket, req.TencentCaptchaRandstr)
 	if err := h.authService.VerifyCaptcha(c.Request.Context(), proof, ip.GetClientIP(c)); err != nil {
-		response.ErrorFrom(c, err)
+		writeAuthCaptchaError(c, err)
 		return
 	}
 
@@ -610,7 +618,7 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 
 	proof := captchaProof(req.TurnstileToken, req.TencentCaptchaTicket, req.TencentCaptchaRandstr)
 	if err := h.authService.VerifyCaptcha(c.Request.Context(), proof, ip.GetClientIP(c)); err != nil {
-		response.ErrorFrom(c, err)
+		writeAuthCaptchaError(c, err)
 		return
 	}
 
