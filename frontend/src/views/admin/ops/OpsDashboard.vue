@@ -129,6 +129,8 @@
         <OpsRequestDetailsModal
           v-model="showRequestDetails"
           :time-range="timeRange"
+          :custom-start-time="customStartTime"
+          :custom-end-time="customEndTime"
           :preset="requestDetailsPreset"
           :platform="platform"
           :group-id="groupId"
@@ -157,6 +159,7 @@ import {
   type OpsMetricThresholds
 } from '@/api/admin/ops'
 import { useAdminSettingsStore, useAppStore } from '@/stores'
+import { buildOpsTimeParams, DEFAULT_OPS_TIME_RANGE } from './utils/opsTimeRange'
 import OpsDashboardHeader from './components/OpsDashboardHeader.vue'
 import OpsDashboardSkeleton from './components/OpsDashboardSkeleton.vue'
 import OpsConcurrencyCard from './components/OpsConcurrencyCard.vue'
@@ -193,7 +196,7 @@ const hasLoadedOnce = ref(false)
 const errorMessage = ref('')
 const lastUpdated = ref<Date | null>(new Date())
 
-const timeRange = ref<TimeRange>('1h')
+const timeRange = ref<TimeRange>(DEFAULT_OPS_TIME_RANGE)
 const platform = ref<string>('')
 const groupId = ref<number | null>(null)
 const queryMode = ref<QueryMode>('auto')
@@ -205,6 +208,8 @@ const switchTrendWindowMs = switchTrendWindowHours * 60 * 60 * 1000
 
 const QUERY_KEYS = {
   timeRange: 'tr',
+  startTime: 'start_time',
+  endTime: 'end_time',
   platform: 'platform',
   groupId: 'group_id',
   queryMode: 'mode',
@@ -278,8 +283,16 @@ const readQueryNumber = (key: string): number | null => {
 
 const applyRouteQueryToState = () => {
   const nextTimeRange = readQueryString(QUERY_KEYS.timeRange)
-  if (nextTimeRange && allowedTimeRanges.has(nextTimeRange as TimeRange)) {
-    timeRange.value = nextTimeRange as TimeRange
+  timeRange.value = allowedTimeRanges.has(nextTimeRange as TimeRange) ? nextTimeRange as TimeRange : DEFAULT_OPS_TIME_RANGE
+  if (timeRange.value === 'custom') {
+    const start = Date.parse(readQueryString(QUERY_KEYS.startTime))
+    const end = Date.parse(readQueryString(QUERY_KEYS.endTime))
+    if (start < end && end - start <= 30 * 24 * 60 * 60 * 1000) {
+      customStartTime.value = new Date(start).toISOString()
+      customEndTime.value = new Date(end).toISOString()
+    } else {
+      timeRange.value = DEFAULT_OPS_TIME_RANGE
+    }
   }
 
   platform.value = readQueryString(QUERY_KEYS.platform) || ''
@@ -318,10 +331,14 @@ const buildQueryFromState = () => {
   const next: Record<string, any> = { ...route.query }
 
   Object.values(QUERY_KEYS).forEach((k) => {
-    delete next[k]
+    if (k !== QUERY_KEYS.fullscreen) delete next[k]
   })
 
-  if (timeRange.value !== '1h') next[QUERY_KEYS.timeRange] = timeRange.value
+  if (timeRange.value !== DEFAULT_OPS_TIME_RANGE) next[QUERY_KEYS.timeRange] = timeRange.value
+  if (timeRange.value === 'custom') {
+    next[QUERY_KEYS.startTime] = customStartTime.value
+    next[QUERY_KEYS.endTime] = customEndTime.value
+  }
   if (platform.value) next[QUERY_KEYS.platform] = platform.value
   if (typeof groupId.value === 'number' && groupId.value > 0) next[QUERY_KEYS.groupId] = String(groupId.value)
   if (queryMode.value !== 'auto') next[QUERY_KEYS.queryMode] = queryMode.value
@@ -547,21 +564,10 @@ function handleBackToList() {
 
 function buildApiParams() {
   const params: any = {
+    ...buildOpsTimeParams(timeRange.value, customStartTime.value, customEndTime.value),
     platform: platform.value || undefined,
     group_id: groupId.value ?? undefined,
     mode: queryMode.value
-  }
-
-  if (timeRange.value === 'custom') {
-    if (customStartTime.value && customEndTime.value) {
-      params.start_time = customStartTime.value
-      params.end_time = customEndTime.value
-    } else {
-      // Safety fallback: avoid sending time_range=custom (backend may not support it)
-      params.time_range = '1h'
-    }
-  } else {
-    params.time_range = timeRange.value
   }
 
   return params
@@ -770,7 +776,7 @@ async function fetchData() {
 }
 
 watch(
-  () => [timeRange.value, platform.value, groupId.value, queryMode.value] as const,
+  () => [timeRange.value, customStartTime.value, customEndTime.value, platform.value, groupId.value, queryMode.value] as const,
   () => {
     if (isApplyingRouteQuery.value) return
     if (opsEnabled.value) {
@@ -785,21 +791,10 @@ watch(
   () => {
     if (isSyncingRouteQuery.value) return
 
-    const prevTimeRange = timeRange.value
-    const prevPlatform = platform.value
-    const prevGroupId = groupId.value
-
     isApplyingRouteQuery.value = true
     applyRouteQueryToState()
     isApplyingRouteQuery.value = false
 
-    const changed =
-      prevTimeRange !== timeRange.value || prevPlatform !== platform.value || prevGroupId !== groupId.value
-    if (changed) {
-      if (opsEnabled.value) {
-        fetchData()
-      }
-    }
   }
 )
 

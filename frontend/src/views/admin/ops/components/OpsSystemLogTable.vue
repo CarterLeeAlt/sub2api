@@ -8,6 +8,7 @@ import Pagination from '@/components/common/Pagination.vue'
 import Select from '@/components/common/Select.vue'
 import { useAppStore } from '@/stores'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import { DEFAULT_OPS_TIME_RANGE } from '../utils/opsTimeRange'
 
 const appStore = useAppStore()
 const { t } = useI18n()
@@ -53,7 +54,7 @@ const runtimeConfig = reactive<OpsRuntimeLogConfig>({
 })
 
 const initialFilters = () => ({
-  time_range: '1h' as NonNullable<OpsSystemLogQuery['time_range']>,
+  time_range: DEFAULT_OPS_TIME_RANGE as NonNullable<OpsSystemLogQuery['time_range']>,
   start_time: '',
   end_time: '',
   host: '',
@@ -86,15 +87,9 @@ const stacktraceLevelOptions = [
   { value: 'fatal', label: 'fatal' }
 ]
 
-const timeRangeOptions = [
-  { value: '5m', label: '5m' },
-  { value: '30m', label: '30m' },
-  { value: '1h', label: '1h' },
-  { value: '6h', label: '6h' },
-  { value: '24h', label: '24h' },
-  { value: '7d', label: '7d' },
-  { value: '30d', label: '30d' }
-]
+const timeRangeOptions = computed(() => ['5m', '30m', '1h', '6h', '24h', '7d', '30d'].map(value => ({
+  value, label: t(`admin.ops.timeRange.${value}`)
+})))
 
 const filterLevelOptions = computed(() => [
   { value: '', label: t('admin.ops.systemLogs.all') },

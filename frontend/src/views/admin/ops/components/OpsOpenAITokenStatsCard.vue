@@ -29,7 +29,7 @@ const loading = ref(false)
 const errorMessage = ref('')
 const response = ref<OpsOpenAITokenStatsResponse | null>(null)
 
-const timeRange = ref<OpsOpenAITokenStatsTimeRange>('30d')
+const timeRange = ref<OpsOpenAITokenStatsTimeRange>('1d')
 const viewMode = ref<ViewMode>('topn')
 const topN = ref<number>(20)
 const page = ref<number>(1)
@@ -46,7 +46,7 @@ const totalPages = computed(() => {
 const timeRangeOptions = computed(() => [
   { value: '30m', label: t('admin.ops.timeRange.30m') },
   { value: '1h', label: t('admin.ops.timeRange.1h') },
-  { value: '1d', label: t('admin.ops.timeRange.1d') },
+  { value: '1d', label: t('admin.ops.timeRange.24h') },
   { value: '15d', label: t('admin.ops.timeRange.15d') },
   { value: '30d', label: t('admin.ops.timeRange.30d') }
 ])

@@ -9,6 +9,7 @@ import Icon from '@/components/icons/Icon.vue'
 import { opsAPI, type AlertEventsQuery } from '@/api/admin/ops'
 import type { AlertEvent } from '../types'
 import { formatDateTime } from '../utils/opsFormatters'
+import { DEFAULT_OPS_TIME_RANGE } from '../utils/opsTimeRange'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -32,8 +33,9 @@ const detailLoading = ref(false)
 const detailActionLoading = ref(false)
 const historyLoading = ref(false)
 const history = ref<AlertEvent[]>([])
-const historyRange = ref('7d')
+const historyRange = ref<string>(DEFAULT_OPS_TIME_RANGE)
 const historyRangeOptions = computed(() => [
+  { value: '24h', label: t('admin.ops.timeRange.24h') },
   { value: '7d', label: t('admin.ops.timeRange.7d') },
   { value: '30d', label: t('admin.ops.timeRange.30d') }
 ])
@@ -46,7 +48,7 @@ const silenceDurationOptions = computed(() => [
 ])
 
 // Filters
-const timeRange = ref('24h')
+const timeRange = ref<string>(DEFAULT_OPS_TIME_RANGE)
 const timeRangeOptions = computed(() => [
   { value: '5m', label: t('admin.ops.timeRange.5m') },
   { value: '30m', label: t('admin.ops.timeRange.30m') },
@@ -376,7 +378,7 @@ const empty = computed(() => events.value.length === 0 && !loading.value)
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
-        <Select :model-value="timeRange" :options="timeRangeOptions" class="w-[120px]" @change="timeRange = String($event || '24h')" />
+        <Select :model-value="timeRange" :options="timeRangeOptions" class="w-[120px]" @change="timeRange = String($event || DEFAULT_OPS_TIME_RANGE)" />
         <Select :model-value="severity" :options="severityOptions" class="w-[88px]" @change="severity = String($event || '')" />
         <Select :model-value="status" :options="statusOptions" class="w-[110px]" @change="status = String($event || '')" />
         <Select :model-value="emailSent" :options="emailSentOptions" class="w-[110px]" @change="emailSent = String($event || '')" />
@@ -660,7 +662,7 @@ const empty = computed(() => events.value.length === 0 && !loading.value)
               <div class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.ops.alertEvents.detail.historyTitle') }}</div>
               <div class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.alertEvents.detail.historyHint') }}</div>
             </div>
-            <Select :model-value="historyRange" :options="historyRangeOptions" class="w-[140px]" @change="historyRange = String($event || '7d')" />
+            <Select :model-value="historyRange" :options="historyRangeOptions" class="w-[140px]" @change="historyRange = String($event || DEFAULT_OPS_TIME_RANGE)" />
           </div>
 
           <div v-if="historyLoading" class="py-6 text-center text-xs text-gray-500 dark:text-gray-400">
@@ -701,4 +703,3 @@ const empty = computed(() => events.value.length === 0 && !loading.value)
     </BaseDialog>
   </div>
 </template>
-

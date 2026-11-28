@@ -1,4 +1,6 @@
-export function buildOpsErrorTimeParams(
+export const DEFAULT_OPS_TIME_RANGE = '24h'
+
+export function buildOpsTimeParams(
   timeRange: string,
   customStartTime?: string | null,
   customEndTime?: string | null
@@ -7,5 +9,5 @@ export function buildOpsErrorTimeParams(
     return { start_time: customStartTime, end_time: customEndTime }
   }
 
-  return { time_range: timeRange === 'custom' ? '1h' : timeRange }
+  return { time_range: timeRange === 'custom' ? DEFAULT_OPS_TIME_RANGE : timeRange }
 }

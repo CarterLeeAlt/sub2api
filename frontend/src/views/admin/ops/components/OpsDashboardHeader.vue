@@ -11,7 +11,8 @@ import { opsAPI, type OpsDashboardOverview, type OpsMetricThresholds, type OpsRe
 import type { OpsRequestDetailsPreset } from './OpsRequestDetailsModal.vue'
 import { useAdminSettingsStore } from '@/stores'
 import { formatDateTimeLocalInput, formatNumber } from '@/utils/format'
-import { formatMemorySizeMB } from '../utils/opsFormatters'
+import { formatMemorySizeMB, parseTimeRangeMinutes } from '../utils/opsFormatters'
+import { DEFAULT_OPS_TIME_RANGE } from '../utils/opsTimeRange'
 
 type RealtimeWindow = '1min' | '5min' | '30min' | '1h'
 
@@ -173,13 +174,14 @@ function handleGroupChange(val: string | number | boolean | null) {
 }
 
 function handleTimeRangeChange(val: string | number | boolean | null) {
-  const newValue = String(val || '1h')
+  const newValue = String(val || DEFAULT_OPS_TIME_RANGE)
   if (newValue === 'custom') {
-    // 初始化为最近1小时
-    const now = new Date()
-    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000)
-    customStartTimeInput.value = formatDateTimeLocalInput(oneHourAgo.getTime() / 1000)
-    customEndTimeInput.value = formatDateTimeLocalInput(now.getTime() / 1000)
+    const end = props.timeRange === 'custom' && props.customEndTime ? Date.parse(props.customEndTime) : Date.now()
+    const start = props.timeRange === 'custom' && props.customStartTime
+      ? Date.parse(props.customStartTime)
+      : end - parseTimeRangeMinutes(props.timeRange) * 60000
+    customStartTimeInput.value = formatDateTimeLocalInput(start / 1000)
+    customEndTimeInput.value = formatDateTimeLocalInput(end / 1000)
     showCustomTimeRangeDialog.value = true
   } else {
     emit('update:timeRange', newValue)
